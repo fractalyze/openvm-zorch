@@ -1,0 +1,52 @@
+name: CI
+
+permissions: read-all
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+# Cancel in-progress runs for a PR's branch, but never cancel pushes to main so
+# every merge gets a full run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Always a CPU leg, plus a GPU leg only when the HAS_GPU_RUNNER repo variable
+  # is "true" (a job-level `if` can't read `matrix`, so the leg is added here).
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        # Strict `cuda` (no CPU fallback) on the GPU leg so a green run means
+        # it really ran on GPU.
+        run: |
+          cpu='{"backend":"cpu","runs_on":["self-hosted","cpu"],"jax_platforms":"cpu"}'
+          gpu='{"backend":"gpu","runs_on":["self-hosted","gpu"],"jax_platforms":"cuda"}'
+          include="${cpu}"
+          if [ "${{ vars.HAS_GPU_RUNNER }}" = "true" ]; then
+            include="${cpu},${gpu}"
+          fi
+          echo "matrix={\"include\":[${include}]}" >> "$GITHUB_OUTPUT"
+
+  build-and-test:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bazel test
+        run: bazel test --test_env=JAX_PLATFORMS=${{ matrix.jax_platforms }} -- //...
+
+      - name: Upload bazel test logs
+        if: ${{ failure() }}
+        uses: fractalyze/.github/.github/actions/upload-bazel-testlogs@main
+        with:
+          name: bazel-test-logs-${{ matrix.backend }}

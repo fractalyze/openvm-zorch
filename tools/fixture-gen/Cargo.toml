@@ -1,0 +1,15 @@
+[package]
+name = "fixture-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Golden-fixture generator for openvm-zorch's byte-match tests, pinned to the
+# reference prover tag. Reproducible: same pin, same fixtures.
+[dependencies]
+openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2" }
+p3-baby-bear = "=0.4.1"
+serde_json = "1"
+
+[profile.release]
+debug = false

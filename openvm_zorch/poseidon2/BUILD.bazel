@@ -1,0 +1,35 @@
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@openvm_zorch_pip//:requirements.bzl", "requirement")
+
+# OpenVM's concrete Poseidon2 instance over zorch's agnostic engine.
+py_library(
+    name = "babybear16",
+    srcs = [
+        "__init__.py",
+        "babybear16.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@zorch//zorch/hash/poseidon2",
+        requirement("jax"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
+
+py_test(
+    name = "babybear16_test",
+    size = "medium",
+    srcs = ["babybear16_test.py"],
+    data = ["//openvm_zorch/commit:testdata"],
+    deps = [
+        ":babybear16",
+        "@zorch//zorch/hash:compression",
+        "@zorch//zorch/hash:sponge",
+        "@zorch//zorch/hash/poseidon2",
+        requirement("absl_py"),
+        requirement("jax"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
