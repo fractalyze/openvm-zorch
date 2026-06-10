@@ -20,7 +20,7 @@ only the SWIRL-specific surface here and pushing every generic block upstream.
 | Stage | What it proves | Module | Status |
 |-------|----------------|--------|--------|
 | 1. Trace commit | Stacked PCS: stack traces → RS-encode columns → query-strided Merkle root | `openvm_zorch/commit` | byte-matches reference |
-| 2. LogUp-GKR | Interaction fractional sumcheck | — | not started |
+| 2. LogUp-GKR | Interaction fractional sumcheck | `openvm_zorch/logup_gkr` | byte-matches reference |
 | 3. ZeroCheck | Batched constraints, univariate skip + multivariate sumcheck | — | not started |
 | 4. Stacked reduction | Column openings → stacked matrix openings | — | not started |
 | 5. WHIR opening | k-ary fold + OOD + query phase + grinding | — | not started |
@@ -36,7 +36,10 @@ tag, so output is reproducible):
 
 ```sh
 cd tools/fixture-gen
-cargo run --release -- --out ../../openvm_zorch/commit/testdata/stacked_commit
+cargo run --release -- \
+  --out ../../openvm_zorch/commit/testdata/stacked_commit \
+  --transcript-out ../../openvm_zorch/testdata/transcript \
+  --gkr-out ../../openvm_zorch/logup_gkr/testdata/logup_gkr
 ```
 
 ## Reference pin

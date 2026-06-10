@@ -6,10 +6,18 @@ publish = false
 
 # Golden-fixture generator for openvm-zorch's byte-match tests, pinned to the
 # reference prover tag. Reproducible: same pin, same fixtures.
+# default-features = false drops `parallel` so the LogUp PoW grind inside the
+# prover is a sequential first-match search — deterministic witnesses, hence
+# bit-identical fixtures across regen runs.
 [dependencies]
-openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2" }
+openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false, features = ["test-utils"] }
+openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false }
 p3-baby-bear = "=0.4.1"
+p3-field = "=0.4.1"
 serde_json = "1"
 
 [profile.release]
 debug = false
+# ReadOnlyTranscript replay (the validation that our reconstructed GKR input
+# evals are byte-exact) checks via debug_assert!.
+debug-assertions = true

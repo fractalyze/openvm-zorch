@@ -1,0 +1,157 @@
+{
+  "airs": [
+    {
+      "air_idx": 0,
+      "height": 64,
+      "interactions": [],
+      "is_required": false,
+      "public_values": [
+        0,
+        1,
+        298454053
+      ],
+      "width": 2
+    },
+    {
+      "air_idx": 1,
+      "height": 4,
+      "interactions": [
+        {
+          "bus": 0,
+          "count_col": 0,
+          "count_neg": false,
+          "message_cols": [
+            1
+          ]
+        }
+      ],
+      "is_required": false,
+      "public_values": [],
+      "width": 2
+    },
+    {
+      "air_idx": 2,
+      "height": 8,
+      "interactions": [
+        {
+          "bus": 0,
+          "count_col": 0,
+          "count_neg": true,
+          "message_cols": [
+            1
+          ]
+        }
+      ],
+      "is_required": false,
+      "public_values": [],
+      "width": 2
+    },
+    {
+      "air_idx": 3,
+      "height": 2,
+      "interactions": [
+        {
+          "bus": 1,
+          "count_col": 0,
+          "count_neg": false,
+          "message_cols": [
+            1,
+            2
+          ]
+        }
+      ],
+      "is_required": false,
+      "public_values": [],
+      "width": 3
+    },
+    {
+      "air_idx": 4,
+      "height": 2,
+      "interactions": [
+        {
+          "bus": 1,
+          "count_col": 0,
+          "count_neg": true,
+          "message_cols": [
+            1,
+            2
+          ]
+        }
+      ],
+      "is_required": false,
+      "public_values": [],
+      "width": 3
+    }
+  ],
+  "common_main_commit": [
+    922623941,
+    1401210313,
+    659524855,
+    1820295867,
+    229979382,
+    284733109,
+    1016781143,
+    355600756
+  ],
+  "idx_after_beta": 39,
+  "interactions_layout": [
+    {
+      "interaction_idx": 0,
+      "log_height": 3,
+      "row_idx": 0,
+      "sorted_trace_idx": 1
+    },
+    {
+      "interaction_idx": 0,
+      "log_height": 2,
+      "row_idx": 8,
+      "sorted_trace_idx": 2
+    },
+    {
+      "interaction_idx": 0,
+      "log_height": 2,
+      "row_idx": 12,
+      "sorted_trace_idx": 3
+    },
+    {
+      "interaction_idx": 0,
+      "log_height": 2,
+      "row_idx": 16,
+      "sorted_trace_idx": 4
+    }
+  ],
+  "logup_pow_witness": 14,
+  "n_global": 4,
+  "n_logup": 3,
+  "n_max": 4,
+  "params": {
+    "k_whir": 3,
+    "l_skip": 2,
+    "log_blowup": 1,
+    "logup_pow_bits": 2,
+    "max_constraint_degree": 3,
+    "n_stack": 8
+  },
+  "prelude_len": 29,
+  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "sorted_airs": [
+    0,
+    2,
+    1,
+    3,
+    4
+  ],
+  "stage2_end": 323,
+  "total_interactions": 20,
+  "transcript_len": 945,
+  "vk_pre_hash": [
+    1701734110,
+    834623575,
+    73131130,
+    1660939691,
+    661687152,
+    1386660794,
+    1226539575,
+    1159370671
+  ]
+}

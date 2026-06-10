@@ -1,0 +1,6 @@
+{
+  "pow_bits": 2,
+  "pow_witness": 1,
+  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "script": "observe 1..=5; sample; observe 100..117; sample x3; observe_ext [7,8,9,10]; sample_ext; observe_commit [0..8]; check_witness(pow_bits, witness); sample"
+}
