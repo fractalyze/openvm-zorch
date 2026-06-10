@@ -20,7 +20,7 @@ threading one Fiat-Shamir transcript (zorch `DuplexTranscript` ↔ Rust
 | 2 | LogUp-GKR | `prover/logup_zerocheck/mod.rs` `prove_zerocheck_and_logup()` (GKR half) | `openvm_zorch/logup_gkr` |
 | 3 | ZeroCheck | same entry, batched-constraint half | `openvm_zorch/logup_zerocheck` |
 | 4 | Stacked reduction | `prover/stacked_reduction.rs` `prove_stacked_opening_reduction()` | `openvm_zorch/stacked_reduction` |
-| 5 | WHIR opening | `prover/whir.rs` `prove_whir_opening()` | — |
+| 5 | WHIR opening | `prover/whir.rs` `prove_whir_opening()` | `openvm_zorch/whir` |
 
 ## Stage 1 in detail (implemented)
 
@@ -161,6 +161,48 @@ grind. The Python test additionally pins the post-stage transcript state by
 feeding Stage 5's first observe (the WHIR μ-PoW witness) and asserting the
 next squeeze.
 
+## Stage 5 in detail (implemented)
+
+`prove_whir_opening`, threading the transcript left by Stage 4: opens the
+μ-batched committed columns as one MLE at `u_cube = (u₀ squarings over the
+skip variables) ‖ u[1..]`. The eval-to-coeff RS encoding makes `q̂(u) =
+Σ_b f̂(b)·mobius_eq(u, b)`, so the weight polynomial starts as the
+Möbius-adjusted equality table of `u_cube` (`K(0) = 1−2uᵢ`, `K(1) = uᵢ`).
+
+1. **μ batching**: a `mu_pow_bits` PoW grind, then `f̂ = Σ_j μ^j·MLE_j`,
+   where `MLE_j` is column `j`'s RS message re-read as MLE coefficients and
+   zeta-transformed over all `m` bits (`mle_coeffs_to_evals` on top of
+   `eval_to_coeff_rs_message`).
+2. **Per WHIR round** (`(l_skip+n_stack−log_final_poly_len)/k_whir` rounds,
+   3 for the fixture): `k_whir` quadratic sumcheck rounds on
+   `Σ_x f̂(x)·ŵ(x)` — evals at `{1,2}` observed, a `folding_pow_bits` grind,
+   then both tables fold at α (plain 2-ary `fold_pair`; the reference never
+   folds the codeword itself, so no k-ary fold primitive exists anywhere).
+3. **Re-encode + OOD**: the folded `ĝ`'s coefficients (`mle_evals_to_coeffs`)
+   are zero-padded and DFT'd into a fresh RS codeword over the next (halved)
+   domain, committed with the same query-strided tree as Stage 1
+   (`rows_per_query = 2^k_whir`, extension elements hashed as 4 base limbs);
+   one out-of-domain point `z₀` is answered — over the powers-of-two point
+   `(z₀, z₀², z₀⁴, …)` the MLE evaluation is just the univariate evaluation
+   at `z₀`. The last round sends `ĝ`'s coefficients in the clear instead
+   (`final_poly`, length `2^((l_skip+n_stack) mod k_whir)`).
+4. **Query phase**: a `query_phase_pow_bits` grind, `num_queries` leaf
+   indices via `sample_bits(log_rs_domain_size − k_whir)` (10/4/2 for the
+   fixture), opened rows + Merkle sibling paths extracted as *hints* (never
+   observed — deterministic from index and root); round 0 opens the Stage-1
+   trees, later rounds the previous round's codeword tree. Then γ folds the
+   constraints into the weight: `ŵ += γ·eq(·, pow(z₀)) + Σ_i
+   γ^{i+2}·eq(·, pow(zᵢ))`, `zᵢ = ω^{index}`.
+
+The fixture (`tools/fixture-gen --whir-out`) walks the log from
+`stage4_end` (739) to its end (945), asserting every observe/sample against
+`proof.whir_proof`. Self-validation rebuilds a real recorder sponge by
+replaying `log[0..739]` — observes fed back, samples squeezed and asserted —
+because a `ReadOnlyTranscript` cannot cross the grinds; rerunning
+`prove_whir` reproduces the proof and the entire log (the serial grind
+re-finds the same witnesses). The Python prover grinds natively: zorch's
+lowest-witness search matches the reference's serial scan from 0.
+
 ## Terminology mapping
 
 | Rust (stark-backend) | Here / zorch |
@@ -170,7 +212,9 @@ next squeeze.
 | `TruncatedPermutation<Perm,2,8,16>` | `zorch.hash.compression.Compression(arity=2, chunk=8)` |
 | `default_babybear_poseidon2_16` | `openvm_zorch.poseidon2.babybear16` |
 | `Radix2Bowers.idft` / `Radix2DitParallel.dft` | `lax.fft(x, "IFFT"/"FFT", n)` (zkx-native NTT) |
-| `Mle::coeffs_to_evals_inplace` | `mle_coeffs_to_evals` in `openvm_zorch/commit/rs_message.py` |
+| `Mle::coeffs_to_evals_inplace` / `evals_to_coeffs_inplace` | `mle_coeffs_to_evals` / `mle_evals_to_coeffs` in `openvm_zorch/commit/rs_message.py` |
+| `evals_mobius_eq_hypercube(u)` (little-endian) | `mobius_eq_table` in `openvm_zorch/whir/prover.py` |
+| `FiatShamirTranscript::grind` / `sample_bits` | `openvm_zorch.transcript.grind` / `sample_bits` |
 | `DuplexSponge<BabyBear,Poseidon2,16,8>` | `openvm_zorch.transcript.new_transcript()` (zorch `DuplexTranscript`) |
 | `transcript.sample_ext()` (4 base squeezes) | `openvm_zorch.transcript.sample_ext` |
 | `fractional_sumcheck` segment tree | `zorch.logup_gkr.circuit.build_pyramid` (dense) |

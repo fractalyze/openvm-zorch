@@ -32,9 +32,16 @@ from zorch.utils.bits import is_power_of_two, log2_strict_usize
 
 @dataclass(frozen=True)
 class StackedMerkleTree:
-    """Commit-side tree state: the stored digest layers (query layer first,
-    root last) plus the query structure."""
+    """Commit-side tree state: the hashed row matrix, the stored digest layers
+    (query layer first, root last) and the query structure.
 
+    ``backing_matrix`` is whatever the caller hashed — base-field codeword
+    rows for the Stage-1 commitment, the 4-limb view of an extension codeword
+    for WHIR's per-round trees (the reference flattens extension elements to
+    basis coefficients before hashing, ``MerkleTree::new``'s ``hash_input``).
+    """
+
+    backing_matrix: Array
     digest_layers: list[Array]
     rows_per_query: int
 
@@ -45,6 +52,27 @@ class StackedMerkleTree:
     @property
     def query_stride(self) -> int:
         return self.digest_layers[0].shape[0]
+
+    def opened_rows(self, index: int) -> Array:
+        """The ``rows_per_query`` rows a query at leaf ``index`` opens —
+        ``{index + t·query_stride}`` for ``t`` in ``0..rows_per_query``
+        (Rust ``get_opened_rows``)."""
+        if not 0 <= index < self.query_stride:
+            raise ValueError(f"index {index} out of range [0, {self.query_stride})")
+        return self.backing_matrix[index :: self.query_stride]
+
+    def query_merkle_proof(self, index: int) -> Array:
+        """Sibling digests from the query layer to just below the root,
+        ``(proof_depth, digest)`` — the strided levels below the query layer
+        are recomputed by the verifier from the opened rows, so the proof
+        starts at ``digest_layers[0]`` (Rust ``query_merkle_proof``)."""
+        if not 0 <= index < self.query_stride:
+            raise ValueError(f"index {index} out of range [0, {self.query_stride})")
+        siblings = []
+        for layer in self.digest_layers[:-1]:
+            siblings.append(layer[index ^ 1])
+            index >>= 1
+        return jax.numpy.stack(siblings)
 
 
 def stacked_merkle_commit(
@@ -81,4 +109,4 @@ def stacked_merkle_commit(
         pairs = layer.reshape(-1, 2, digest)
         layer = jax.vmap(compressor.compress)(pairs)
         digest_layers.append(layer)
-    return StackedMerkleTree(digest_layers, rows_per_query)
+    return StackedMerkleTree(matrix, digest_layers, rows_per_query)

@@ -23,7 +23,10 @@ only the SWIRL-specific surface here and pushing every generic block upstream.
 | 2. LogUp-GKR | Interaction fractional sumcheck | `openvm_zorch/logup_gkr` | byte-matches reference |
 | 3. ZeroCheck | Batched constraints, univariate skip + multivariate sumcheck | `openvm_zorch/logup_zerocheck` | byte-matches reference |
 | 4. Stacked reduction | Column openings → stacked matrix openings | `openvm_zorch/stacked_reduction` | byte-matches reference |
-| 5. WHIR opening | k-ary fold + OOD + query phase + grinding | — | not started |
+| 5. WHIR opening | μ-batched sumcheck folds + per-round RS commits, OOD + query phase, PoW grinds | `openvm_zorch/whir` | byte-matches reference |
+
+All five stages replay the reference prover's full 945-entry transcript log
+end-to-end on the shared fixture instance.
 
 ## Quick start
 
@@ -41,7 +44,8 @@ cargo run --release -- \
   --transcript-out ../../openvm_zorch/testdata/transcript \
   --gkr-out ../../openvm_zorch/logup_gkr/testdata/logup_gkr \
   --zerocheck-out ../../openvm_zorch/logup_zerocheck/testdata/zerocheck \
-  --stacking-out ../../openvm_zorch/stacked_reduction/testdata/stacking
+  --stacking-out ../../openvm_zorch/stacked_reduction/testdata/stacking \
+  --whir-out ../../openvm_zorch/whir/testdata/whir
 ```
 
 ## Reference pin

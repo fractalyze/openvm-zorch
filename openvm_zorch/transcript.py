@@ -21,7 +21,7 @@ and the BabyBear⁴ challenge conventions:
 from __future__ import annotations
 
 import jax.numpy as jnp
-from jax import Array
+from jax import Array, lax
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
 
@@ -57,6 +57,33 @@ def check_witness(
     if pow_bits == 0:
         return transcript, jnp.bool_(True)
     return transcript.check_witness(pow_bits, witness)
+
+
+def grind(
+    transcript: DuplexTranscript, pow_bits: int
+) -> tuple[DuplexTranscript, Array]:
+    """Reference-semantics proof-of-work grind.
+
+    Mirrors ``FiatShamirTranscript::grind``: at ``pow_bits == 0`` the
+    reference returns witness ZERO without touching the transcript. For
+    ``pow_bits > 0`` zorch's lowest-witness search matches the reference's
+    serial scan from 0 (the fixture pin: ``default-features = false`` keeps
+    the Rust grind serial, so both sides find the same witness).
+    """
+    if pow_bits == 0:
+        return transcript, jnp.zeros((), F)
+    return transcript.grind(pow_bits)
+
+
+def sample_bits(transcript: DuplexTranscript, bits: int) -> tuple[DuplexTranscript, int]:
+    """One base squeeze masked to its low ``bits`` canonical bits
+    (``FiatShamirTranscript::sample_bits``) — a host int, since it indexes
+    Merkle queries."""
+    transcript, got = transcript.sample(1)
+    canonical = int(
+        jnp.asarray(lax.bitcast_convert_type(got, F).astype(jnp.uint32))[0]
+    )
+    return transcript, canonical & ((1 << bits) - 1)
 
 
 def ef_from_limbs(limbs: Array) -> Array:

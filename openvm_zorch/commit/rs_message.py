@@ -46,6 +46,19 @@ def mle_coeffs_to_evals(chunks: Array) -> Array:
     return chunks
 
 
+def mle_evals_to_coeffs(evals: Array) -> Array:
+    """Inverse of ``mle_coeffs_to_evals`` (the Rust ``evals_to_coeffs_inplace``):
+    per-bit Möbius passes ``a[u + 2^b] -= a[u]``. The passes touch disjoint
+    bits, so the forward loop order inverts pass-by-pass."""
+    k = log2_strict_usize(evals.shape[-1])
+    lead = evals.shape[:-1]
+    for b in range(k):
+        x = evals.reshape(lead + (1 << (k - b - 1), 2, 1 << b))
+        x = x.at[..., 1, :].add(-x[..., 0, :])
+        evals = x.reshape(lead + (1 << k,))
+    return evals
+
+
 def eval_to_coeff_rs_message(l_skip: int, evals: Array) -> Array:
     """Per-column RS message of prismalinear evaluations ``(..., 2^(l_skip+n))``."""
     chunk_len = 1 << l_skip

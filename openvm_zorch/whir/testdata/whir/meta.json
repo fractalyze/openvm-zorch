@@ -1,0 +1,53 @@
+{
+  "num_queries": [
+    10,
+    4,
+    2
+  ],
+  "num_whir_rounds": 3,
+  "params": {
+    "folding_pow_bits": 2,
+    "k_whir": 3,
+    "l_skip": 2,
+    "log_blowup": 1,
+    "mu_pow_bits": 3,
+    "n_stack": 8,
+    "query_phase_pow_bits": 1
+  },
+  "query_indices": [
+    [
+      25,
+      200,
+      11,
+      37,
+      75,
+      65,
+      247,
+      191,
+      77,
+      131
+    ],
+    [
+      62,
+      23,
+      7,
+      27
+    ],
+    [
+      25,
+      8
+    ]
+  ],
+  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "sorted_airs": [
+    0,
+    2,
+    1,
+    3,
+    4
+  ],
+  "stacked_width": 1,
+  "stage4_end": 739,
+  "stage5_end": 945,
+  "transcript_len": 945
+}

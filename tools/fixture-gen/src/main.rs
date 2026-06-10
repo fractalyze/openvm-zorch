@@ -25,12 +25,14 @@ use openvm_stark_backend::{
     hasher::{Hasher, MerkleHasher},
     p3_field::{PrimeCharacteristicRing, PrimeField32},
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
-    proof::column_openings_by_rot,
+    poly_common::Squarable,
+    proof::{column_openings_by_rot, WhirProof},
     prover::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         prove_zerocheck_and_logup,
         stacked_pcs::{stacked_commit, StackedLayout},
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
+        whir::WhirProver,
         AirProvingContext, ColMajorMatrix, DeviceDataTransporter, MatrixDimensions, ProvingContext,
         TraceCommitter,
     },
@@ -42,8 +44,8 @@ use openvm_stark_backend::{
         },
         TestFixture,
     },
-    AirRef, FiatShamirTranscript, ReadOnlyTranscript, StarkEngine, TranscriptHistory,
-    TranscriptLog,
+    AirRef, FiatShamirTranscript, ReadOnlyTranscript, StarkEngine, SystemParams,
+    TranscriptHistory, TranscriptLog,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::{
     default_duplex_sponge_recorder, BabyBearPoseidon2RefEngine, DuplexSpongeRecorder, EF,
@@ -1312,12 +1314,334 @@ fn gen_stacking_fixture(out: &Path) {
     println!("stacking fixtures written to {}", out.display());
 }
 
+struct WhirLogWalk {
+    mu: EF,
+    /// Per WHIR round, the in-domain query indices (leaf indices of the
+    /// query-strided tree, i.e. `sample_bits(log_rs_domain_size - k_whir)`).
+    query_indices: Vec<Vec<usize>>,
+    stage5_end: usize,
+}
+
+/// Walk the Stage-5 (WHIR opening) segment of the transcript log, asserting
+/// every observe/sample against `prove_whir_opening`'s order:
+/// μ-PoW grind → μ; then per WHIR round: k_whir × (2 sumcheck evals,
+/// folding grind, α), then either (codeword commit, z₀, OOD value) or the
+/// final-poly coefficients, then the query-phase grind, the query index
+/// samples and γ. Opened rows and Merkle proofs are hints — never observed.
+fn walk_whir_log(
+    log: &TranscriptLog<F, [F; 16]>,
+    start: usize,
+    params: &SystemParams,
+    wp: &WhirProof<SC>,
+) -> WhirLogWalk {
+    let whir = &params.whir;
+    let k_whir = whir.k;
+    let num_rounds = whir.num_whir_rounds();
+    let mut idx = start;
+    let read = |samp: bool, idx: &mut usize| -> F {
+        assert_eq!(
+            log.samples()[*idx],
+            samp,
+            "expected {} at transcript index {idx:?}",
+            if samp { "sample" } else { "observe" }
+        );
+        let v = log.values()[*idx];
+        *idx += 1;
+        v
+    };
+    let read_ext = |samp: bool, idx: &mut usize| -> EF {
+        let limbs: [F; 4] = core::array::from_fn(|_| read(samp, idx));
+        EF::from_basis_coefficients_slice(&limbs).unwrap()
+    };
+    let read_grind = |bits: usize, witness: F, idx: &mut usize| {
+        assert_eq!(read(false, idx), witness);
+        let check = read(true, idx);
+        assert_eq!(check.as_canonical_u32() & ((1 << bits) - 1), 0);
+    };
+
+    read_grind(whir.mu_pow_bits, wp.mu_pow_witness, &mut idx);
+    let mu = read_ext(true, &mut idx);
+
+    let mut log_rs_domain_size = params.l_skip + params.n_stack + params.log_blowup;
+    let mut query_indices = Vec::with_capacity(num_rounds);
+    for (whir_round, round_params) in whir.rounds.iter().enumerate() {
+        let is_last_round = whir_round == num_rounds - 1;
+        for round in 0..k_whir {
+            let flat = whir_round * k_whir + round;
+            for &eval in &wp.whir_sumcheck_polys[flat] {
+                assert_eq!(read_ext(false, &mut idx), eval);
+            }
+            read_grind(whir.folding_pow_bits, wp.folding_pow_witnesses[flat], &mut idx);
+            let _alpha = read_ext(true, &mut idx);
+        }
+        if !is_last_round {
+            for &limb in &wp.codeword_commits[whir_round] {
+                assert_eq!(read(false, &mut idx), limb);
+            }
+            let _z_0 = read_ext(true, &mut idx);
+            assert_eq!(read_ext(false, &mut idx), wp.ood_values[whir_round]);
+        } else {
+            for &coeff in &wp.final_poly {
+                assert_eq!(read_ext(false, &mut idx), coeff);
+            }
+        }
+        read_grind(
+            whir.query_phase_pow_bits,
+            wp.query_phase_pow_witnesses[whir_round],
+            &mut idx,
+        );
+        let bits = log_rs_domain_size - k_whir;
+        let indices = (0..round_params.num_queries)
+            .map(|_| (read(true, &mut idx).as_canonical_u32() & ((1 << bits) - 1)) as usize)
+            .collect();
+        query_indices.push(indices);
+        let _gamma = read_ext(true, &mut idx);
+        log_rs_domain_size -= 1;
+    }
+
+    WhirLogWalk {
+        mu,
+        query_indices,
+        stage5_end: idx,
+    }
+}
+
+fn gen_whir_fixture(out: &Path) {
+    let inputs = out.join("inputs");
+    let outputs = out.join("outputs");
+    fs::create_dir_all(&inputs).unwrap();
+    fs::create_dir_all(&outputs).unwrap();
+
+    let inst = prove_instance();
+    let params = &inst.params;
+    let whir = &params.whir;
+    let wp = &inst.proof.whir_proof;
+    let k_whir = whir.k;
+    let num_rounds = whir.num_whir_rounds();
+    let m = params.l_skip + params.n_stack;
+
+    let needs_next: Vec<bool> = inst
+        .sorted_airs
+        .iter()
+        .map(|&i| inst.pk.per_air[i].vk.params.need_rot)
+        .collect();
+    let walk3 = walk_zerocheck_log(&inst.log, inst.walk.stage2_end, &inst.proof.batch_constraint_proof, &needs_next);
+    let walk4 = walk_stacking_log(&inst.log, walk3.stage3_end, &inst.proof.stacking_proof);
+
+    // Stage-4 → Stage-5 input: u_cube = (u₀ squarings over the skip domain) ‖ u[1..].
+    let (&u0, u_rest) = walk4.u.split_first().unwrap();
+    let u_cube: Vec<EF> = u0
+        .exp_powers_of_2()
+        .take(params.l_skip)
+        .chain(u_rest.iter().copied())
+        .collect();
+    assert_eq!(u_cube.len(), m);
+
+    let walk5 = walk_whir_log(&inst.log, walk4.stage4_end, params, wp);
+    // Stage 5 is the last stage: the walk must land exactly on the log's end.
+    assert_eq!(walk5.stage5_end, inst.log.len());
+
+    // Proof-shape pins (num_rounds = 3, num_queries = [10, 4, 2] for the
+    // small params; asserted structurally rather than hardcoded).
+    assert_eq!(wp.whir_sumcheck_polys.len(), whir.num_sumcheck_rounds());
+    assert_eq!(wp.codeword_commits.len(), num_rounds - 1);
+    assert_eq!(wp.ood_values.len(), num_rounds - 1);
+    assert_eq!(wp.folding_pow_witnesses.len(), whir.num_sumcheck_rounds());
+    assert_eq!(wp.query_phase_pow_witnesses.len(), num_rounds);
+    assert_eq!(wp.final_poly.len(), 1 << (m - num_rounds * k_whir));
+    assert_eq!(wp.initial_round_opened_rows.len(), 1); // common main only
+    assert_eq!(wp.initial_round_merkle_proofs.len(), 1);
+    assert_eq!(wp.codeword_opened_values.len(), num_rounds - 1);
+    assert_eq!(wp.codeword_merkle_proofs.len(), num_rounds - 1);
+
+    // Self-validate: rebuild a real recorder sponge at stage4_end by replaying
+    // the log (observes fed back; samples squeezed and asserted — a
+    // `ReadOnlyTranscript` cannot cross Stage 5's grinds), rebuild the
+    // common-main `StackedPcsData`, and rerun `prove_whir`. The serial grind
+    // (default-features off) re-finds the same witnesses, so the proof and
+    // the full log must reproduce.
+    {
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSpongeRecorder>::new(params.clone());
+        let ctx = Stage2Fixture.generate_proving_ctx().into_sorted();
+        let traces: Vec<&ColMajorMatrix<F>> =
+            ctx.common_main_traces().map(|(_, trace)| trace).collect();
+        let (root, data) = engine.device().commit(&traces).unwrap();
+        assert_eq!(&root[..], &inst.log.values()[8..16]);
+
+        let mut replay = default_duplex_sponge_recorder();
+        for i in 0..walk4.stage4_end {
+            if inst.log.samples()[i] {
+                let got = FiatShamirTranscript::<SC>::sample(&mut replay);
+                assert_eq!(got, inst.log.values()[i], "sample mismatch at {i}");
+            } else {
+                FiatShamirTranscript::<SC>::observe(&mut replay, inst.log.values()[i]);
+            }
+        }
+        let wp2 = engine
+            .device()
+            .prove_whir(&mut replay, data, vec![], &u_cube)
+            .unwrap();
+        assert_eq!(&wp2, wp);
+        let replay_log = replay.into_log();
+        assert_eq!(replay_log.values(), inst.log.values());
+        assert_eq!(replay_log.samples(), inst.log.samples());
+    }
+
+    // --- Dumps ---
+    for (air_idx, spec) in inst.specs.iter().enumerate() {
+        write_matrix(&inputs.join(format!("trace_{air_idx}.npy")), &spec.trace);
+    }
+    let u_cube_flat: Vec<u32> = u_cube.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(&inputs.join("u_cube.npy"), &[u_cube.len(), 4], &u_cube_flat);
+
+    write_transcript_log(&outputs, &inst.log);
+    write_npy_u32(&outputs.join("mu.npy"), &[4], &ef_limbs(walk5.mu));
+    write_npy_u32(
+        &outputs.join("mu_pow_witness.npy"),
+        &[1],
+        &[wp.mu_pow_witness.as_canonical_u32()],
+    );
+    let sumcheck_flat: Vec<u32> = wp
+        .whir_sumcheck_polys
+        .iter()
+        .flat_map(|evals| evals.iter().flat_map(|&e| ef_limbs(e)))
+        .collect();
+    write_npy_u32(
+        &outputs.join("sumcheck_polys.npy"),
+        &[wp.whir_sumcheck_polys.len(), 2, 4],
+        &sumcheck_flat,
+    );
+    let commits_flat: Vec<u32> = wp
+        .codeword_commits
+        .iter()
+        .flat_map(|d| d.iter().map(|x| x.as_canonical_u32()))
+        .collect();
+    write_npy_u32(
+        &outputs.join("codeword_commits.npy"),
+        &[wp.codeword_commits.len(), 8],
+        &commits_flat,
+    );
+    let ood_flat: Vec<u32> = wp.ood_values.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(
+        &outputs.join("ood_values.npy"),
+        &[wp.ood_values.len(), 4],
+        &ood_flat,
+    );
+    write_npy_u32(
+        &outputs.join("folding_pow_witnesses.npy"),
+        &[wp.folding_pow_witnesses.len()],
+        &wp.folding_pow_witnesses
+            .iter()
+            .map(|x| x.as_canonical_u32())
+            .collect::<Vec<_>>(),
+    );
+    write_npy_u32(
+        &outputs.join("query_phase_pow_witnesses.npy"),
+        &[wp.query_phase_pow_witnesses.len()],
+        &wp.query_phase_pow_witnesses
+            .iter()
+            .map(|x| x.as_canonical_u32())
+            .collect::<Vec<_>>(),
+    );
+    let final_flat: Vec<u32> = wp.final_poly.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(
+        &outputs.join("final_poly.npy"),
+        &[wp.final_poly.len(), 4],
+        &final_flat,
+    );
+
+    // Initial-round openings (common main, base field): rows are
+    // (num_queries, 2^k_whir, width); proofs (num_queries, depth, 8).
+    let rows0 = &wp.initial_round_opened_rows[0];
+    let width = rows0[0][0].len();
+    let rows0_flat: Vec<u32> = rows0
+        .iter()
+        .flat_map(|q| {
+            q.iter()
+                .flat_map(|row| row.iter().map(|x| x.as_canonical_u32()))
+        })
+        .collect();
+    write_npy_u32(
+        &outputs.join("initial_opened_rows_c0.npy"),
+        &[rows0.len(), 1 << k_whir, width],
+        &rows0_flat,
+    );
+    let proofs0 = &wp.initial_round_merkle_proofs[0];
+    let depth0 = proofs0[0].len();
+    let proofs0_flat: Vec<u32> = proofs0
+        .iter()
+        .flat_map(|p| p.iter().flat_map(|d| d.iter().map(|x| x.as_canonical_u32())))
+        .collect();
+    write_npy_u32(
+        &outputs.join("initial_merkle_proofs_c0.npy"),
+        &[proofs0.len(), depth0, 8],
+        &proofs0_flat,
+    );
+
+    // Per non-initial round: opened values (num_queries, 2^k_whir, 4) and
+    // proofs (num_queries, depth, 8). Query counts differ per round.
+    for (r, (vals, proofs)) in wp
+        .codeword_opened_values
+        .iter()
+        .zip(&wp.codeword_merkle_proofs)
+        .enumerate()
+    {
+        let vals_flat: Vec<u32> = vals
+            .iter()
+            .flat_map(|q| q.iter().flat_map(|&x| ef_limbs(x)))
+            .collect();
+        write_npy_u32(
+            &outputs.join(format!("codeword_opened_values_r{}.npy", r + 1)),
+            &[vals.len(), 1 << k_whir, 4],
+            &vals_flat,
+        );
+        let depth = proofs[0].len();
+        let proofs_flat: Vec<u32> = proofs
+            .iter()
+            .flat_map(|p| p.iter().flat_map(|d| d.iter().map(|x| x.as_canonical_u32())))
+            .collect();
+        write_npy_u32(
+            &outputs.join(format!("codeword_merkle_proofs_r{}.npy", r + 1)),
+            &[proofs.len(), depth, 8],
+            &proofs_flat,
+        );
+    }
+
+    let meta = serde_json::json!({
+        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "params": {
+            "l_skip": params.l_skip,
+            "n_stack": params.n_stack,
+            "log_blowup": params.log_blowup,
+            "k_whir": k_whir,
+            "mu_pow_bits": whir.mu_pow_bits,
+            "folding_pow_bits": whir.folding_pow_bits,
+            "query_phase_pow_bits": whir.query_phase_pow_bits,
+        },
+        "sorted_airs": inst.sorted_airs,
+        "num_whir_rounds": num_rounds,
+        "num_queries": whir.rounds.iter().map(|r| r.num_queries).collect::<Vec<_>>(),
+        "query_indices": walk5.query_indices,
+        "stacked_width": width,
+        "stage4_end": walk4.stage4_end,
+        "stage5_end": walk5.stage5_end,
+        "transcript_len": inst.log.len(),
+    });
+    fs::write(
+        out.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+    println!("whir fixtures written to {}", out.display());
+}
+
 fn main() {
     let mut out_dir: Option<PathBuf> = None;
     let mut transcript_out: Option<PathBuf> = None;
     let mut gkr_out: Option<PathBuf> = None;
     let mut zerocheck_out: Option<PathBuf> = None;
     let mut stacking_out: Option<PathBuf> = None;
+    let mut whir_out: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -1326,8 +1650,9 @@ fn main() {
             "--gkr-out" => gkr_out = args.next().map(PathBuf::from),
             "--zerocheck-out" => zerocheck_out = args.next().map(PathBuf::from),
             "--stacking-out" => stacking_out = args.next().map(PathBuf::from),
+            "--whir-out" => whir_out = args.next().map(PathBuf::from),
             other => panic!(
-                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>] [--stacking-out <dir>]"
+                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>] [--stacking-out <dir>] [--whir-out <dir>]"
             ),
         }
     }
@@ -1336,9 +1661,10 @@ fn main() {
         && gkr_out.is_none()
         && zerocheck_out.is_none()
         && stacking_out.is_none()
+        && whir_out.is_none()
     {
         panic!(
-            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out / --stacking-out is required"
+            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out / --stacking-out / --whir-out is required"
         );
     }
     if let Some(out) = out_dir {
@@ -1355,5 +1681,8 @@ fn main() {
     }
     if let Some(out) = stacking_out {
         gen_stacking_fixture(&out);
+    }
+    if let Some(out) = whir_out {
+        gen_whir_fixture(&out);
     }
 }
