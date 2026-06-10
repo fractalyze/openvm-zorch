@@ -78,6 +78,15 @@ Per-stage fixture pattern (established for Stage 2, reuse for 3–5):
   fixture-gen and replay the stage's `pub` entry point through
   `ReadOnlyTranscript::new(&log, idx)` — a drift fails at generation time,
   not in a Python test. Needs `debug-assertions = true` in release.
+- `ReadOnlyTranscript` CANNOT replay across a PoW grind: the witness search
+  observes non-matching candidates and trips the log asserts. For a stage
+  whose entry point grinds, rebuild the transcript state instead (feed the
+  log's observe prefix into a real recorder sponge) and rerun — the serial
+  grind re-finds the same witness (Stage-3 pattern in
+  `gen_zerocheck_fixture`). Grind-free stages can use `ReadOnlyTranscript`.
+- plonky3 field serde emits MONTGOMERY-form u32, not canonical — never
+  `serde_json` a struct holding field constants (vk DAGs etc.) into a
+  fixture; hand-roll the dump via `as_canonical_u32()`.
 - Keep `default-features = false` on the backend deps: the PoW grind uses
   rayon `find_any`, which picks a nondeterministic witness under
   `parallel` and would break fixture reproducibility.
