@@ -52,3 +52,56 @@ py_test(
         requirement("zk_dtypes"),
     ],
 )
+
+# End-to-end SWIRL prover: the five stage modules composed into one prove().
+py_library(
+    name = "prove",
+    srcs = [
+        "__init__.py",
+        "prove.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":transcript",
+        "//openvm_zorch/commit:trace_commit",
+        "//openvm_zorch/logup_gkr:input_layer",
+        "//openvm_zorch/logup_gkr:prover",
+        "//openvm_zorch/logup_zerocheck:constraints",
+        "//openvm_zorch/logup_zerocheck:prover",
+        "//openvm_zorch/stacked_reduction:prover",
+        "//openvm_zorch/whir:prover",
+        "@zorch//zorch/hash:compression",
+        "@zorch//zorch/hash:sponge",
+        "@zorch//zorch/utils:bits",
+        "@zorch//zorch:transcript",
+        requirement("jax"),
+        requirement("zk_dtypes"),
+    ],
+)
+
+py_test(
+    name = "prove_test",
+    size = "enormous",
+    srcs = ["prove_test.py"],
+    data = [
+        "//openvm_zorch/logup_gkr:testdata",
+        "//openvm_zorch/logup_zerocheck:testdata",
+        "//openvm_zorch/stacked_reduction:testdata",
+        "//openvm_zorch/whir:testdata",
+    ],
+    deps = [
+        ":prove",
+        ":transcript",
+        "//openvm_zorch/logup_gkr:input_layer",
+        "//openvm_zorch/logup_zerocheck:constraints",
+        "//openvm_zorch/poseidon2:babybear16",
+        "//openvm_zorch/whir:prover",
+        "@zorch//zorch/hash:compression",
+        "@zorch//zorch/hash:sponge",
+        "@zorch//zorch/hash/poseidon2",
+        requirement("absl_py"),
+        requirement("jax"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)

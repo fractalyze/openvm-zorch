@@ -26,7 +26,10 @@ only the SWIRL-specific surface here and pushing every generic block upstream.
 | 5. WHIR opening | μ-batched sumcheck folds + per-round RS commits, OOD + query phase, PoW grinds | `openvm_zorch/whir` | byte-matches reference |
 
 All five stages replay the reference prover's full 945-entry transcript log
-end-to-end on the shared fixture instance.
+end-to-end on the shared fixture instance. `openvm_zorch/prove.py` composes
+them into a single `prove()` driven by raw inputs only (traces, constraint
+DAGs, interaction specs, vk pre-hash, params) — no recorded log, PoW grinds
+run natively (`prove_test.py`).
 
 ## Quick start
 

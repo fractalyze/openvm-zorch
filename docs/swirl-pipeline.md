@@ -203,6 +203,23 @@ because a `ReadOnlyTranscript` cannot cross the grinds; rerunning
 re-finds the same witnesses). The Python prover grinds natively: zorch's
 lowest-witness search matches the reference's serial scan from 0.
 
+## End-to-end composition (implemented)
+
+`openvm_zorch/prove.py` is the Python `Coordinator::prove`: one `prove()`
+threads the transcript through all five stage modules, each driven by the
+previous stage's Python output. The coordinator-owned glue lives here and is
+what `prove_test.py` validates (the per-stage tests bypass it by replaying
+the recorded log to each stage boundary):
+
+- stacking order (descending trace height, ties by input AIR index) and the
+  protocol-derived sizes `n_logup = bit_length(Σ_T num_interactions ·
+  2^{lifted log height}) − l_skip`, `n_max`, `n_global`;
+- the prelude observes (vk pre-hash, Stage-1 root, per-AIR present flag /
+  log height / public values, in input order);
+- the stage handoffs: α/β → GKR input layer, padded ξ → batch constraints,
+  r → stacked reduction, `u → u_cube = (u₀ squarings ‖ u[1..])` → WHIR;
+- all PoW grinds run natively (LogUp + WHIR's μ/folding/query-phase).
+
 ## Terminology mapping
 
 | Rust (stark-backend) | Here / zorch |
