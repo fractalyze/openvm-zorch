@@ -1,0 +1,38 @@
+{
+  "constraint_idx": [],
+  "interactions": [
+    {
+      "bus_index": 0,
+      "count": 3,
+      "count_weight": 0,
+      "message": [
+        0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "entry": "main",
+      "index": 1,
+      "kind": "variable",
+      "offset": 0,
+      "part_index": 0
+    },
+    {
+      "kind": "constant",
+      "value": 2013265920
+    },
+    {
+      "entry": "main",
+      "index": 0,
+      "kind": "variable",
+      "offset": 0,
+      "part_index": 0
+    },
+    {
+      "kind": "mul",
+      "left": 1,
+      "right": 2
+    }
+  ]
+}

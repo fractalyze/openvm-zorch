@@ -220,6 +220,15 @@ the recorded log to each stage boundary):
   r → stacked reduction, `u → u_cube = (u₀ squarings ‖ u[1..])` → WHIR;
 - all PoW grinds run natively (LogUp + WHIR's μ/folding/query-phase).
 
+`prove_test.py` drives this from the four per-stage fixtures (test params,
+`l_skip=2`/`k_whir=3`) and, separately, from a self-contained production-params
+fixture (`--prove-out`, `l_skip=4`/`k_whir=4`). The production case is the
+generality check: at `l_skip=4` every non-Fibonacci trace (heights 2/4/8) is
+below `2^l_skip`, so all of them take the lifting/striding path the test
+params leave mostly cold. Each stage's end-of-chain outputs are byte-matched;
+because Fiat-Shamir is sequential, agreement at every boundary pins the whole
+transcript.
+
 ## Terminology mapping
 
 | Rust (stark-backend) | Here / zorch |

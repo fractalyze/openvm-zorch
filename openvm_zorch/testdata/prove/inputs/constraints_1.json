@@ -1,0 +1,29 @@
+{
+  "constraint_idx": [],
+  "interactions": [
+    {
+      "bus_index": 0,
+      "count": 1,
+      "count_weight": 0,
+      "message": [
+        0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "entry": "main",
+      "index": 1,
+      "kind": "variable",
+      "offset": 0,
+      "part_index": 0
+    },
+    {
+      "entry": "main",
+      "index": 0,
+      "kind": "variable",
+      "offset": 0,
+      "part_index": 0
+    }
+  ]
+}

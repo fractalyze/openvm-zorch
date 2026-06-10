@@ -37,7 +37,7 @@ use openvm_stark_backend::{
         TraceCommitter,
     },
     test_utils::{
-        default_test_params_small,
+        default_test_params_small, test_system_params_small,
         dummy_airs::{
             fib_air::{air::FibonacciAir, trace::generate_trace_rows},
             interaction::dummy_interaction_air::DummyInteractionAir,
@@ -558,7 +558,10 @@ struct ProvenInstance {
 fn prove_instance() -> ProvenInstance {
     // l_skip=2, n_stack=8, k_whir=3, logup pow_bits=2 — the small test params
     // every backend test uses.
-    let params = default_test_params_small();
+    prove_instance_with(default_test_params_small())
+}
+
+fn prove_instance_with(params: SystemParams) -> ProvenInstance {
     let engine = BabyBearPoseidon2RefEngine::<DuplexSpongeRecorder>::new(params.clone());
     let fx = Stage2Fixture;
     let specs = fx.specs();
@@ -1635,6 +1638,200 @@ fn gen_whir_fixture(out: &Path) {
     println!("whir fixtures written to {}", out.display());
 }
 
+/// Self-contained end-to-end fixture under PRODUCTION-shaped params
+/// (`l_skip=4`, `n_stack=8`, `k_whir=4` — distinct from the `2/8/3` test
+/// params, and still 3 WHIR rounds). The per-stage fixtures pin the test
+/// params in isolation; this exercises the same prover at a different
+/// `(l_skip, k_whir)`, where every short trace (heights 2/4/8 < 2^4) takes
+/// the lifting/striding path — the generality the test params never hit.
+///
+/// Everything the Python `prove()` consumes (traces, constraint DAGs,
+/// interactions, vk pre-hash, params) plus every stage's end-of-chain
+/// outputs go into ONE directory; `prove_test.py` drives `prove()` from the
+/// inputs and byte-matches the outputs. The generation-time self-check is
+/// the full Stage-2..5 log walk, which asserts the transcript observe/sample
+/// sequence against the proof struct under the new params — a drift fails
+/// here, not in the Python test.
+fn gen_prove_fixture(out: &Path) {
+    let inputs = out.join("inputs");
+    let outputs = out.join("outputs");
+    fs::create_dir_all(&inputs).unwrap();
+    fs::create_dir_all(&outputs).unwrap();
+
+    let inst = prove_instance_with(test_system_params_small(4, 8, 4));
+    let params = &inst.params;
+    let whir = &params.whir;
+    let gkr = &inst.proof.gkr_proof;
+    let bcp = &inst.proof.batch_constraint_proof;
+    let sp = &inst.proof.stacking_proof;
+    let wp = &inst.proof.whir_proof;
+
+    let needs_next: Vec<bool> = inst
+        .sorted_airs
+        .iter()
+        .map(|&i| inst.pk.per_air[i].vk.params.need_rot)
+        .collect();
+
+    // Walk the whole log to validate the transcript sequence under the new
+    // params and to recover stage boundaries / the GKR challenge point.
+    let walk3 = walk_zerocheck_log(&inst.log, inst.walk.stage2_end, bcp, &needs_next);
+    let walk4 = walk_stacking_log(&inst.log, walk3.stage3_end, sp);
+    let walk5 = walk_whir_log(&inst.log, walk4.stage4_end, params, wp);
+    assert_eq!(walk5.stage5_end, inst.log.len());
+
+    // --- Inputs the Python prove() needs (input/vk order, not sorted) ---
+    for (air_idx, spec) in inst.specs.iter().enumerate() {
+        write_matrix(&inputs.join(format!("trace_{air_idx}.npy")), &spec.trace);
+        let dag = constraints_dag_json(&inst.pk.per_air[air_idx].vk.symbolic_constraints);
+        fs::write(
+            inputs.join(format!("constraints_{air_idx}.json")),
+            serde_json::to_string_pretty(&dag).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // --- End-of-chain outputs per stage (the Fiat-Shamir chain is
+    // sequential, so matching each stage boundary covers the whole
+    // transcript up to it) ---
+    // Stage 1 + 2.
+    write_npy_u32(
+        &outputs.join("common_main_commit.npy"),
+        &[8],
+        &inst.log.values()[8..16]
+            .iter()
+            .map(|x| x.as_canonical_u32())
+            .collect::<Vec<_>>(),
+    );
+    write_npy_u32(
+        &outputs.join("logup_pow_witness.npy"),
+        &[1],
+        &[gkr.logup_pow_witness.as_canonical_u32()],
+    );
+    write_npy_u32(&outputs.join("q0_claim.npy"), &[4], &ef_limbs(gkr.q0_claim));
+    let xi_flat: Vec<u32> = inst.walk.xi.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(&outputs.join("xi.npy"), &[inst.walk.xi.len(), 4], &xi_flat);
+    // Stage 3.
+    write_npy_u32(&outputs.join("zc_lambda.npy"), &[4], &ef_limbs(walk3.lambda));
+    let s0_flat: Vec<u32> = bcp
+        .univariate_round_coeffs
+        .iter()
+        .flat_map(|&c| ef_limbs(c))
+        .collect();
+    write_npy_u32(
+        &outputs.join("zc_s0_coeffs.npy"),
+        &[bcp.univariate_round_coeffs.len(), 4],
+        &s0_flat,
+    );
+    let r_flat: Vec<u32> = walk3.r.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(&outputs.join("zc_r.npy"), &[walk3.r.len(), 4], &r_flat);
+    // Stage 4.
+    write_npy_u32(&outputs.join("st_lambda.npy"), &[4], &ef_limbs(walk4.lambda));
+    let u_flat: Vec<u32> = walk4.u.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(&outputs.join("st_u.npy"), &[walk4.u.len(), 4], &u_flat);
+    let open_flat: Vec<u32> = sp.stacking_openings[0]
+        .iter()
+        .flat_map(|&e| ef_limbs(e))
+        .collect();
+    write_npy_u32(
+        &outputs.join("st_openings_c0.npy"),
+        &[sp.stacking_openings[0].len(), 4],
+        &open_flat,
+    );
+    // Stage 5.
+    write_npy_u32(&outputs.join("whir_mu.npy"), &[4], &ef_limbs(walk5.mu));
+    write_npy_u32(
+        &outputs.join("whir_mu_pow_witness.npy"),
+        &[1],
+        &[wp.mu_pow_witness.as_canonical_u32()],
+    );
+    let sumcheck_flat: Vec<u32> = wp
+        .whir_sumcheck_polys
+        .iter()
+        .flat_map(|evals| evals.iter().flat_map(|&e| ef_limbs(e)))
+        .collect();
+    write_npy_u32(
+        &outputs.join("whir_sumcheck_polys.npy"),
+        &[wp.whir_sumcheck_polys.len(), 2, 4],
+        &sumcheck_flat,
+    );
+    let commits_flat: Vec<u32> = wp
+        .codeword_commits
+        .iter()
+        .flat_map(|d| d.iter().map(|x| x.as_canonical_u32()))
+        .collect();
+    write_npy_u32(
+        &outputs.join("whir_codeword_commits.npy"),
+        &[wp.codeword_commits.len(), 8],
+        &commits_flat,
+    );
+    let ood_flat: Vec<u32> = wp.ood_values.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(
+        &outputs.join("whir_ood_values.npy"),
+        &[wp.ood_values.len(), 4],
+        &ood_flat,
+    );
+    write_npy_u32(
+        &outputs.join("whir_folding_pow_witnesses.npy"),
+        &[wp.folding_pow_witnesses.len()],
+        &wp.folding_pow_witnesses
+            .iter()
+            .map(|x| x.as_canonical_u32())
+            .collect::<Vec<_>>(),
+    );
+    write_npy_u32(
+        &outputs.join("whir_query_phase_pow_witnesses.npy"),
+        &[wp.query_phase_pow_witnesses.len()],
+        &wp.query_phase_pow_witnesses
+            .iter()
+            .map(|x| x.as_canonical_u32())
+            .collect::<Vec<_>>(),
+    );
+    let final_flat: Vec<u32> = wp.final_poly.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(
+        &outputs.join("whir_final_poly.npy"),
+        &[wp.final_poly.len(), 4],
+        &final_flat,
+    );
+
+    let meta = serde_json::json!({
+        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "params": {
+            "l_skip": params.l_skip,
+            "n_stack": params.n_stack,
+            "log_blowup": params.log_blowup,
+            "k_whir": whir.k,
+            "logup_pow_bits": params.logup.pow_bits,
+            "max_constraint_degree": params.max_constraint_degree,
+            "mu_pow_bits": whir.mu_pow_bits,
+            "folding_pow_bits": whir.folding_pow_bits,
+            "query_phase_pow_bits": whir.query_phase_pow_bits,
+        },
+        "num_queries": whir.rounds.iter().map(|r| r.num_queries).collect::<Vec<_>>(),
+        "num_whir_rounds": whir.num_whir_rounds(),
+        "vk_pre_hash": inst.pk.vk_pre_hash.map(|x| x.as_canonical_u32()),
+        "sorted_airs": inst.sorted_airs,
+        "airs": (0..inst.specs.len()).map(|air_idx| serde_json::json!({
+            "air_idx": air_idx,
+            "is_required": inst.pk.per_air[air_idx].vk.is_required,
+            "needs_next": inst.pk.per_air[air_idx].vk.params.need_rot,
+            "constraint_degree": inst.pk.per_air[air_idx].vk.max_constraint_degree,
+            "public_values": inst.specs[air_idx].public_values.iter().map(|x| x.as_canonical_u32()).collect::<Vec<_>>(),
+            "interactions": inst.specs[air_idx].interactions.iter().map(|i| serde_json::json!({
+                "bus": i.bus,
+                "count_col": i.count_col,
+                "count_neg": i.count_neg,
+                "message_cols": i.msg_cols,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    });
+    fs::write(
+        out.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+    println!("prove (production-params) fixture written to {}", out.display());
+}
+
 fn main() {
     let mut out_dir: Option<PathBuf> = None;
     let mut transcript_out: Option<PathBuf> = None;
@@ -1642,6 +1839,7 @@ fn main() {
     let mut zerocheck_out: Option<PathBuf> = None;
     let mut stacking_out: Option<PathBuf> = None;
     let mut whir_out: Option<PathBuf> = None;
+    let mut prove_out: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -1651,8 +1849,9 @@ fn main() {
             "--zerocheck-out" => zerocheck_out = args.next().map(PathBuf::from),
             "--stacking-out" => stacking_out = args.next().map(PathBuf::from),
             "--whir-out" => whir_out = args.next().map(PathBuf::from),
+            "--prove-out" => prove_out = args.next().map(PathBuf::from),
             other => panic!(
-                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>] [--stacking-out <dir>] [--whir-out <dir>]"
+                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>] [--stacking-out <dir>] [--whir-out <dir>] [--prove-out <dir>]"
             ),
         }
     }
@@ -1662,9 +1861,10 @@ fn main() {
         && zerocheck_out.is_none()
         && stacking_out.is_none()
         && whir_out.is_none()
+        && prove_out.is_none()
     {
         panic!(
-            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out / --stacking-out / --whir-out is required"
+            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out / --stacking-out / --whir-out / --prove-out is required"
         );
     }
     if let Some(out) = out_dir {
@@ -1684,5 +1884,8 @@ fn main() {
     }
     if let Some(out) = whir_out {
         gen_whir_fixture(&out);
+    }
+    if let Some(out) = prove_out {
+        gen_prove_fixture(&out);
     }
 }

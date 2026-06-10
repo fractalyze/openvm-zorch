@@ -1,0 +1,121 @@
+{
+  "airs": [
+    {
+      "air_idx": 0,
+      "constraint_degree": 2,
+      "interactions": [],
+      "is_required": false,
+      "needs_next": true,
+      "public_values": [
+        0,
+        1,
+        298454053
+      ]
+    },
+    {
+      "air_idx": 1,
+      "constraint_degree": 1,
+      "interactions": [
+        {
+          "bus": 0,
+          "count_col": 0,
+          "count_neg": false,
+          "message_cols": [
+            1
+          ]
+        }
+      ],
+      "is_required": false,
+      "needs_next": false,
+      "public_values": []
+    },
+    {
+      "air_idx": 2,
+      "constraint_degree": 1,
+      "interactions": [
+        {
+          "bus": 0,
+          "count_col": 0,
+          "count_neg": true,
+          "message_cols": [
+            1
+          ]
+        }
+      ],
+      "is_required": false,
+      "needs_next": false,
+      "public_values": []
+    },
+    {
+      "air_idx": 3,
+      "constraint_degree": 1,
+      "interactions": [
+        {
+          "bus": 1,
+          "count_col": 0,
+          "count_neg": false,
+          "message_cols": [
+            1,
+            2
+          ]
+        }
+      ],
+      "is_required": false,
+      "needs_next": false,
+      "public_values": []
+    },
+    {
+      "air_idx": 4,
+      "constraint_degree": 1,
+      "interactions": [
+        {
+          "bus": 1,
+          "count_col": 0,
+          "count_neg": true,
+          "message_cols": [
+            1,
+            2
+          ]
+        }
+      ],
+      "is_required": false,
+      "needs_next": false,
+      "public_values": []
+    }
+  ],
+  "num_queries": [
+    10,
+    3,
+    2
+  ],
+  "num_whir_rounds": 3,
+  "params": {
+    "folding_pow_bits": 2,
+    "k_whir": 4,
+    "l_skip": 4,
+    "log_blowup": 1,
+    "logup_pow_bits": 2,
+    "max_constraint_degree": 3,
+    "mu_pow_bits": 3,
+    "n_stack": 8,
+    "query_phase_pow_bits": 1
+  },
+  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "sorted_airs": [
+    0,
+    2,
+    1,
+    3,
+    4
+  ],
+  "vk_pre_hash": [
+    1032268384,
+    574259560,
+    873910604,
+    1215409354,
+    1616197539,
+    535980757,
+    1662776179,
+    914735075
+  ]
+}

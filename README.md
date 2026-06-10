@@ -29,7 +29,10 @@ All five stages replay the reference prover's full 945-entry transcript log
 end-to-end on the shared fixture instance. `openvm_zorch/prove.py` composes
 them into a single `prove()` driven by raw inputs only (traces, constraint
 DAGs, interaction specs, vk pre-hash, params) — no recorded log, PoW grinds
-run natively (`prove_test.py`).
+run natively (`prove_test.py`). That test also runs the prover at
+production-shaped params (`l_skip=4`, `k_whir=4`) against a self-contained
+fixture, where every short trace takes the lifting/striding path the test
+params never exercise.
 
 ## Quick start
 
@@ -48,7 +51,8 @@ cargo run --release -- \
   --gkr-out ../../openvm_zorch/logup_gkr/testdata/logup_gkr \
   --zerocheck-out ../../openvm_zorch/logup_zerocheck/testdata/zerocheck \
   --stacking-out ../../openvm_zorch/stacked_reduction/testdata/stacking \
-  --whir-out ../../openvm_zorch/whir/testdata/whir
+  --whir-out ../../openvm_zorch/whir/testdata/whir \
+  --prove-out ../../openvm_zorch/testdata/prove
 ```
 
 ## Reference pin

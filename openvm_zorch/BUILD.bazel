@@ -8,6 +8,13 @@ filegroup(
     visibility = ["//openvm_zorch:__subpackages__"],
 )
 
+# Self-contained production-params end-to-end fixture (--prove-out).
+filegroup(
+    name = "prove_testdata",
+    srcs = glob(["testdata/prove/**"]),
+    visibility = ["//openvm_zorch:__subpackages__"],
+)
+
 # BabyBear / BabyBear⁴ dtype helpers shared across stages.
 py_library(
     name = "fields",
@@ -84,6 +91,7 @@ py_test(
     size = "enormous",
     srcs = ["prove_test.py"],
     data = [
+        ":prove_testdata",
         "//openvm_zorch/logup_gkr:testdata",
         "//openvm_zorch/logup_zerocheck:testdata",
         "//openvm_zorch/stacked_reduction:testdata",

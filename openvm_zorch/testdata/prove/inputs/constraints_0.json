@@ -1,0 +1,125 @@
+{
+  "constraint_idx": [
+    4,
+    8,
+    12,
+    16,
+    20
+  ],
+  "interactions": [],
+  "nodes": [
+    {
+      "kind": "is_first_row"
+    },
+    {
+      "entry": "main",
+      "index": 0,
+      "kind": "variable",
+      "offset": 0,
+      "part_index": 0
+    },
+    {
+      "entry": "public",
+      "index": 0,
+      "kind": "variable",
+      "offset": null,
+      "part_index": null
+    },
+    {
+      "kind": "sub",
+      "left": 1,
+      "right": 2
+    },
+    {
+      "kind": "mul",
+      "left": 0,
+      "right": 3
+    },
+    {
+      "entry": "main",
+      "index": 1,
+      "kind": "variable",
+      "offset": 0,
+      "part_index": 0
+    },
+    {
+      "entry": "public",
+      "index": 1,
+      "kind": "variable",
+      "offset": null,
+      "part_index": null
+    },
+    {
+      "kind": "sub",
+      "left": 5,
+      "right": 6
+    },
+    {
+      "kind": "mul",
+      "left": 0,
+      "right": 7
+    },
+    {
+      "kind": "is_transition"
+    },
+    {
+      "entry": "main",
+      "index": 0,
+      "kind": "variable",
+      "offset": 1,
+      "part_index": 0
+    },
+    {
+      "kind": "sub",
+      "left": 5,
+      "right": 10
+    },
+    {
+      "kind": "mul",
+      "left": 9,
+      "right": 11
+    },
+    {
+      "kind": "add",
+      "left": 1,
+      "right": 5
+    },
+    {
+      "entry": "main",
+      "index": 1,
+      "kind": "variable",
+      "offset": 1,
+      "part_index": 0
+    },
+    {
+      "kind": "sub",
+      "left": 13,
+      "right": 14
+    },
+    {
+      "kind": "mul",
+      "left": 9,
+      "right": 15
+    },
+    {
+      "kind": "is_last_row"
+    },
+    {
+      "entry": "public",
+      "index": 2,
+      "kind": "variable",
+      "offset": null,
+      "part_index": null
+    },
+    {
+      "kind": "sub",
+      "left": 5,
+      "right": 18
+    },
+    {
+      "kind": "mul",
+      "left": 17,
+      "right": 19
+    }
+  ]
+}
