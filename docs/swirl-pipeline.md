@@ -18,7 +18,7 @@ threading one Fiat-Shamir transcript (zorch `DuplexTranscript` ↔ Rust
 |---|-------|----------------------------------------------|-----------|
 | 1 | Trace commit | `prover/stacked_pcs.rs` `stacked_commit()` | `openvm_zorch/commit` |
 | 2 | LogUp-GKR | `prover/logup_zerocheck/mod.rs` `prove_zerocheck_and_logup()` (GKR half) | `openvm_zorch/logup_gkr` |
-| 3 | ZeroCheck | same entry, batched-constraint half | — |
+| 3 | ZeroCheck | same entry, batched-constraint half | `openvm_zorch/logup_zerocheck` |
 | 4 | Stacked reduction | `prover/stacked_reduction.rs` `prove_stacked_opening_reduction()` | — |
 | 5 | WHIR opening | `prover/whir.rs` `prove_whir_opening()` | — |
 
@@ -79,6 +79,47 @@ without interactions + two bus-balanced `DummyInteractionAir` pairs, heights
 `fractional_sumcheck` through a `ReadOnlyTranscript` to validate its own
 input-layer reconstruction before dumping.
 
+## Stage 3 in detail (implemented)
+
+The batched-constraint half of `prove_zerocheck_and_logup` (everything after
+the ξ padding), threading the transcript left by Stage 2. Per *sorted* trace
+T three polynomials are batched under μ-powers — the logup numerator
+(`μ^{2T}`), the logup denominator (`μ^{2T+1}`) and the λ-folded zerocheck
+constraint sum (`μ^{2N+T}`):
+
+1. **λ + constraint DAG** (`logup_zerocheck/constraints.py`): keygen's
+   `SymbolicExpressionDag` (nodes topologically ordered; constraints and
+   interaction expressions reference nodes by index) is dumped by fixture-gen
+   as canonical-u32 JSON and evaluated vectorized — node values carry the
+   whole evaluation grid as a leading batch shape.
+2. **Univariate round 0** (`logup_zerocheck/prism.py` + driver): each
+   per-trace `s'_0` is interpolated from evaluations on geometric cosets
+   `g^{c+1}·D` (per-x window iDFT + coset DFT; the zerocheck variant divides
+   by the zerofier `Z^{2^l_skip}−1` and re-multiplies in coefficient form).
+   The univariate eq factors — `eq_D(ξ_0, ·)` for zerocheck, the ♯-twisted
+   `eq♯_D(ξ_{<l_skip}, ·)` for logup — multiply in coefficient form; the
+   per-trace sum claims `(Σ p̂, Σ q̂)` are read off the product coefficients
+   (`Σ_D Z^j = |D|` iff `|D| divides j`) and observed; then μ batches
+   everything into one `s_0`, observed in **coefficient** form (degree
+   `(d+1)(2^l_skip−1)`).
+3. **MLE rounds 1..n_max**: round polys observed as evaluations on
+   `{1..d+1}`; `s'(0)` is derived from `s_j(0)+s_j(1) = s_{j−1}(r_{j−1})`,
+   never computed. Front-loaded batching: a trace exhausted at round
+   `> ñ_T` degenerates to a constant "tilde" contribution
+   (`f̂(r⃗)·r_{…}` products, `eq`/`eq♯` accumulated separately); the
+   `eq(ξ_round, X)` linear factor multiplies in coefficient form. Folding
+   reuses zorch `fold_pair`/`lift_to_domain` (LSB pairing) after the round-0
+   PLE fold (per-window interpolation at r₀).
+4. **Column openings**: per trace, common main first as (claim, claim_rot)
+   pairs — rotation slots observed as 0 when the AIR never rotates — then
+   preprocessed/cached parts (none in scope yet).
+
+The fixture (`tools/fixture-gen --zerocheck-out`) extends the Stage-2 walk
+from `meta.json: stage2_end`, asserts the whole observe/sample structure
+against the proof, and self-validates by rebuilding the prelude transcript
+state and rerunning `prove_zerocheck_and_logup` — the rerun must reproduce
+the recorded log byte-for-byte through `stage3_end`.
+
 ## Terminology mapping
 
 | Rust (stark-backend) | Here / zorch |
@@ -93,6 +134,9 @@ input-layer reconstruction before dumping.
 | `transcript.sample_ext()` (4 base squeezes) | `openvm_zorch.transcript.sample_ext` |
 | `fractional_sumcheck` segment tree | `zorch.logup_gkr.circuit.build_pyramid` (dense) |
 | `evals_eq_hypercube(ξ)` (little-endian) | `expand_eq_to_hypercube(reversed ξ)` (MSB-first) |
+| `SymbolicExpressionDag` + `SymbolicEvaluator` | `openvm_zorch/logup_zerocheck/constraints.py` (vectorized) |
+| `eval_eq_uni` / `eq♯` / `fold_ple_evals` / round-0 cosets | `openvm_zorch/logup_zerocheck/prism.py` |
+| `sumcheck_round_poly_evals` MLE fold (LSB pairs) | `zorch.sumcheck.prover.fold_pair` / `lift_to_domain` |
 
 ## SystemParams cheat sheet
 

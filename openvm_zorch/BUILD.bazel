@@ -8,6 +8,20 @@ filegroup(
     visibility = ["//openvm_zorch:__subpackages__"],
 )
 
+# BabyBear / BabyBear⁴ dtype helpers shared across stages.
+py_library(
+    name = "fields",
+    srcs = [
+        "__init__.py",
+        "fields.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("jax"),
+        requirement("zk_dtypes"),
+    ],
+)
+
 # OpenVM's Fiat-Shamir transcript: zorch DuplexTranscript + BabyBear⁴ glue.
 py_library(
     name = "transcript",

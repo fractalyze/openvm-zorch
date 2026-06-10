@@ -34,6 +34,7 @@ from zk_dtypes import babybearx4_mont as EF
 from zk_dtypes import pfinfo
 
 from openvm_zorch.commit.stacking import StackedLayout
+from openvm_zorch.fields import f_to_ef  # noqa: F401  (re-exported; Stage-2 API)
 from zorch.utils.bits import log2_strict_usize
 
 
@@ -45,12 +46,6 @@ class InteractionSpec:
     count_col: int
     count_neg: bool
     message_cols: tuple[int, ...]
-
-
-def f_to_ef(x: Array) -> Array:
-    """Embed base-field values into BabyBear⁴ (limbs ``[x, 0, 0, 0]``)."""
-    zero = jnp.zeros_like(x)
-    return jnp.stack([x, zero, zero, zero], axis=-1).view(EF)[..., 0]
 
 
 def interactions_layout(

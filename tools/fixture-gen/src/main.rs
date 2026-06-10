@@ -18,14 +18,20 @@
 use std::{fs, io::Write as _, path::Path, path::PathBuf};
 
 use openvm_stark_backend::{
+    air_builders::symbolic::{
+        symbolic_variable::Entry, SymbolicConstraintsDag, SymbolicExpressionNode,
+    },
     any_air_arc_vec, calculate_n_logup,
     hasher::{Hasher, MerkleHasher},
     p3_field::{PrimeCharacteristicRing, PrimeField32},
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
+    proof::column_openings_by_rot,
     prover::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
+        prove_zerocheck_and_logup,
         stacked_pcs::{stacked_commit, StackedLayout},
-        AirProvingContext, ColMajorMatrix, MatrixDimensions, ProvingContext,
+        AirProvingContext, ColMajorMatrix, DeviceDataTransporter, MatrixDimensions,
+        ProvingContext,
     },
     test_utils::{
         default_test_params_small,
@@ -502,12 +508,25 @@ fn walk_gkr_log(
     }
 }
 
-fn gen_gkr_fixture(out: &Path) {
-    let inputs = out.join("inputs");
-    let outputs = out.join("outputs");
-    fs::create_dir_all(&inputs).unwrap();
-    fs::create_dir_all(&outputs).unwrap();
+/// Everything Stages 2 and 3 share: the proven 5-AIR instance, its recorded
+/// transcript log, the protocol-derived sizes, and the GKR challenge walk.
+struct ProvenInstance {
+    params: openvm_stark_backend::SystemParams,
+    specs: Vec<AirSpec>,
+    pk: openvm_stark_backend::keygen::types::MultiStarkProvingKey<SC>,
+    proof: openvm_stark_backend::proof::Proof<SC>,
+    log: TranscriptLog<F, [F; 16]>,
+    sorted_airs: Vec<usize>,
+    n_logup: usize,
+    n_max: usize,
+    n_global: usize,
+    total_interactions: u64,
+    interactions_layout: StackedLayout,
+    prelude_len: usize,
+    walk: GkrLogWalk,
+}
 
+fn prove_instance() -> ProvenInstance {
     // l_skip=2, n_stack=8, k_whir=3, logup pow_bits=2 — the small test params
     // every backend test uses.
     let params = default_test_params_small();
@@ -571,6 +590,49 @@ fn gen_gkr_fixture(out: &Path) {
         total_rounds,
         n_global,
     );
+
+    ProvenInstance {
+        params,
+        specs,
+        pk,
+        proof,
+        log,
+        sorted_airs,
+        n_logup,
+        n_max,
+        n_global,
+        total_interactions,
+        interactions_layout,
+        prelude_len,
+        walk,
+    }
+}
+
+fn gen_gkr_fixture(out: &Path) {
+    let inputs = out.join("inputs");
+    let outputs = out.join("outputs");
+    fs::create_dir_all(&inputs).unwrap();
+    fs::create_dir_all(&outputs).unwrap();
+
+    let inst = prove_instance();
+    let ProvenInstance {
+        params,
+        specs,
+        pk,
+        proof,
+        log,
+        sorted_airs,
+        n_logup,
+        n_max,
+        n_global,
+        total_interactions,
+        interactions_layout,
+        prelude_len,
+        walk,
+    } = &inst;
+    let gkr = &proof.gkr_proof;
+    let l_skip = params.l_skip;
+    let total_rounds = l_skip + n_logup;
 
     // --- Reconstruct the GKR input layer from raw trace cells ---
     let max_msg_len = specs
@@ -716,23 +778,328 @@ fn gen_gkr_fixture(out: &Path) {
     println!("gkr fixtures written to {}", out.display());
 }
 
+/// Canonical-u32 JSON of one AIR's constraints DAG (nodes in topological
+/// order, constraint node indices, interactions in node-index form).
+/// Hand-rolled rather than serde: BabyBear's serde emits Montgomery-form u32,
+/// which would leak an encoding detail into the fixture.
+fn constraints_dag_json(dag: &SymbolicConstraintsDag<F>) -> serde_json::Value {
+    let nodes: Vec<serde_json::Value> = dag
+        .constraints
+        .nodes
+        .iter()
+        .map(|node| match *node {
+            SymbolicExpressionNode::Variable(var) => {
+                let (entry, part_index, offset) = match var.entry {
+                    Entry::Preprocessed { offset } => ("preprocessed", None, Some(offset)),
+                    Entry::Main { part_index, offset } => ("main", Some(part_index), Some(offset)),
+                    Entry::Public => ("public", None, None),
+                    _ => panic!("unsupported variable entry in prover DAG"),
+                };
+                serde_json::json!({
+                    "kind": "variable", "entry": entry, "part_index": part_index,
+                    "offset": offset, "index": var.index,
+                })
+            }
+            SymbolicExpressionNode::IsFirstRow => serde_json::json!({"kind": "is_first_row"}),
+            SymbolicExpressionNode::IsLastRow => serde_json::json!({"kind": "is_last_row"}),
+            SymbolicExpressionNode::IsTransition => serde_json::json!({"kind": "is_transition"}),
+            SymbolicExpressionNode::Constant(c) => {
+                serde_json::json!({"kind": "constant", "value": c.as_canonical_u32()})
+            }
+            SymbolicExpressionNode::Add { left_idx, right_idx, .. } => {
+                serde_json::json!({"kind": "add", "left": left_idx, "right": right_idx})
+            }
+            SymbolicExpressionNode::Sub { left_idx, right_idx, .. } => {
+                serde_json::json!({"kind": "sub", "left": left_idx, "right": right_idx})
+            }
+            SymbolicExpressionNode::Neg { idx, .. } => {
+                serde_json::json!({"kind": "neg", "idx": idx})
+            }
+            SymbolicExpressionNode::Mul { left_idx, right_idx, .. } => {
+                serde_json::json!({"kind": "mul", "left": left_idx, "right": right_idx})
+            }
+        })
+        .collect();
+    let interactions: Vec<serde_json::Value> = dag
+        .interactions
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "bus_index": i.bus_index,
+                "message": i.message,
+                "count": i.count,
+                "count_weight": i.count_weight,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "nodes": nodes,
+        "constraint_idx": dag.constraints.constraint_idx,
+        "interactions": interactions,
+    })
+}
+
+/// Stage-3 challenges recovered while walking the recorded log against the
+/// `BatchConstraintProof`, asserting the observe/sample structure as it goes.
+struct ZerocheckLogWalk {
+    lambda: EF,
+    mu: EF,
+    r: Vec<EF>,
+    stage3_end: usize,
+}
+
+fn walk_zerocheck_log(
+    log: &TranscriptLog<F, [F; 16]>,
+    start: usize,
+    bcp: &openvm_stark_backend::proof::BatchConstraintProof<SC>,
+    needs_next: &[bool],
+) -> ZerocheckLogWalk {
+    let mut idx = start;
+    let read = |samp: bool, idx: &mut usize| -> F {
+        assert_eq!(
+            log.samples()[*idx],
+            samp,
+            "expected {} at transcript index {idx:?}",
+            if samp { "sample" } else { "observe" }
+        );
+        let v = log.values()[*idx];
+        *idx += 1;
+        v
+    };
+    let read_ext = |samp: bool, idx: &mut usize| -> EF {
+        let limbs: [F; 4] = core::array::from_fn(|_| read(samp, idx));
+        EF::from_basis_coefficients_slice(&limbs).unwrap()
+    };
+
+    let lambda = read_ext(true, &mut idx);
+    for (&p, &q) in bcp
+        .numerator_term_per_air
+        .iter()
+        .zip(&bcp.denominator_term_per_air)
+    {
+        assert_eq!(read_ext(false, &mut idx), p);
+        assert_eq!(read_ext(false, &mut idx), q);
+    }
+    let mu = read_ext(true, &mut idx);
+    for &c in &bcp.univariate_round_coeffs {
+        assert_eq!(read_ext(false, &mut idx), c);
+    }
+    let mut r = vec![read_ext(true, &mut idx)];
+    for round_polys in &bcp.sumcheck_round_polys {
+        for &e in round_polys {
+            assert_eq!(read_ext(false, &mut idx), e);
+        }
+        r.push(read_ext(true, &mut idx));
+    }
+    // Common main openings first (part 0), then preprocessed/cached parts.
+    for (openings, &nn) in bcp.column_openings.iter().zip(needs_next) {
+        for (claim, claim_rot) in column_openings_by_rot(&openings[0], nn) {
+            assert_eq!(read_ext(false, &mut idx), claim);
+            assert_eq!(read_ext(false, &mut idx), claim_rot);
+        }
+    }
+    for (openings, &nn) in bcp.column_openings.iter().zip(needs_next) {
+        for part in openings.iter().skip(1) {
+            for (claim, claim_rot) in column_openings_by_rot(part, nn) {
+                assert_eq!(read_ext(false, &mut idx), claim);
+                assert_eq!(read_ext(false, &mut idx), claim_rot);
+            }
+        }
+    }
+
+    ZerocheckLogWalk {
+        lambda,
+        mu,
+        r,
+        stage3_end: idx,
+    }
+}
+
+fn gen_zerocheck_fixture(out: &Path) {
+    let inputs = out.join("inputs");
+    let outputs = out.join("outputs");
+    fs::create_dir_all(&inputs).unwrap();
+    fs::create_dir_all(&outputs).unwrap();
+
+    let inst = prove_instance();
+    let params = &inst.params;
+    let l_skip = params.l_skip;
+    let bcp = &inst.proof.batch_constraint_proof;
+    let num_traces = inst.sorted_airs.len();
+
+    let needs_next: Vec<bool> = inst
+        .sorted_airs
+        .iter()
+        .map(|&i| inst.pk.per_air[i].vk.params.need_rot)
+        .collect();
+    let n_per_trace: Vec<isize> = inst
+        .sorted_airs
+        .iter()
+        .map(|&i| inst.specs[i].trace.height().ilog2() as isize - l_skip as isize)
+        .collect();
+
+    let s_deg = inst.pk.max_constraint_degree + 1;
+    let s_0_deg = s_deg * ((1 << l_skip) - 1);
+    assert_eq!(bcp.univariate_round_coeffs.len(), s_0_deg + 1);
+    assert_eq!(bcp.sumcheck_round_polys.len(), inst.n_max);
+    for round_polys in &bcp.sumcheck_round_polys {
+        assert_eq!(round_polys.len(), s_deg);
+    }
+    assert_eq!(bcp.numerator_term_per_air.len(), num_traces);
+
+    let walk3 = walk_zerocheck_log(&inst.log, inst.walk.stage2_end, bcp, &needs_next);
+
+    // Self-validate: rebuild the transcript state at the end of the prelude
+    // (all observes — `ReadOnlyTranscript` can't replay the PoW grind, whose
+    // witness search observes non-matching candidates) and rerun the whole
+    // `prove_zerocheck_and_logup`; it must reproduce the proof and the
+    // recorded log through stage3_end.
+    {
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSpongeRecorder>::new(params.clone());
+        let d_pk = engine.device().transport_pk_to_device(&inst.pk);
+        let ctx = Stage2Fixture.generate_proving_ctx().into_sorted();
+        let mut replay = default_duplex_sponge_recorder();
+        for &v in &inst.log.values()[..inst.prelude_len] {
+            FiatShamirTranscript::<SC>::observe(&mut replay, v);
+        }
+        let (gkr2, bcp2, r2) = prove_zerocheck_and_logup(&mut replay, &d_pk, &ctx).unwrap();
+        assert_eq!(gkr2.q0_claim, inst.proof.gkr_proof.q0_claim);
+        assert_eq!(&bcp2, bcp);
+        assert_eq!(r2, walk3.r);
+        let replay_log = replay.into_log();
+        assert_eq!(
+            &replay_log.values()[..walk3.stage3_end],
+            &inst.log.values()[..walk3.stage3_end],
+        );
+        assert_eq!(
+            &replay_log.samples()[..walk3.stage3_end],
+            &inst.log.samples()[..walk3.stage3_end],
+        );
+    }
+
+    // --- Dumps ---
+    for (air_idx, spec) in inst.specs.iter().enumerate() {
+        write_matrix(&inputs.join(format!("trace_{air_idx}.npy")), &spec.trace);
+        let dag = constraints_dag_json(&inst.pk.per_air[air_idx].vk.symbolic_constraints);
+        fs::write(
+            inputs.join(format!("constraints_{air_idx}.json")),
+            serde_json::to_string_pretty(&dag).unwrap(),
+        )
+        .unwrap();
+    }
+    write_transcript_log(&outputs, &inst.log);
+    write_npy_u32(&outputs.join("alpha.npy"), &[4], &ef_limbs(inst.walk.alpha));
+    write_npy_u32(&outputs.join("beta.npy"), &[4], &ef_limbs(inst.walk.beta));
+    let xi_flat: Vec<u32> = inst.walk.xi.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(&outputs.join("xi.npy"), &[inst.walk.xi.len(), 4], &xi_flat);
+    write_npy_u32(&outputs.join("lambda.npy"), &[4], &ef_limbs(walk3.lambda));
+    write_npy_u32(&outputs.join("mu.npy"), &[4], &ef_limbs(walk3.mu));
+    let r_flat: Vec<u32> = walk3.r.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(&outputs.join("r.npy"), &[walk3.r.len(), 4], &r_flat);
+    let claims_flat: Vec<u32> = bcp
+        .numerator_term_per_air
+        .iter()
+        .zip(&bcp.denominator_term_per_air)
+        .flat_map(|(&p, &q)| ef_limbs(p).into_iter().chain(ef_limbs(q)))
+        .collect();
+    write_npy_u32(
+        &outputs.join("sum_claims.npy"),
+        &[num_traces, 2, 4],
+        &claims_flat,
+    );
+    let s0_flat: Vec<u32> = bcp
+        .univariate_round_coeffs
+        .iter()
+        .flat_map(|&c| ef_limbs(c))
+        .collect();
+    write_npy_u32(&outputs.join("s0_coeffs.npy"), &[s_0_deg + 1, 4], &s0_flat);
+    let rounds_flat: Vec<u32> = bcp
+        .sumcheck_round_polys
+        .iter()
+        .flat_map(|round_polys| round_polys.iter().flat_map(|&e| ef_limbs(e)))
+        .collect();
+    write_npy_u32(
+        &outputs.join("round_polys.npy"),
+        &[inst.n_max, s_deg, 4],
+        &rounds_flat,
+    );
+    for (t, openings) in bcp.column_openings.iter().enumerate() {
+        for (p, part) in openings.iter().enumerate() {
+            let flat: Vec<u32> = part.iter().flat_map(|&e| ef_limbs(e)).collect();
+            write_npy_u32(
+                &outputs.join(format!("column_openings_t{t}_p{p}.npy")),
+                &[part.len(), 4],
+                &flat,
+            );
+        }
+    }
+
+    let meta = serde_json::json!({
+        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "params": {
+            "l_skip": params.l_skip,
+            "n_stack": params.n_stack,
+            "log_blowup": params.log_blowup,
+            "k_whir": params.whir.k,
+            "max_constraint_degree": inst.pk.max_constraint_degree,
+            "logup_pow_bits": params.logup.pow_bits,
+        },
+        "airs": inst.specs.iter().enumerate().map(|(air_idx, spec)| serde_json::json!({
+            "air_idx": air_idx,
+            "height": spec.trace.height(),
+            "width": spec.trace.width(),
+            "is_required": inst.pk.per_air[air_idx].vk.is_required,
+            "public_values": spec.public_values.iter().map(|x| x.as_canonical_u32()).collect::<Vec<_>>(),
+            "constraint_degree": inst.pk.per_air[air_idx].vk.max_constraint_degree,
+            "needs_next": inst.pk.per_air[air_idx].vk.params.need_rot,
+            "num_constraints": inst.pk.per_air[air_idx].vk.symbolic_constraints.constraints.constraint_idx.len(),
+            "num_interactions": inst.pk.per_air[air_idx].vk.symbolic_constraints.interactions.len(),
+        })).collect::<Vec<_>>(),
+        "sorted_airs": inst.sorted_airs,
+        "n_logup": inst.n_logup,
+        "n_max": inst.n_max,
+        "n_global": inst.n_global,
+        "n_per_trace": n_per_trace,
+        "total_interactions": inst.total_interactions,
+        "s_deg": s_deg,
+        "s_0_deg": s_0_deg,
+        "interactions_layout": inst.interactions_layout.sorted_cols.iter().map(|(t, i, s)| serde_json::json!({
+            "sorted_trace_idx": t,
+            "interaction_idx": i,
+            "row_idx": s.row_idx,
+            "log_height": s.log_height(),
+        })).collect::<Vec<_>>(),
+        "prelude_len": inst.prelude_len,
+        "stage2_end": inst.walk.stage2_end,
+        "stage3_end": walk3.stage3_end,
+        "transcript_len": inst.log.len(),
+    });
+    fs::write(out.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    println!("zerocheck fixtures written to {}", out.display());
+}
+
 fn main() {
     let mut out_dir: Option<PathBuf> = None;
     let mut transcript_out: Option<PathBuf> = None;
     let mut gkr_out: Option<PathBuf> = None;
+    let mut zerocheck_out: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--out" => out_dir = args.next().map(PathBuf::from),
             "--transcript-out" => transcript_out = args.next().map(PathBuf::from),
             "--gkr-out" => gkr_out = args.next().map(PathBuf::from),
+            "--zerocheck-out" => zerocheck_out = args.next().map(PathBuf::from),
             other => panic!(
-                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>]"
+                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>]"
             ),
         }
     }
-    if out_dir.is_none() && transcript_out.is_none() && gkr_out.is_none() {
-        panic!("at least one of --out / --transcript-out / --gkr-out is required");
+    if out_dir.is_none() && transcript_out.is_none() && gkr_out.is_none() && zerocheck_out.is_none()
+    {
+        panic!(
+            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out is required"
+        );
     }
     if let Some(out) = out_dir {
         gen_stage1_fixture(&out);
@@ -742,5 +1109,8 @@ fn main() {
     }
     if let Some(out) = gkr_out {
         gen_gkr_fixture(&out);
+    }
+    if let Some(out) = zerocheck_out {
+        gen_zerocheck_fixture(&out);
     }
 }
