@@ -12,7 +12,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
-from absl.testing import absltest
+from absl.testing import absltest, parameterized
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.logup_gkr.input_layer import InteractionSpec
@@ -97,7 +97,63 @@ def _load_instance():
     return meta, params, airs, vks
 
 
-class VerifyTest(absltest.TestCase):
+def _bump(x):
+    return x + jnp.ones((), x.dtype)
+
+
+def _tamper_gkr(p):
+    gkr = dataclasses.replace(p.gkr_proof, q0_claim=_bump(p.gkr_proof.q0_claim))
+    return dataclasses.replace(p, gkr_proof=gkr)
+
+
+def _tamper_stage3_opening(p):
+    bcp = p.batch_constraint_proof
+    openings = [list(parts) for parts in bcp.column_openings]
+    openings[0][0] = _bump(openings[0][0])
+    return dataclasses.replace(
+        p, batch_constraint_proof=dataclasses.replace(bcp, column_openings=openings)
+    )
+
+
+def _tamper_stacking_opening(p):
+    sp = p.stacking_proof
+    openings = [list(v) for v in sp.stacking_openings]
+    openings[0][0] = _bump(openings[0][0])
+    return dataclasses.replace(
+        p, stacking_proof=dataclasses.replace(sp, stacking_openings=openings)
+    )
+
+
+def _tamper_whir_final_poly(p):
+    wp = p.whir_proof
+    return dataclasses.replace(
+        p, whir_proof=dataclasses.replace(wp, final_poly=_bump(wp.final_poly))
+    )
+
+
+def _tamper_whir_opened_row(p):
+    wp = p.whir_proof
+    rows = [list(per_commit) for per_commit in wp.initial_round_opened_rows]
+    # Perturb the first opened row of the first query of the first commit.
+    rows[0][0] = rows[0][0].at[0, 0].add(jnp.ones((), rows[0][0].dtype))
+    return dataclasses.replace(
+        p, whir_proof=dataclasses.replace(wp, initial_round_opened_rows=rows)
+    )
+
+
+# Each mutator perturbs exactly one proof field; the value is the GKR q0,
+# a Stage-3 column opening, a stacking opening, the WHIR final poly, and a
+# WHIR opened row respectively — one per stage's verifier check.
+_TAMPERS = {
+    "gkr_q0": _tamper_gkr,
+    "stage3_opening": _tamper_stage3_opening,
+    "stacking_opening": _tamper_stacking_opening,
+    "whir_final_poly": _tamper_whir_final_poly,
+    "whir_opened_row": _tamper_whir_opened_row,
+}
+
+
+class VerifyTest(parameterized.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
@@ -123,49 +179,12 @@ class VerifyTest(absltest.TestCase):
     def test_accepts_honest_proof(self) -> None:
         self._verify(self.proof)  # must not raise
 
-    def test_rejects_tampered_gkr(self) -> None:
-        bad_gkr = dataclasses.replace(
-            self.proof.gkr_proof, q0_claim=self.proof.gkr_proof.q0_claim + jnp.ones((), self.proof.gkr_proof.q0_claim.dtype)
-        )
-        bad = dataclasses.replace(self.proof, gkr_proof=bad_gkr)
+    @parameterized.named_parameters(*_TAMPERS.items())
+    def test_rejects_tampered(self, mutate) -> None:
+        """Each mutator perturbs one field of an otherwise-honest proof; the
+        verifier must reject it at the corresponding stage's check."""
         with self.assertRaises(VerificationError):
-            self._verify(bad)
-
-    def test_rejects_tampered_stage3_opening(self) -> None:
-        bcp = self.proof.batch_constraint_proof
-        openings = [list(parts) for parts in bcp.column_openings]
-        openings[0][0] = openings[0][0] + jnp.ones((), openings[0][0].dtype)
-        bad_bcp = dataclasses.replace(bcp, column_openings=openings)
-        bad = dataclasses.replace(self.proof, batch_constraint_proof=bad_bcp)
-        with self.assertRaises(VerificationError):
-            self._verify(bad)
-
-    def test_rejects_tampered_stacking_opening(self) -> None:
-        sp = self.proof.stacking_proof
-        openings = [list(v) for v in sp.stacking_openings]
-        openings[0][0] = openings[0][0] + jnp.ones((), openings[0][0].dtype)
-        bad_sp = dataclasses.replace(sp, stacking_openings=openings)
-        bad = dataclasses.replace(self.proof, stacking_proof=bad_sp)
-        with self.assertRaises(VerificationError):
-            self._verify(bad)
-
-    def test_rejects_tampered_whir_final_poly(self) -> None:
-        wp = self.proof.whir_proof
-        bad_final = wp.final_poly + jnp.ones((), wp.final_poly.dtype)
-        bad_wp = dataclasses.replace(wp, final_poly=bad_final)
-        bad = dataclasses.replace(self.proof, whir_proof=bad_wp)
-        with self.assertRaises(VerificationError):
-            self._verify(bad)
-
-    def test_rejects_tampered_whir_opened_row(self) -> None:
-        wp = self.proof.whir_proof
-        rows = [list(per_commit) for per_commit in wp.initial_round_opened_rows]
-        # Perturb the first opened row of the first query of the first commit.
-        rows[0][0] = rows[0][0].at[0, 0].add(jnp.ones((), rows[0][0].dtype))
-        bad_wp = dataclasses.replace(wp, initial_round_opened_rows=rows)
-        bad = dataclasses.replace(self.proof, whir_proof=bad_wp)
-        with self.assertRaises(VerificationError):
-            self._verify(bad)
+            self._verify(mutate(self.proof))
 
 
 if __name__ == "__main__":

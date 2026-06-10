@@ -24,6 +24,7 @@ verified against the committed roots.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Sequence
 
 import jax.numpy as jnp
@@ -71,6 +72,9 @@ class AirVk:
 
 _ZERO = jnp.zeros((), EF)
 _ONE = jnp.ones((), EF)
+_HALF = f_to_ef(f_const((MODULUS + 1) // 2))  # 2⁻¹
+_INV6 = f_to_ef(f_const(pow(6, MODULUS - 2, MODULUS)))
+_THREE = f_to_ef(f_const(3))
 
 
 def _eq(a: Array, b: Array) -> bool:
@@ -95,34 +99,38 @@ def _interp_linear_01(evals: Sequence[Array], x: Array) -> Array:
 def _interp_quadratic_012(evals: Sequence[Array], x: Array) -> Array:
     s1 = evals[1] - evals[0]
     s2 = evals[2] - evals[1]
-    p = (s2 - s1) * f_to_ef(f_const((MODULUS + 1) // 2))
+    p = (s2 - s1) * _HALF
     q = s1 - p
     return (p * x + q) * x + evals[0]
 
 
 def _interp_cubic_0123(evals: Sequence[Array], x: Array) -> Array:
-    inv6 = f_to_ef(f_const(pow(6, MODULUS - 2, MODULUS)))
-    half = f_to_ef(f_const((MODULUS + 1) // 2))
     s1 = evals[1] - evals[0]
     s2 = evals[2] - evals[0]
     s3 = evals[3] - evals[0]
-    d3 = s3 - (s2 - s1) * f_to_ef(f_const(3))
-    p = d3 * inv6
-    q = (s2 - d3) * half - s1
+    d3 = s3 - (s2 - s1) * _THREE
+    p = d3 * _INV6
+    q = (s2 - d3) * _HALF - s1
     r = s1 - p - q
     return ((p * x + q) * x + r) * x + evals[0]
+
+
+@lru_cache(maxsize=None)
+def _inv_factorials(s_deg: int) -> tuple[Array, ...]:
+    """``1/0!, 1/1!, …, 1/s_deg!`` as EF constants — fixed per ``s_deg``."""
+    out = []
+    fval = 1
+    for i in range(s_deg + 1):
+        if i > 0:
+            fval = (fval * i) % MODULUS
+        out.append(f_to_ef(f_const(pow(fval, MODULUS - 2, MODULUS))))
+    return tuple(out)
 
 
 def _interp_at_nodes(evals: Sequence[Array], x: Array, s_deg: int) -> Array:
     """Lagrange evaluation at ``x`` of the degree-``s_deg`` polynomial through
     nodes ``{0, 1, …, s_deg}`` (batch_constraints.rs barycentric form)."""
-    # Inverse factorials via Fermat on host ints (factorials are constants).
-    invfact = []
-    fval = 1
-    for i in range(s_deg + 1):
-        if i > 0:
-            fval = (fval * i) % MODULUS
-        invfact.append(f_to_ef(f_const(pow(fval, MODULUS - 2, MODULUS))))
+    invfact = _inv_factorials(s_deg)
     pref = [_ONE]
     for i in range(s_deg):
         pref.append(pref[-1] * (x - f_to_ef(f_const(i))))
@@ -531,7 +539,7 @@ def _verify_stacked_reduction(
 
     u = [None] * (n_stack + 1)
     transcript, u[0] = sample_ext(transcript)
-    claim = _horner([coeffs[i] for i in range(coeffs.shape[0])], u[0])
+    claim = _horner(list(coeffs), u[0])
     for j in range(1, n_stack + 1):
         s_j_1 = proof.sumcheck_round_polys[j - 1][0]
         s_j_2 = proof.sumcheck_round_polys[j - 1][1]
@@ -710,7 +718,7 @@ def _verify_whir(
 
     # Final WHIR constraint.
     t = k_whir * num_rounds
-    final_poly = [proof.final_poly[i] for i in range(proof.final_poly.shape[0])]
+    final_poly = list(proof.final_poly)
     prefix = _eval_mobius_eq_mle(u[:t], alphas[:t])
     suffix = _eval_mle_evals_at_point(final_poly, u[t:])
     acc = prefix * suffix
