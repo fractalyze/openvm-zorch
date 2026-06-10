@@ -49,6 +49,17 @@ bazel test //...                 # hermetic, sandboxed
 export PYTHONPATH="$PWD:/abs/path/to/zorch"
 ```
 
+Gotchas that recur across stages:
+
+- zkx-native `lax.fft` accepts at most **2-D input** on field dtypes —
+  flatten all leading batch axes before any NTT call and reshape after
+  (first hit in `openvm_zorch/commit/rs_message.py`; Stages 3/5 are
+  DFT-heavy and will hit it again).
+- The Rust reference sizes buffers from *lifted cell counts*, not occupied
+  extent (e.g. the stacked matrix can end in an all-zero committed column).
+  When a byte-match fails at a hash, first suspect a shape/padding delta,
+  not the hash params.
+
 ## Byte-match
 
 The commit path byte-matches the openvm-stark-backend reference prover.
