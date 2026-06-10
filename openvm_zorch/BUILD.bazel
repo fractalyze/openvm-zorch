@@ -113,3 +113,54 @@ py_test(
         requirement("zk_dtypes"),
     ],
 )
+
+# End-to-end SWIRL verifier: re-derives challenges, checks each stage.
+py_library(
+    name = "verify",
+    srcs = [
+        "__init__.py",
+        "verify.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":fields",
+        ":prove",
+        ":transcript",
+        "//openvm_zorch/commit:stacking",
+        "//openvm_zorch/logup_gkr:prover",
+        "//openvm_zorch/logup_zerocheck:constraints",
+        "//openvm_zorch/logup_zerocheck:prism",
+        "//openvm_zorch/logup_zerocheck:prover",
+        "//openvm_zorch/stacked_reduction:prover",
+        "//openvm_zorch/whir:prover",
+        "@zorch//zorch/hash:compression",
+        "@zorch//zorch/hash:sponge",
+        "@zorch//zorch/utils:bits",
+        "@zorch//zorch:transcript",
+        requirement("jax"),
+        requirement("zk_dtypes"),
+    ],
+)
+
+py_test(
+    name = "verify_test",
+    size = "enormous",
+    srcs = ["verify_test.py"],
+    data = [":prove_testdata"],
+    deps = [
+        ":prove",
+        ":transcript",
+        ":verify",
+        "//openvm_zorch/logup_gkr:input_layer",
+        "//openvm_zorch/logup_zerocheck:constraints",
+        "//openvm_zorch/poseidon2:babybear16",
+        "//openvm_zorch/whir:prover",
+        "@zorch//zorch/hash:compression",
+        "@zorch//zorch/hash:sponge",
+        "@zorch//zorch/hash/poseidon2",
+        requirement("absl_py"),
+        requirement("jax"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)

@@ -229,6 +229,42 @@ params leave mostly cold. Each stage's end-of-chain outputs are byte-matched;
 because Fiat-Shamir is sequential, agreement at every boundary pins the whole
 transcript.
 
+## Verifier (implemented)
+
+`openvm_zorch/verify.py` is the Python `verify`: from the proof plus a
+verifying key (per-AIR constraint DAG, log height, common-main width, public
+values — no traces) it re-derives every challenge from the same preamble and
+checks each stage's relation, mirroring `crates/stark-backend/src/verifier`:
+
+- **GKR** (`_verify_gkr`): observe `q0`, the per-layer (p,q) cross-terms zero-
+  /denominator-check, then per layer a cubic-interpolated sumcheck and the
+  layer-consistency check; returns the GKR point.
+- **ZeroCheck+LogUp** (`_verify_zerocheck_and_logup`): re-sample α/β/λ/μ,
+  reduce the GKR claims to 0/α against the per-air sum claims, run the
+  univariate-then-multilinear sumcheck, then re-evaluate the constraint and
+  interaction claim at the folded point from the column openings (the
+  `VerifierConstraintEvaluator` analogue: `eval_nodes` over the (claim,
+  claim_rot) pairs with `is_first/last_row` from the skip-domain progression)
+  and check it against the sumcheck's running claim.
+- **Stacked reduction** (`_verify_stacked_reduction`): re-derive λ, check s₀
+  against the λ-batched opening claims, run the quadratic sumcheck, and close
+  on the stacking-opening claim via the per-column eq/κ_rot prism kernels.
+- **WHIR** (`_verify_whir`): μ batching, per-round sumcheck folds with PoW
+  checks, OOD, then the query phase — each query's opened rows hash
+  (`hash_slice` → `tree_compress`) and Merkle path are verified against the
+  committed root, the codeword value is the `binary_k_fold` of the opened
+  coset, and the accumulated `claim` is checked against the final WHIR
+  polynomial constraint (`mobius_eq` prefix × MLE-at-`u''` suffix + the γ-
+  batched OOD/query terms).
+
+PoW witnesses are *checked*, never re-ground. `verify_test.py` proves the
+production-params instance, accepts the honest proof, and rejects a proof
+tampered in any one stage (GKR `q0`, a Stage-3 opening, a stacking opening,
+the WHIR final poly, a WHIR opened row). Note: `verify` runs in eager JAX
+(scalar field ops, Python query loops), so the production-params test is slow
+(~50 min wall) — correctness-first; batching the query-phase hashes is a
+worthwhile follow-up.
+
 ## Terminology mapping
 
 | Rust (stark-backend) | Here / zorch |
@@ -247,6 +283,9 @@ transcript.
 | `evals_eq_hypercube(ξ)` (little-endian) | `expand_eq_to_hypercube(reversed ξ)` (MSB-first) |
 | `SymbolicExpressionDag` + `SymbolicEvaluator` | `openvm_zorch/logup_zerocheck/constraints.py` (vectorized) |
 | `eval_eq_uni` / `eq♯` / `fold_ple_evals` / round-0 cosets | `openvm_zorch/logup_zerocheck/prism.py` |
+| `eval_eq_mle` / `eval_eq_prism` / `eval_rot_kernel_prism` (verifier kernels) | `openvm_zorch/logup_zerocheck/prism.py` |
+| `verify` / `verify_gkr` / `verify_stacked_reduction` / `verify_whir` | `openvm_zorch/verify.py` |
+| `binary_k_fold` / `merkle_verify` / `tree_compress` | `openvm_zorch/verify.py` |
 | `sumcheck_round_poly_evals` MLE fold (LSB pairs) | `zorch.sumcheck.prover.fold_pair` / `lift_to_domain` |
 
 ## SystemParams cheat sheet

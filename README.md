@@ -34,6 +34,12 @@ production-shaped params (`l_skip=4`, `k_whir=4`) against a self-contained
 fixture, where every short trace takes the lifting/striding path the test
 params never exercise.
 
+`openvm_zorch/verify.py` is the matching verifier: from the proof + verifying
+key alone (no traces) it re-derives every Fiat-Shamir challenge and checks
+each stage's algebraic relation, including WHIR's query-phase Merkle-path
+verification. `verify_test.py` confirms an honest proof verifies and that a
+proof tampered in any one stage is rejected.
+
 ## Quick start
 
 ```sh

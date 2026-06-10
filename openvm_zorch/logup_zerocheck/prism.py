@@ -123,6 +123,45 @@ def eval_in_uni(l_skip: int, n: int, z: Array) -> Array:
     return eval_eq_uni_at_one(-n, zp)
 
 
+def eval_eq_mle(x: list[Array], y: list[Array]) -> Array:
+    """``∏_i (1 − y_i − x_i + 2·x_i·y_i)`` — the multilinear equality kernel
+    evaluated at two points (poly_common.rs ``eval_eq_mle``)."""
+    acc = jnp.ones((), EF)
+    for x_i, y_i in zip(x, y):
+        acc = acc * (jnp.ones((), EF) - y_i - x_i + (x_i * y_i) * 2)
+    return acc
+
+
+def eval_eq_prism(l_skip: int, x: list[Array], y: list[Array]) -> Array:
+    """``eq_D(x_0, y_0)·eq(x[1:], y[1:])`` — the prismalinear equality kernel
+    (poly_common.rs ``eval_eq_prism``)."""
+    return eval_eq_uni(l_skip, x[0], y[0]) * eval_eq_mle(x[1:], y[1:])
+
+
+def eval_eq_rot_cube(x: list[Array], y: list[Array]) -> tuple[Array, Array]:
+    """The (eq, rot) cube kernels (poly_common.rs ``eval_eq_rot_cube``):
+    ``eq`` is the multilinear equality, ``rot`` the cyclic-rotation MLE, both
+    on ``{0,1}^len(x)``."""
+    one = jnp.ones((), EF)
+    rot = one
+    eq = one
+    for x_i, y_i in zip(reversed(x), reversed(y)):
+        rot = x_i * (one - y_i) * eq + (one - x_i) * y_i * rot
+        eq = eq * (x_i * y_i + (one - x_i) * (one - y_i))
+    return eq, rot
+
+
+def eval_rot_kernel_prism(l_skip: int, x: list[Array], y: list[Array]) -> Array:
+    """``κ_rot(x, y)`` — the prismalinear rotation kernel (poly_common.rs
+    ``eval_rot_kernel_prism``): rotate within ``D`` off the boundary, rotate
+    the cube at the boundary."""
+    omega = f_to_ef(f_const(omega_int(l_skip)))
+    eq_cube, rot_cube = eval_eq_rot_cube(x[1:], y[1:])
+    return eval_eq_uni(l_skip, x[0], y[0] * omega) * eq_cube + eval_eq_uni_at_one(
+        l_skip, x[0]
+    ) * eval_eq_uni_at_one(l_skip, y[0] * omega) * (rot_cube - eq_cube)
+
+
 def eq_cube_table(point: list[Array]) -> Array:
     """eq(point, y) for y on the hypercube, LSB-first in ``point`` (index bit
     i ↔ point[i]) — the reference's ``evals_eq_hypercube_serial`` layout."""
