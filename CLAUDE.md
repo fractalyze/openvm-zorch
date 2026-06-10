@@ -59,6 +59,12 @@ Gotchas that recur across stages:
   extent (e.g. the stacked matrix can end in an all-zero committed column).
   When a byte-match fails at a hash, first suspect a shape/padding delta,
   not the hash params.
+- zkx-native `jax.numpy` is a subset: `jnp.roll` does not exist (first hit
+  in Stage 4's rotation kernel — use
+  `jnp.concatenate([a[-1:], a[:-1]])`), and `jnp.arange` iota is
+  unsupported for extension dtypes (zorch builds domains via `jnp.stack`
+  of scalars). When an attribute error names a jnp function, reach for a
+  concat/stack equivalent before suspecting your logic.
 
 ## Byte-match
 
