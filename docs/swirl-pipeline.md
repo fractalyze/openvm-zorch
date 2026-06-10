@@ -19,7 +19,7 @@ threading one Fiat-Shamir transcript (zorch `DuplexTranscript` ↔ Rust
 | 1 | Trace commit | `prover/stacked_pcs.rs` `stacked_commit()` | `openvm_zorch/commit` |
 | 2 | LogUp-GKR | `prover/logup_zerocheck/mod.rs` `prove_zerocheck_and_logup()` (GKR half) | `openvm_zorch/logup_gkr` |
 | 3 | ZeroCheck | same entry, batched-constraint half | `openvm_zorch/logup_zerocheck` |
-| 4 | Stacked reduction | `prover/stacked_reduction.rs` `prove_stacked_opening_reduction()` | — |
+| 4 | Stacked reduction | `prover/stacked_reduction.rs` `prove_stacked_opening_reduction()` | `openvm_zorch/stacked_reduction` |
 | 5 | WHIR opening | `prover/whir.rs` `prove_whir_opening()` | — |
 
 ## Stage 1 in detail (implemented)
@@ -119,6 +119,47 @@ from `meta.json: stage2_end`, asserts the whole observe/sample structure
 against the proof, and self-validates by rebuilding the prelude transcript
 state and rerunning `prove_zerocheck_and_logup` — the rerun must reproduce
 the recorded log byte-for-byte through `stage3_end`.
+
+## Stage 4 in detail (implemented)
+
+`prove_stacked_opening_reduction`, threading the transcript left by Stage 3:
+a batch sumcheck reducing every per-trace column opening claim (and rotation
+claim) at `r` to opening claims of the *stacked* matrix's columns at a fresh
+point `u` of length `1 + n_stack`.
+
+1. **λ batching**: one λ power pair per stacked column — eq claim at
+   `λ^{2k}`, rotation claim at `λ^{2k+1}` (the rotation power is reserved
+   even when the AIR never rotates, mirroring Stage 3's zero rot openings).
+   The summand per column is `q·(eq or κ_rot)·in_{D,n_T}`, where the kernels
+   against `r` split as (univariate over the skip domain) × (multilinear over
+   the cube): `κ_rot` decomposes as `eq_D(Z, ω·r_0)·eq_cube +
+   eq_D(Z,1)·eq_D(ω·r_0,1)·(rot_cube − eq_cube)`, short traces (`n_T < 0`)
+   collapse the univariate factor to the order-`2^{l+n_T}` subgroup behind
+   the stride indicator `in_{D,n_T}`.
+2. **Univariate round 0**: degree `2·(2^l_skip−1)`, evaluated on the cosets
+   `g·D`, `g²·D` per column window (`prism.coset_evals`) and interpolated to
+   coefficients (`prism.geometric_cosets_to_coeffs`), observed in coefficient
+   form; then everything PLE-folds at `u_0` (`prism.fold_ple_evals` for `q`,
+   closed-form kernel evaluations for `eq`/`κ_rot` tables).
+3. **MLE rounds 1..n_stack**: quadratic round polys observed as evaluations
+   at `{1,2}`; a column whose cube variables are exhausted (`round > ñ_T`)
+   stops folding and instead binds its position bits `b_{T,j}` (the
+   `row_idx` of its `StackedSlice`) through accumulating `eq(u_round, b)`
+   factors. Folding is zorch `fold_pair` (LSB pairing) on the stacked
+   matrix's columns — all traces at once, per commit.
+4. **Stacking openings**: after the last fold each stacked column is a single
+   value `q̂(u)`; observed per commit, in column order. WHIR (Stage 5) opens
+   these claims against the Stage-1 commitment.
+
+The fixture (`tools/fixture-gen --stacking-out`) extends the Stage-3 walk
+from `meta.json: stage3_end`, asserts the observe/sample structure against
+`proof.stacking_proof`, and self-validates by rebuilding the common-main
+`StackedPcsData` (`device.commit` on the sorted traces, root checked against
+the prelude's commitment) and replaying `prove_stacked_opening_reduction`
+through a `ReadOnlyTranscript` — possible here because Stage 4 has no PoW
+grind. The Python test additionally pins the post-stage transcript state by
+feeding Stage 5's first observe (the WHIR μ-PoW witness) and asserting the
+next squeeze.
 
 ## Terminology mapping
 

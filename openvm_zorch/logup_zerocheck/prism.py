@@ -97,7 +97,33 @@ def eval_eq_uni(l_skip: int, x: Array, y: Array) -> Array:
     return res * (f_to_ef(inv) if x.dtype == EF else inv)
 
 
-def _eq_cube_table(point: list[Array]) -> Array:
+def eval_eq_uni_at_one(l_skip: int, x: Array) -> Array:
+    """``eq_D(x, 1)`` (poly_common.rs ``eval_eq_uni_at_one``)."""
+    one = jnp.ones((), x.dtype)
+    res = one
+    xp = x
+    for _ in range(l_skip):
+        res = res * (xp + one)
+        xp = xp * xp
+    inv = f_inv_const(1 << l_skip)
+    return res * (f_to_ef(inv) if x.dtype == EF else inv)
+
+
+def eval_in_uni(l_skip: int, n: int, z: Array) -> Array:
+    """``in_{D,n}(z)`` — the short-trace stride indicator (poly_common.rs
+    ``eval_in_uni``): 1 for ``n >= 0``; for ``n < 0`` it is ``eq_{D'}(z', 1)``
+    over the order-``2^{-n}`` subgroup with ``z' = z^{2^{l_skip + n}}``."""
+    if n >= 0:
+        return jnp.ones((), z.dtype)
+    if n < -l_skip:
+        raise ValueError(f"n ({n}) < -l_skip ({l_skip})")
+    zp = z
+    for _ in range(l_skip + n):
+        zp = zp * zp
+    return eval_eq_uni_at_one(-n, zp)
+
+
+def eq_cube_table(point: list[Array]) -> Array:
     """eq(point, y) for y on the hypercube, LSB-first in ``point`` (index bit
     i ↔ point[i]) — the reference's ``evals_eq_hypercube_serial`` layout."""
     if not point:
@@ -109,7 +135,7 @@ def _eq_cube_table(point: list[Array]) -> Array:
 
 def eval_eq_sharp_uni(l_skip: int, xi_1: list[Array], z: Array) -> Array:
     """``eq♯_D(ξ_1, z)`` (poly_common.rs ``eval_eq_sharp_uni``)."""
-    eq_evals = _eq_cube_table(xi_1)
+    eq_evals = eq_cube_table(xi_1)
     omega = omega_pows_f(l_skip)
     acc = jnp.zeros((), EF)
     for k in range(1 << l_skip):
@@ -131,7 +157,7 @@ def eq_uni_poly(l_skip: int, x: Array) -> list[Array]:
 def eq_sharp_uni_poly(l_skip: int, xi_1: list[Array]) -> list[Array]:
     """``eq♯_D(ξ_1, Z)`` in coefficient form — the iDFT of the eq-table of
     ξ_1 read as evaluations on ``D`` (prover/poly.rs ``eq_sharp_uni_poly``)."""
-    return _idft_rows(l_skip, _eq_cube_table(xi_1))
+    return _idft_rows(l_skip, eq_cube_table(xi_1))
 
 
 def fold_ple_evals(l_skip: int, mat: Array, r: Array) -> Array:

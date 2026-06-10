@@ -30,8 +30,9 @@ use openvm_stark_backend::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         prove_zerocheck_and_logup,
         stacked_pcs::{stacked_commit, StackedLayout},
-        AirProvingContext, ColMajorMatrix, DeviceDataTransporter, MatrixDimensions,
-        ProvingContext,
+        stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
+        AirProvingContext, ColMajorMatrix, DeviceDataTransporter, MatrixDimensions, ProvingContext,
+        TraceCommitter,
     },
     test_utils::{
         default_test_params_small,
@@ -69,7 +70,15 @@ fn trace_val(mat: usize, row: usize, col: usize) -> F {
 
 /// Minimal .npy v1 writer: little-endian u32, C order.
 fn write_npy_u32(path: &Path, shape: &[usize], data: &[u32]) {
-    write_npy(path, shape, "<u4", &data.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
+    write_npy(
+        path,
+        shape,
+        "<u4",
+        &data
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Minimal .npy v1 writer: u8, C order.
@@ -88,11 +97,14 @@ fn write_npy(path: &Path, shape: &[usize], descr: &str, bytes: &[u8]) {
         1 => format!("({},)", shape[0]),
         _ => format!(
             "({})",
-            shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
+            shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     };
-    let header =
-        format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_str}, }}");
+    let header = format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape_str}, }}");
     // Header (incl. magic + 2-byte len) pads with spaces to a multiple of 64,
     // ending in \n.
     let unpadded = 10 + header.len() + 1;
@@ -128,7 +140,11 @@ fn write_transcript_log(dir: &Path, log: &TranscriptLog<F, [F; 16]>) {
     let values: Vec<u32> = log.values().iter().map(|x| x.as_canonical_u32()).collect();
     write_npy_u32(&dir.join("transcript_values.npy"), &[values.len()], &values);
     let flags: Vec<u8> = log.samples().iter().map(|&s| s as u8).collect();
-    write_npy_u8(&dir.join("transcript_is_sample.npy"), &[flags.len()], &flags);
+    write_npy_u8(
+        &dir.join("transcript_is_sample.npy"),
+        &[flags.len()],
+        &flags,
+    );
     let perms: Vec<u32> = log
         .perm_results()
         .iter()
@@ -258,14 +274,19 @@ fn gen_transcript_fixture(out: &Path) {
     FiatShamirTranscript::<SC>::observe_ext(&mut ts, e);
     let _ = FiatShamirTranscript::<SC>::sample_ext(&mut ts);
     // Digest observe (8 limbs at once).
-    FiatShamirTranscript::<SC>::observe_commit(&mut ts, core::array::from_fn(|i| F::from_u32(i as u32)));
+    FiatShamirTranscript::<SC>::observe_commit(
+        &mut ts,
+        core::array::from_fn(|i| F::from_u32(i as u32)),
+    );
     // PoW: sequential first-match witness so the fixture is deterministic.
     let pow_bits = 2usize;
     let witness = (0u32..)
         .map(F::from_u32)
         .find(|w| FiatShamirTranscript::<SC>::check_witness(&mut ts.clone(), pow_bits, *w))
         .unwrap();
-    assert!(FiatShamirTranscript::<SC>::check_witness(&mut ts, pow_bits, witness));
+    assert!(FiatShamirTranscript::<SC>::check_witness(
+        &mut ts, pow_bits, witness
+    ));
     let _ = FiatShamirTranscript::<SC>::sample(&mut ts);
 
     let log = ts.into_log();
@@ -276,7 +297,11 @@ fn gen_transcript_fixture(out: &Path) {
         "pow_witness": witness.as_canonical_u32(),
         "script": "observe 1..=5; sample; observe 100..117; sample x3; observe_ext [7,8,9,10]; sample_ext; observe_commit [0..8]; check_witness(pow_bits, witness); sample",
     });
-    fs::write(out.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    fs::write(
+        out.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
     println!("transcript fixtures written to {}", out.display());
 }
 
@@ -401,7 +426,9 @@ impl TestFixture<SC> for Stage2Fixture {
         ]
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContext<openvm_stark_backend::prover::CpuColMajorBackend<SC>> {
+    fn generate_proving_ctx(
+        &self,
+    ) -> ProvingContext<openvm_stark_backend::prover::CpuColMajorBackend<SC>> {
         ProvingContext::new(
             self.specs()
                 .into_iter()
@@ -575,7 +602,11 @@ fn prove_instance() -> ProvenInstance {
         if !pk_air.vk.is_required {
             prelude_len += 1;
         }
-        prelude_len += if pk_air.preprocessed_data.is_some() { 8 } else { 1 };
+        prelude_len += if pk_air.preprocessed_data.is_some() {
+            8
+        } else {
+            1
+        };
         prelude_len += 8 * pk_air.vk.num_cached_mains();
         prelude_len += specs[air_idx].public_values.len();
     }
@@ -774,7 +805,11 @@ fn gen_gkr_fixture(out: &Path) {
         "stage2_end": walk.stage2_end,
         "transcript_len": log.len(),
     });
-    fs::write(out.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    fs::write(
+        out.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
     println!("gkr fixtures written to {}", out.display());
 }
 
@@ -806,16 +841,28 @@ fn constraints_dag_json(dag: &SymbolicConstraintsDag<F>) -> serde_json::Value {
             SymbolicExpressionNode::Constant(c) => {
                 serde_json::json!({"kind": "constant", "value": c.as_canonical_u32()})
             }
-            SymbolicExpressionNode::Add { left_idx, right_idx, .. } => {
+            SymbolicExpressionNode::Add {
+                left_idx,
+                right_idx,
+                ..
+            } => {
                 serde_json::json!({"kind": "add", "left": left_idx, "right": right_idx})
             }
-            SymbolicExpressionNode::Sub { left_idx, right_idx, .. } => {
+            SymbolicExpressionNode::Sub {
+                left_idx,
+                right_idx,
+                ..
+            } => {
                 serde_json::json!({"kind": "sub", "left": left_idx, "right": right_idx})
             }
             SymbolicExpressionNode::Neg { idx, .. } => {
                 serde_json::json!({"kind": "neg", "idx": idx})
             }
-            SymbolicExpressionNode::Mul { left_idx, right_idx, .. } => {
+            SymbolicExpressionNode::Mul {
+                left_idx,
+                right_idx,
+                ..
+            } => {
                 serde_json::json!({"kind": "mul", "left": left_idx, "right": right_idx})
             }
         })
@@ -1074,8 +1121,195 @@ fn gen_zerocheck_fixture(out: &Path) {
         "stage3_end": walk3.stage3_end,
         "transcript_len": inst.log.len(),
     });
-    fs::write(out.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    fs::write(
+        out.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
     println!("zerocheck fixtures written to {}", out.display());
+}
+
+struct StackingLogWalk {
+    lambda: EF,
+    u: Vec<EF>,
+    stage4_end: usize,
+}
+
+fn walk_stacking_log(
+    log: &TranscriptLog<F, [F; 16]>,
+    start: usize,
+    sp: &openvm_stark_backend::proof::StackingProof<SC>,
+) -> StackingLogWalk {
+    let mut idx = start;
+    let read = |samp: bool, idx: &mut usize| -> F {
+        assert_eq!(
+            log.samples()[*idx],
+            samp,
+            "expected {} at transcript index {idx:?}",
+            if samp { "sample" } else { "observe" }
+        );
+        let v = log.values()[*idx];
+        *idx += 1;
+        v
+    };
+    let read_ext = |samp: bool, idx: &mut usize| -> EF {
+        let limbs: [F; 4] = core::array::from_fn(|_| read(samp, idx));
+        EF::from_basis_coefficients_slice(&limbs).unwrap()
+    };
+
+    let lambda = read_ext(true, &mut idx);
+    for &c in &sp.univariate_round_coeffs {
+        assert_eq!(read_ext(false, &mut idx), c);
+    }
+    let mut u = vec![read_ext(true, &mut idx)];
+    for round_polys in &sp.sumcheck_round_polys {
+        for &e in round_polys {
+            assert_eq!(read_ext(false, &mut idx), e);
+        }
+        u.push(read_ext(true, &mut idx));
+    }
+    for claims_for_com in &sp.stacking_openings {
+        for &claim in claims_for_com {
+            assert_eq!(read_ext(false, &mut idx), claim);
+        }
+    }
+
+    StackingLogWalk {
+        lambda,
+        u,
+        stage4_end: idx,
+    }
+}
+
+fn gen_stacking_fixture(out: &Path) {
+    let inputs = out.join("inputs");
+    let outputs = out.join("outputs");
+    fs::create_dir_all(&inputs).unwrap();
+    fs::create_dir_all(&outputs).unwrap();
+
+    let inst = prove_instance();
+    let params = &inst.params;
+    let sp = &inst.proof.stacking_proof;
+    let bcp = &inst.proof.batch_constraint_proof;
+
+    let needs_next: Vec<bool> = inst
+        .sorted_airs
+        .iter()
+        .map(|&i| inst.pk.per_air[i].vk.params.need_rot)
+        .collect();
+    let s_0_deg = 2 * ((1 << params.l_skip) - 1);
+    assert_eq!(sp.univariate_round_coeffs.len(), s_0_deg + 1);
+    assert_eq!(sp.sumcheck_round_polys.len(), params.n_stack);
+    // The fixture has no preprocessed/cached commits: common main only.
+    assert_eq!(sp.stacking_openings.len(), 1);
+
+    let walk3 = walk_zerocheck_log(&inst.log, inst.walk.stage2_end, bcp, &needs_next);
+    let walk4 = walk_stacking_log(&inst.log, walk3.stage3_end, sp);
+    // Stage 5 begins with WHIR's μ-PoW grind: a witness observe, then the
+    // grind's check sample (default_test_params_small has mu_pow_bits > 0).
+    assert!(!inst.log.samples()[walk4.stage4_end]);
+    assert_eq!(
+        inst.log.values()[walk4.stage4_end],
+        inst.proof.whir_proof.mu_pow_witness
+    );
+    assert!(inst.log.samples()[walk4.stage4_end + 1]);
+
+    // Rebuild the common-main stacked PCS data exactly as the coordinator
+    // does (device.commit on the sorted common main traces) and check it
+    // reproduces the prelude's commitment.
+    let engine = BabyBearPoseidon2RefEngine::<DuplexSpongeRecorder>::new(params.clone());
+    let ctx = Stage2Fixture.generate_proving_ctx().into_sorted();
+    let traces: Vec<&ColMajorMatrix<F>> =
+        ctx.common_main_traces().map(|(_, trace)| trace).collect();
+    let (root, data) = engine.device().commit(&traces).unwrap();
+    // vk_pre_hash occupies the first 8 log slots, the common main commit the
+    // next 8.
+    assert_eq!(&root[..], &inst.log.values()[8..16]);
+
+    // Self-validate: Stage 4 has no PoW grind, so the pub entry point replays
+    // cleanly on a ReadOnlyTranscript pinned at stage3_end.
+    {
+        let mut ro = ReadOnlyTranscript::new(&inst.log, walk3.stage3_end);
+        let (sp2, u2) = prove_stacked_opening_reduction::<SC, _, _, _, StackedReductionCpu<SC>>(
+            engine.device(),
+            &mut ro,
+            params.n_stack,
+            vec![&data],
+            vec![needs_next.clone()],
+            &walk3.r,
+        );
+        assert_eq!(sp2.univariate_round_coeffs, sp.univariate_round_coeffs);
+        assert_eq!(sp2.sumcheck_round_polys, sp.sumcheck_round_polys);
+        assert_eq!(sp2.stacking_openings, sp.stacking_openings);
+        assert_eq!(u2, walk4.u);
+    }
+
+    // --- Dumps ---
+    for (air_idx, spec) in inst.specs.iter().enumerate() {
+        write_matrix(&inputs.join(format!("trace_{air_idx}.npy")), &spec.trace);
+    }
+    let r_flat: Vec<u32> = walk3.r.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(&inputs.join("r.npy"), &[walk3.r.len(), 4], &r_flat);
+    write_transcript_log(&outputs, &inst.log);
+    write_matrix(&outputs.join("stacked_matrix.npy"), &data.matrix);
+    write_npy_u32(&outputs.join("lambda.npy"), &[4], &ef_limbs(walk4.lambda));
+    let s0_flat: Vec<u32> = sp
+        .univariate_round_coeffs
+        .iter()
+        .flat_map(|&c| ef_limbs(c))
+        .collect();
+    write_npy_u32(&outputs.join("s0_coeffs.npy"), &[s_0_deg + 1, 4], &s0_flat);
+    let rounds_flat: Vec<u32> = sp
+        .sumcheck_round_polys
+        .iter()
+        .flat_map(|round_polys| round_polys.iter().flat_map(|&e| ef_limbs(e)))
+        .collect();
+    write_npy_u32(
+        &outputs.join("round_polys.npy"),
+        &[params.n_stack, 2, 4],
+        &rounds_flat,
+    );
+    let u_flat: Vec<u32> = walk4.u.iter().flat_map(|&x| ef_limbs(x)).collect();
+    write_npy_u32(&outputs.join("u.npy"), &[walk4.u.len(), 4], &u_flat);
+    for (c, claims_for_com) in sp.stacking_openings.iter().enumerate() {
+        let flat: Vec<u32> = claims_for_com.iter().flat_map(|&e| ef_limbs(e)).collect();
+        write_npy_u32(
+            &outputs.join(format!("stacking_openings_c{c}.npy")),
+            &[claims_for_com.len(), 4],
+            &flat,
+        );
+    }
+
+    let meta = serde_json::json!({
+        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "params": {
+            "l_skip": params.l_skip,
+            "n_stack": params.n_stack,
+            "log_blowup": params.log_blowup,
+            "k_whir": params.whir.k,
+        },
+        "sorted_airs": inst.sorted_airs,
+        "needs_next": needs_next,
+        "s_0_deg": s_0_deg,
+        "stacked_height": data.matrix.height(),
+        "stacked_width": data.matrix.width(),
+        "layout": data.layout.sorted_cols.iter().map(|(m, j, s)| serde_json::json!({
+            "mat_idx": m,
+            "col_in_mat": j,
+            "col_idx": s.col_idx,
+            "row_idx": s.row_idx,
+            "log_height": s.log_height(),
+        })).collect::<Vec<_>>(),
+        "stage3_end": walk3.stage3_end,
+        "stage4_end": walk4.stage4_end,
+        "transcript_len": inst.log.len(),
+    });
+    fs::write(
+        out.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+    println!("stacking fixtures written to {}", out.display());
 }
 
 fn main() {
@@ -1083,6 +1317,7 @@ fn main() {
     let mut transcript_out: Option<PathBuf> = None;
     let mut gkr_out: Option<PathBuf> = None;
     let mut zerocheck_out: Option<PathBuf> = None;
+    let mut stacking_out: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -1090,15 +1325,20 @@ fn main() {
             "--transcript-out" => transcript_out = args.next().map(PathBuf::from),
             "--gkr-out" => gkr_out = args.next().map(PathBuf::from),
             "--zerocheck-out" => zerocheck_out = args.next().map(PathBuf::from),
+            "--stacking-out" => stacking_out = args.next().map(PathBuf::from),
             other => panic!(
-                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>]"
+                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>] [--stacking-out <dir>]"
             ),
         }
     }
-    if out_dir.is_none() && transcript_out.is_none() && gkr_out.is_none() && zerocheck_out.is_none()
+    if out_dir.is_none()
+        && transcript_out.is_none()
+        && gkr_out.is_none()
+        && zerocheck_out.is_none()
+        && stacking_out.is_none()
     {
         panic!(
-            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out is required"
+            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out / --stacking-out is required"
         );
     }
     if let Some(out) = out_dir {
@@ -1112,5 +1352,8 @@ fn main() {
     }
     if let Some(out) = zerocheck_out {
         gen_zerocheck_fixture(&out);
+    }
+    if let Some(out) = stacking_out {
+        gen_stacking_fixture(&out);
     }
 }

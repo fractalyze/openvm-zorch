@@ -22,7 +22,7 @@ only the SWIRL-specific surface here and pushing every generic block upstream.
 | 1. Trace commit | Stacked PCS: stack traces → RS-encode columns → query-strided Merkle root | `openvm_zorch/commit` | byte-matches reference |
 | 2. LogUp-GKR | Interaction fractional sumcheck | `openvm_zorch/logup_gkr` | byte-matches reference |
 | 3. ZeroCheck | Batched constraints, univariate skip + multivariate sumcheck | `openvm_zorch/logup_zerocheck` | byte-matches reference |
-| 4. Stacked reduction | Column openings → stacked matrix openings | — | not started |
+| 4. Stacked reduction | Column openings → stacked matrix openings | `openvm_zorch/stacked_reduction` | byte-matches reference |
 | 5. WHIR opening | k-ary fold + OOD + query phase + grinding | — | not started |
 
 ## Quick start
@@ -40,7 +40,8 @@ cargo run --release -- \
   --out ../../openvm_zorch/commit/testdata/stacked_commit \
   --transcript-out ../../openvm_zorch/testdata/transcript \
   --gkr-out ../../openvm_zorch/logup_gkr/testdata/logup_gkr \
-  --zerocheck-out ../../openvm_zorch/logup_zerocheck/testdata/zerocheck
+  --zerocheck-out ../../openvm_zorch/logup_zerocheck/testdata/zerocheck \
+  --stacking-out ../../openvm_zorch/stacked_reduction/testdata/stacking
 ```
 
 ## Reference pin
