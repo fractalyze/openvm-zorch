@@ -36,9 +36,9 @@ py_library(
     srcs = ["stacked_merkle.py"],
     visibility = ["//visibility:public"],
     deps = [
+        "@zorch//zorch/commit:strided_merkle",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
-        "@zorch//zorch/utils:bits",
         requirement("jax"),
     ],
 )
