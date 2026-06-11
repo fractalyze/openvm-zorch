@@ -25,8 +25,10 @@ https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/s
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from functools import partial
+from typing import Callable, Sequence
 
+import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
@@ -104,6 +106,151 @@ def _pow2_powers(z: Array, dim: int) -> list[Array]:
     return pows
 
 
+# The five device-compute islands of the round loop, factored out so each can be
+# timed (``whir/bench_whir_phases.py``) and, behind a ``jit`` boundary, lowered to
+# one fused kernel rather than eager-dispatched op-by-op (the
+# correctness-of-design fusion the hand-rolled loop forfeits). The transcript
+# observes/samples and the PoW grinds stay in the loop between these islands —
+# they host-read and so cannot trace through. Every island is a pure function of
+# its array inputs, so the refactor is byte-identical to the inlined form.
+
+
+def _setup_f_evals(
+    matrices: Sequence[Array], l_skip: int, m: int, mu: Array
+) -> Array:
+    """μ-batched hypercube evals of ``f̂`` (island J1): per column, the RS message
+    re-read as MLE coefficients and ζ-transformed over all ``m`` bits, summed with
+    powers of ``μ`` across every committed column."""
+    f_evals = jnp.zeros((1 << m,), EF)
+    mu_pow = jnp.ones((), EF)
+    for matrix in matrices:
+        messages = mle_coeffs_to_evals(eval_to_coeff_rs_message(l_skip, matrix.T))
+        for col in range(messages.shape[0]):
+            f_evals = f_evals + mu_pow * f_to_ef(messages[col])
+            mu_pow = mu_pow * mu
+    return f_evals
+
+
+def _round_poly(f_evals: Array, w_evals: Array) -> Array:
+    """Degree-2 sumcheck round message ``s`` of ``Σ_x f̂(x)·ŵ(x)`` (island J2),
+    observed as evaluations at ``{1, 2}``."""
+    f_0, f_1 = f_evals[0::2], f_evals[1::2]
+    w_0, w_1 = w_evals[0::2], w_evals[1::2]
+    s_1 = (f_1 * w_1).sum()
+    s_2 = ((f_1 + f_1 - f_0) * (w_1 + w_1 - w_0)).sum()
+    return jnp.stack([s_1, s_2])
+
+
+def _apply_fold(
+    f_evals: Array, w_evals: Array, alpha: Array
+) -> tuple[Array, Array]:
+    """Fold ``f̂`` and ``ŵ`` at challenge ``α`` (island J3), LSB pair bound
+    first."""
+    return (
+        fold_pair(f_evals[0::2], f_evals[1::2], alpha),
+        fold_pair(w_evals[0::2], w_evals[1::2], alpha),
+    )
+
+
+def _encode_commit(
+    sponge: Sponge,
+    compressor: Compression,
+    g_coeffs: Array,
+    rs_len: int,
+    k_whir: int,
+) -> StackedMerkleTree:
+    """RS-encode ``ĝ`` to a length-``rs_len`` codeword and stacked-Merkle commit it
+    (island J4): pad the coefficients, ``FFT``, bitcast to base, commit at
+    ``2^k_whir`` leaves per row. The heaviest island — full-domain NTT plus the
+    Poseidon2 tree, the composite eager dispatch decomposes."""
+    padded = jnp.concatenate([g_coeffs, jnp.zeros((rs_len - g_coeffs.shape[0],), EF)])
+    # lax.fft on extension dtypes accepts only 1-D input (the same constraint
+    # zorch's basefold encode works around).
+    g_rs = lax.fft(padded, "FFT", rs_len)
+    return stacked_merkle_commit(
+        sponge, compressor, lax.bitcast_convert_type(g_rs, F), 1 << k_whir
+    )
+
+
+def _weight_update(
+    w_evals: Array,
+    gamma: Array,
+    z0_pows: Sequence[Array],
+    zi_pows: Sequence[Sequence[Array]],
+) -> Array:
+    """Fold the out-of-domain and in-domain query constraints into ``ŵ`` (island
+    J5): ``ŵ += γ·eq(·, z0_pows) + Σ_i γ^{i+2}·eq(·, zi_pows[i])``. The powers of
+    each opening point are passed in (the in-domain ones are host integers)."""
+    w_evals = w_evals + gamma * eq_cube_table(list(z0_pows))
+    gamma_pow = gamma * gamma
+    for z_pows in zi_pows:
+        w_evals = w_evals + gamma_pow * eq_cube_table(list(z_pows))
+        gamma_pow = gamma_pow * gamma
+    return w_evals
+
+
+def _encode_commit_arrays(
+    sponge: Sponge,
+    compressor: Compression,
+    g_coeffs: Array,
+    rs_len: int,
+    k_whir: int,
+) -> tuple[Array, list[Array]]:
+    """J4's array outputs (a pytree, so jit-returnable): the committed tree's
+    ``backing_matrix`` and ``digest_layers``. ``StackedMerkleTree`` is a plain
+    (non-pytree) dataclass, so its wrapper is rebuilt outside the jit from these
+    plus the static ``rows_per_query`` — the NTT and Poseidon2 tree still lower
+    inside the boundary, which is the whole point."""
+    tree = _encode_commit(sponge, compressor, g_coeffs, rs_len, k_whir)
+    return tree.backing_matrix, tree.digest_layers
+
+
+@dataclass(frozen=True)
+class _Islands:
+    """The round loop's device-compute dispatchers — plain functions, or their
+    ``jax.jit`` wrappers when ``jit=True``. Each call site is identical across
+    the two: ``jit`` is a transparent, byte-identical boundary (sp1's
+    ``JaggedGkrLayerRound`` pattern). The tables shrink each fold, so a jitted
+    island compiles once per distinct shape (jax caches per shape)."""
+
+    setup: Callable[..., Array]
+    round_poly: Callable[[Array, Array], Array]
+    apply_fold: Callable[[Array, Array, Array], tuple[Array, Array]]
+    encode_commit: Callable[..., StackedMerkleTree]
+    weight_update: Callable[..., Array]
+
+
+def _make_islands(jit: bool, sponge: Sponge, compressor: Compression) -> _Islands:
+    if not jit:
+        return _Islands(
+            _setup_f_evals, _round_poly, _apply_fold, _encode_commit, _weight_update
+        )
+
+    # sponge/compressor hold hash state (non-pytree), so close over them; the
+    # codeword root is rebuilt into a StackedMerkleTree outside the boundary.
+    enc_arrays = jax.jit(
+        partial(_encode_commit_arrays, sponge, compressor), static_argnums=(1, 2)
+    )
+
+    def encode_commit(
+        _sponge: Sponge,
+        _compressor: Compression,
+        g_coeffs: Array,
+        rs_len: int,
+        k_whir: int,
+    ) -> StackedMerkleTree:
+        backing_matrix, digest_layers = enc_arrays(g_coeffs, rs_len, k_whir)
+        return StackedMerkleTree(backing_matrix, digest_layers, 1 << k_whir)
+
+    return _Islands(
+        setup=jax.jit(_setup_f_evals, static_argnums=(1, 2)),
+        round_poly=jax.jit(_round_poly),
+        apply_fold=jax.jit(_apply_fold),
+        encode_commit=encode_commit,
+        weight_update=jax.jit(_weight_update),
+    )
+
+
 def prove_whir_opening(
     transcript: DuplexTranscript,
     sponge: Sponge,
@@ -113,29 +260,28 @@ def prove_whir_opening(
     config: WhirConfig,
     committed: Sequence[tuple[Array, StackedMerkleTree]],
     u_cube: Sequence[Array],
+    jit: bool = False,
 ) -> tuple[DuplexTranscript, WhirProof]:
     """Drive Stage 5 from the transcript state at ``stage4_end``.
 
     ``committed`` holds, per commitment (common main first), the stacked
     evaluation matrix (base field, ``(2^m, W)``) and its Stage-1 tree (whose
     backing matrix is the RS codeword the queries open).
+
+    ``jit`` lowers each device-compute island to one fused kernel instead of
+    eager-dispatching it op-by-op; the transcript observes/samples and the PoW
+    grinds stay on the host between islands. Output is byte-identical either way
+    (the islands are pure functions of their arrays).
     """
     k_whir = config.k
     num_whir_rounds = len(config.num_queries)
+    islands = _make_islands(jit, sponge, compressor)
 
     transcript, mu_pow_witness = grind(transcript, config.mu_pow_bits)
     transcript, mu = sample_ext(transcript)
 
     m = log2_strict_usize(committed[0][0].shape[0])
-    # Hypercube evals of \hat{f}: per column, the RS message re-read as MLE
-    # coefficients and zeta-transformed over all m bits, then μ-batched.
-    f_evals = jnp.zeros((1 << m,), EF)
-    mu_pow = jnp.ones((), EF)
-    for matrix, _ in committed:
-        messages = mle_coeffs_to_evals(eval_to_coeff_rs_message(l_skip, matrix.T))
-        for col in range(messages.shape[0]):
-            f_evals = f_evals + mu_pow * f_to_ef(messages[col])
-            mu_pow = mu_pow * mu
+    f_evals = islands.setup([matrix for matrix, _ in committed], l_skip, m, mu)
     w_evals = mobius_eq_table(u_cube)
 
     whir_sumcheck_polys: list[Array] = []
@@ -157,19 +303,14 @@ def prove_whir_opening(
         # k_whir rounds of sumcheck on Σ_x f̂(x)·ŵ(x); s has degree 2, observed
         # as evaluations at {1, 2}.
         for _ in range(k_whir):
-            f_0, f_1 = f_evals[0::2], f_evals[1::2]
-            w_0, w_1 = w_evals[0::2], w_evals[1::2]
-            s_1 = (f_1 * w_1).sum()
-            s_2 = ((f_1 + f_1 - f_0) * (w_1 + w_1 - w_0)).sum()
-            s_evals = jnp.stack([s_1, s_2])
+            s_evals = islands.round_poly(f_evals, w_evals)
             transcript = transcript.observe(s_evals)
             whir_sumcheck_polys.append(s_evals)
 
             transcript, witness = grind(transcript, config.folding_pow_bits)
             folding_pow_witnesses.append(witness)
             transcript, alpha = sample_ext(transcript)
-            f_evals = fold_pair(f_0, f_1, alpha)
-            w_evals = fold_pair(w_0, w_1, alpha)
+            f_evals, w_evals = islands.apply_fold(f_evals, w_evals, alpha)
 
         # ĝ = f̂(α⃗, ·): commit RS(ĝ) and answer one out-of-domain point — or,
         # in the last round, send ĝ's coefficients in the clear.
@@ -178,15 +319,7 @@ def prove_whir_opening(
         g_tree = None
         if not is_last_round:
             rs_len = 1 << (log_rs_domain_size - 1)
-            padded = jnp.concatenate(
-                [g_coeffs, jnp.zeros((rs_len - g_coeffs.shape[0],), EF)]
-            )
-            # lax.fft on extension dtypes accepts only 1-D input (the same
-            # constraint zorch's basefold encode works around).
-            g_rs = lax.fft(padded, "FFT", rs_len)
-            g_tree = stacked_merkle_commit(
-                sponge, compressor, lax.bitcast_convert_type(g_rs, F), 1 << k_whir
-            )
+            g_tree = islands.encode_commit(sponge, compressor, g_coeffs, rs_len, k_whir)
             transcript = transcript.observe(g_tree.root)
             codeword_commits.append(g_tree.root)
 
@@ -236,14 +369,12 @@ def prove_whir_opening(
         transcript, gamma = sample_ext(transcript)
         if not is_last_round:
             dim = log2_strict_usize(w_evals.shape[0])
-            w_evals = w_evals + gamma * eq_cube_table(_pow2_powers(z_0, dim))
-            gamma_pow = gamma * gamma
-            for z_int in zs:
-                z_pows = [
-                    f_to_ef(f_const(pow(z_int, 1 << t, MODULUS))) for t in range(dim)
-                ]
-                w_evals = w_evals + gamma_pow * eq_cube_table(z_pows)
-                gamma_pow = gamma_pow * gamma
+            z0_pows = _pow2_powers(z_0, dim)
+            zi_pows = [
+                [f_to_ef(f_const(pow(z_int, 1 << t, MODULUS))) for t in range(dim)]
+                for z_int in zs
+            ]
+            w_evals = islands.weight_update(w_evals, gamma, z0_pows, zi_pows)
 
         log_rs_domain_size -= 1
 
