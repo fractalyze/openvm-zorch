@@ -25,9 +25,10 @@ bazel_dep(name = "zorch", version = "0.0.0")
 git_override(
     module_name = "zorch",
     remote = "https://github.com/fractalyze/zorch.git",
-    # main @ BaseFold batch open + transcript PoW grind — the same pin
-    # sp1-zorch carries, so the two consumers exercise one zorch surface.
-    commit = "b2a15826abc5036517415a8dd8b5ffc700dee75f",
+    # main @ generic WHIR PCS (zorch/pcs/whir: commit/open/verify, μ-batch,
+    # device-side strided Merkle reconstruct) — #234/#236/#237. This consumer
+    # slice migrates openvm_zorch/whir onto it.
+    commit = "13fe6f3ca056d6b25494a37376cec4c9a9f73f36",
 )
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
