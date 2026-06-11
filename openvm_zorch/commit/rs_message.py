@@ -27,36 +27,17 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import Array, lax
 
-from zorch.utils.bits import log2_strict_usize
+# The MLE coeff↔eval (zeta / Möbius) transforms are scheme-agnostic and live in
+# zorch; re-exported here so this module stays the SWIRL RS-message home and its
+# importers are unchanged. Only the prismalinear chunking below is SWIRL-specific.
+from zorch.poly.multilinear import mle_coeffs_to_evals, mle_evals_to_coeffs
 
-
-def mle_coeffs_to_evals(chunks: Array) -> Array:
-    """MLE coeff→eval over the trailing axis of ``(..., 2^k)``, LSB-first.
-
-    Bit ``b``'s pass adds each lower half-span into its upper half
-    (``a[u + 2^b] += a[u]``); ``k`` is static so the loop unrolls into ``k``
-    fused adds.
-    """
-    k = log2_strict_usize(chunks.shape[-1])
-    lead = chunks.shape[:-1]
-    for b in range(k):
-        x = chunks.reshape(lead + (1 << (k - b - 1), 2, 1 << b))
-        x = x.at[..., 1, :].add(x[..., 0, :])
-        chunks = x.reshape(lead + (1 << k,))
-    return chunks
-
-
-def mle_evals_to_coeffs(evals: Array) -> Array:
-    """Inverse of ``mle_coeffs_to_evals`` (the Rust ``evals_to_coeffs_inplace``):
-    per-bit Möbius passes ``a[u + 2^b] -= a[u]``. The passes touch disjoint
-    bits, so the forward loop order inverts pass-by-pass."""
-    k = log2_strict_usize(evals.shape[-1])
-    lead = evals.shape[:-1]
-    for b in range(k):
-        x = evals.reshape(lead + (1 << (k - b - 1), 2, 1 << b))
-        x = x.at[..., 1, :].add(-x[..., 0, :])
-        evals = x.reshape(lead + (1 << k,))
-    return evals
+__all__ = [
+    "mle_coeffs_to_evals",
+    "mle_evals_to_coeffs",
+    "eval_to_coeff_rs_message",
+    "rs_code_matrix",
+]
 
 
 def eval_to_coeff_rs_message(l_skip: int, evals: Array) -> Array:

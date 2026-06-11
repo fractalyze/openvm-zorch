@@ -25,7 +25,7 @@ py_library(
     srcs = ["rs_message.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "@zorch//zorch/utils:bits",
+        "@zorch//zorch/poly",
         requirement("jax"),
     ],
 )
