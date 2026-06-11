@@ -4,15 +4,15 @@ permissions: read-all
 
 on:
   push:
-    branches: ["main"]
+    branches: ["master"]
   pull_request:
-    branches: ["main"]
+    branches: ["master"]
 
-# Cancel in-progress runs for a PR's branch, but never cancel pushes to main so
-# every merge gets a full run.
+# Cancel in-progress runs for a PR's branch, but never cancel pushes to master
+# so every merge gets a full run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   # Always a CPU leg, plus a GPU leg only when the HAS_GPU_RUNNER repo variable
