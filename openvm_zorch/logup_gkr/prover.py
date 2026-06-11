@@ -62,7 +62,7 @@ def _lift_sent(lo: Array, hi: Array) -> Array:
     ``f[u] = lo + u*(hi - lo)``, shape ``(3, *lo.shape)``. ``us`` uses
     ``jnp.stack`` (not ``jnp.arange``, whose iota is unsupported for extension
     dtypes)."""
-    us = jnp.stack([jnp.array(u, lo.dtype) for u in _SENT_US])
+    us = jnp.stack([jnp.array(u, dtype=lo.dtype) for u in _SENT_US])
     return lo + us.reshape((-1,) + (1,) * lo.ndim) * (hi - lo)
 
 
@@ -90,23 +90,19 @@ def _sample(transcript: DuplexTranscript) -> tuple[DuplexTranscript, Array]:
 # lowers Poseidon2 ONCE. Warm runtime is unchanged — both keep one fused permutation
 # kernel per round — and the split is byte-identical (same ops, same order).
 @jax.jit
-def _round_poly(
-    state: list[Array], lam: Array
-) -> tuple[Array, list[tuple[Array, Array]]]:
-    """The sent round poly s(1,2,3) and the split pairs for the fold. λ weights the
-    denominator term — opposite of logup_combine. No transcript: only this cheap
-    arithmetic re-lowers per layer width."""
-    pairs = [(a[0::2], a[1::2]) for a in state]
-    eq, p0, q0, p1, q1 = (_lift_sent(lo, hi) for lo, hi in pairs)
-    s_evals = jnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
-    return s_evals, pairs
+def _round_poly(state: list[Array], lam: Array) -> Array:
+    """The sent round poly s(1,2,3). λ weights the denominator term — opposite of
+    logup_combine. Binds the LSB: pairs adjacent entries (the reference's MLE
+    fold). No transcript: only this cheap arithmetic re-lowers per layer width."""
+    eq, p0, q0, p1, q1 = (_lift_sent(a[0::2], a[1::2]) for a in state)
+    return jnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
 
 
 @jax.jit
-def _round_fold(pairs: list[tuple[Array, Array]], r: Array) -> list[Array]:
-    """The LSB fold at challenge r (pair adjacent entries — the reference's MLE
-    fold). Variable width, no transcript."""
-    return [fold_pair(lo, hi, r) for lo, hi in pairs]
+def _round_fold(state: list[Array], r: Array) -> list[Array]:
+    """Fold each MLE at challenge r over the same LSB pairing as `_round_poly`.
+    Variable width, no transcript."""
+    return [fold_pair(a[0::2], a[1::2], r) for a in state]
 
 
 @dataclass(frozen=True)
@@ -200,10 +196,10 @@ def fractional_sumcheck(
         rho: list[Array] = []
         round_polys = []
         for _ in range(round_):
-            s_evals, pairs = _round_poly(state, lam)
+            s_evals = _round_poly(state, lam)
             transcript = _observe(transcript, s_evals)
             transcript, r_round = _sample(transcript)
-            state = _round_fold(pairs, r_round)
+            state = _round_fold(state, r_round)
             rho.append(r_round)
             round_polys.append(s_evals)
 
