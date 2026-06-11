@@ -25,9 +25,9 @@ from dataclasses import dataclass
 import jax
 from jax import Array
 
+from zorch.commit.strided_merkle import StridedMerkleTree
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
-from zorch.utils.bits import is_power_of_two, log2_strict_usize
 
 
 @dataclass(frozen=True)
@@ -80,33 +80,15 @@ def stacked_merkle_commit(
 ) -> StackedMerkleTree:
     """Hash each row of ``(height, width)`` ``matrix`` to a leaf, fold
     ``log2(rows_per_query)`` query-strided levels, then plain pairs to the root.
+
+    Delegates the strided fold to zorch's scheme-agnostic ``StridedMerkleTree``
+    (the query-strided layout is not SWIRL-specific, so it belongs upstream — see
+    CLAUDE.md). ``fuse=False`` keeps the byte-identical inline path until zkx's
+    ``ExpandMerkleCommit`` learns the ``rows_per_query`` attribute of a *strided*
+    ``zorch.merkle_commit`` (it currently hardcodes a plain binary pyramid and
+    crashes the strided shape under jit); flip to ``fuse=True`` once it does.
     """
-    height = matrix.shape[0]
-    if not is_power_of_two(height):
-        raise ValueError(f"matrix height ({height}) must be a power of two")
-    if not is_power_of_two(rows_per_query):
-        raise ValueError(f"rows_per_query ({rows_per_query}) must be a power of two")
-    if rows_per_query > height:
-        raise ValueError(f"rows_per_query ({rows_per_query}) > leaves ({height})")
-
-    layer = jax.vmap(sponge.hash)(matrix)
-    digest = layer.shape[-1]
-    query_stride = height // rows_per_query
-
-    # Query-strided levels: reshape (m, ...) as (m/(2s), 2, s, digest) so lanes
-    # (2x·s + y, (2x+1)·s + y) land in one compress; the result re-flattens to
-    # (m/2, digest) preserving next[x·s + y] order.
-    for _ in range(log2_strict_usize(rows_per_query)):
-        pairs = layer.reshape(-1, 2, query_stride, digest)
-        left = pairs[:, 0].reshape(-1, digest)
-        right = pairs[:, 1].reshape(-1, digest)
-        layer = jax.vmap(lambda l, r: compressor.compress(jax.numpy.stack([l, r])))(
-            left, right
-        )
-
-    digest_layers = [layer]
-    while layer.shape[0] > 1:
-        pairs = layer.reshape(-1, 2, digest)
-        layer = jax.vmap(compressor.compress)(pairs)
-        digest_layers.append(layer)
+    _, digest_layers = StridedMerkleTree(
+        sponge, compressor, rows_per_query, fuse=False
+    ).commit(matrix)
     return StackedMerkleTree(matrix, digest_layers, rows_per_query)
