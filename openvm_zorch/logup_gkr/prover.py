@@ -25,18 +25,70 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 
 from openvm_zorch.transcript import sample_ext
 from zorch.logup_gkr.circuit import GkrLayer, build_pyramid
 from zorch.poly.eq import expand_eq_to_hypercube
-from zorch.sumcheck.prover import fold_pair, lift_to_domain
+from zorch.sumcheck.prover import fold_pair
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
-# eq (deg 1) * projective fraction addition (deg 2).
-_DEGREE = 3
+# Stage-2 ran fully eager, and the per-round Fiat-Shamir dominated it: a single
+# eager `observe + sample_ext` dispatches the width-16 Poseidon2 permutation as
+# thousands of tiny ops (~4.4 s/round measured), so the ~O(rounds²) binding
+# steps cost ~174 s = 35% of prove — while the round *arithmetic* is only a few
+# seconds. jit collapses each Poseidon2 permutation to one kernel (~70000×
+# measured on observe+sample). Every transcript touch below is therefore jitted.
+# GKR's round loop carries no per-round PoW grind (unlike WHIR, whose grind
+# host-reads and breaks the trace), so the transcript threads through @jit
+# cleanly. Byte-identical: jit fuses without reassociating field/Poseidon2 ops.
+#
+# Round poly degree: eq (deg 1) * projective fraction addition (deg 2) = 3, so
+# four evals {0,1,2,3} determine it — but the prover sends only {1,2,3} (the
+# verifier infers s(0) from the running claim s(0)+s(1) = prev). Lifting to the
+# SENT domain skips the discarded u=0 across all five MLEs.
+_SENT_US = (1, 2, 3)
+
+
+def _lift_sent(lo: Array, hi: Array) -> Array:
+    """Lift a split pair to the SENT eval domain ``{1,2,3}`` (skips u=0).
+
+    ``f[u] = lo + u*(hi - lo)``, shape ``(3, *lo.shape)``. ``us`` uses
+    ``jnp.stack`` (not ``jnp.arange``, whose iota is unsupported for extension
+    dtypes)."""
+    us = jnp.stack([jnp.array(u, lo.dtype) for u in _SENT_US])
+    return lo + us.reshape((-1,) + (1,) * lo.ndim) * (hi - lo)
+
+
+@jax.jit
+def _observe(transcript: DuplexTranscript, values: Array) -> DuplexTranscript:
+    """Absorb ``values`` inside one fused Poseidon2 kernel."""
+    return transcript.observe(values)
+
+
+@jax.jit
+def _sample(transcript: DuplexTranscript) -> tuple[DuplexTranscript, Array]:
+    """Squeeze one BabyBear⁴ challenge inside one fused Poseidon2 kernel."""
+    return sample_ext(transcript)
+
+
+@jax.jit
+def _round_step(
+    state: list[Array], transcript: DuplexTranscript, lam: Array
+) -> tuple[list[Array], DuplexTranscript, Array, Array]:
+    """One sumcheck round, fused: round-poly at the sent evals, the Fiat-Shamir
+    observe+sample, and the LSB fold (pair adjacent entries — the reference's
+    MLE fold). λ weights the denominator term — opposite of logup_combine."""
+    pairs = [(a[0::2], a[1::2]) for a in state]
+    eq, p0, q0, p1, q1 = (_lift_sent(lo, hi) for lo, hi in pairs)
+    s_evals = jnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
+    transcript = transcript.observe(s_evals)
+    transcript, r = sample_ext(transcript)
+    state = [fold_pair(lo, hi, r) for lo, hi in pairs]
+    return state, transcript, s_evals, r
 
 
 @dataclass(frozen=True)
@@ -52,6 +104,7 @@ class FracSumcheckProof:
     rhos: list[list[Array]]
 
 
+@jax.jit
 def _eq_table(xi: list[Array]) -> Array:
     """eq(ξ, y) for y on the hypercube, little-endian in ξ (ξ[0] ↔ bit 0)."""
     point = jnp.stack(xi[::-1])
@@ -90,7 +143,7 @@ def fractional_sumcheck(
     q_root = floor.denominator_0 * floor.denominator_1
     if int(jnp.sum(p_root != 0)) != 0:
         raise ValueError("non-zero root sum: interactions do not balance")
-    transcript = transcript.observe(q_root)
+    transcript = _observe(transcript, q_root)
 
     def layer_claims(layer: GkrLayer) -> Array:
         # Wire order (p_xi_0, q_xi_0, p_xi_1, q_xi_1); each MLE is length 1.
@@ -105,8 +158,8 @@ def fractional_sumcheck(
 
     # Layer 1 is checked by the verifier directly: claims, then μ_1.
     claims = layer_claims(floor)
-    transcript = transcript.observe(claims)
-    transcript, mu_1 = sample_ext(transcript)
+    transcript = _observe(transcript, claims)
+    transcript, mu_1 = _sample(transcript)
     xi = [mu_1]
 
     claims_per_layer = [claims]
@@ -116,7 +169,7 @@ def fractional_sumcheck(
     rhos: list[list[Array]] = []
     for round_ in range(1, total_rounds):
         layer = layers[total_rounds - 1 - round_]  # MLEs of length 2^round_
-        transcript, lam = sample_ext(transcript)
+        transcript, lam = _sample(transcript)
         lambdas.append(lam)
 
         state = [
@@ -129,20 +182,9 @@ def fractional_sumcheck(
         rho: list[Array] = []
         round_polys = []
         for _ in range(round_):
-            # Bind the LSB: pair adjacent entries (the reference's MLE fold).
-            pairs = [(a[0::2], a[1::2]) for a in state]
-            eq, p0, q0, p1, q1 = (
-                lift_to_domain(lo, hi, _DEGREE) for lo, hi in pairs
-            )
-            # Batched summand: eq·((p0·q1 + p1·q0) + λ·q0·q1). Note λ weights
-            # the denominator term — the opposite of zorch's logup_combine.
-            integrand = eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1))
-            s_evals = jnp.sum(integrand, axis=-1)  # (degree+1,) at {0..3}
-            transcript = transcript.observe(s_evals[1:])
-            transcript, r_round = sample_ext(transcript)
-            state = [fold_pair(lo, hi, r_round) for lo, hi in pairs]
+            state, transcript, s_evals, r_round = _round_step(state, transcript, lam)
             rho.append(r_round)
-            round_polys.append(s_evals[1:])
+            round_polys.append(s_evals)
 
         folded = GkrLayer(
             numerator_0=state[1],
@@ -152,8 +194,8 @@ def fractional_sumcheck(
             num_interaction_variables=0,
         )
         claims = layer_claims(folded)
-        transcript = transcript.observe(claims)
-        transcript, mu = sample_ext(transcript)
+        transcript = _observe(transcript, claims)
+        transcript, mu = _sample(transcript)
         # ξ^{(j)} = (μ_j, ρ): the merge challenge is the new first coordinate.
         xi = [mu] + rho
 
@@ -184,6 +226,6 @@ def pad_xi(
     """
     xi = list(xi)
     while len(xi) < target_len:
-        transcript, extra = sample_ext(transcript)
+        transcript, extra = _sample(transcript)
         xi.append(extra)
     return transcript, xi
