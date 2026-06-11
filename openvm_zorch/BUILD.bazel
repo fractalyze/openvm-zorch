@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@openvm_zorch_pip//:requirements.bzl", "requirement")
 
 # Transcript-only golden vectors from tools/fixture-gen (--transcript-out).
@@ -108,6 +108,28 @@ py_test(
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("absl_py"),
+        requirement("jax"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
+
+# Baseline compile-vs-compute split for prove() (issue #1). Not a byte-match
+# test — runs prove() twice in one process and reports the timing delta.
+py_binary(
+    name = "prove_bench",
+    srcs = ["prove_bench.py"],
+    data = [":prove_testdata"],
+    deps = [
+        ":prove",
+        ":transcript",
+        "//openvm_zorch/logup_gkr:input_layer",
+        "//openvm_zorch/logup_zerocheck:constraints",
+        "//openvm_zorch/poseidon2:babybear16",
+        "//openvm_zorch/whir:prover",
+        "@zorch//zorch/hash:compression",
+        "@zorch//zorch/hash:sponge",
+        "@zorch//zorch/hash/poseidon2",
         requirement("jax"),
         requirement("numpy"),
         requirement("zk_dtypes"),
