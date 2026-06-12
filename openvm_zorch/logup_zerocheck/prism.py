@@ -58,29 +58,41 @@ def omega_pows_f(l_skip: int) -> Array:
     )
 
 
+@lru_cache(maxsize=None)
+def _idft_weight(l_skip: int) -> Array:
+    """The ``2^l_skip × 2^l_skip`` inverse-Vandermonde matrix
+    ``W[t, k] = ω^{-tk}/N`` as base-field constants, built once from host
+    integers (the weights depend only on ``l_skip``, never on the data)."""
+    size = 1 << l_skip
+    w = omega_int(l_skip)
+    inv_n = pow(size, MODULUS - 2, MODULUS)
+    return jnp.array(
+        [
+            [(inv_n * pow(w, (-t * k) % size, MODULUS)) % MODULUS for k in range(size)]
+            for t in range(size)
+        ],
+        F,
+    )
+
+
 def _idft_rows(l_skip: int, chunks: Array) -> list[Array]:
     """iDFT over the trailing-window axis: ``chunks`` is ``(..., 2^l_skip)``
     evaluations on ``D`` (index k ↦ ω^k); returns the ``2^l_skip`` coefficient
     slices ``[c_0, c_1, ...]``, each ``(...,)``.
 
-    Unrolled inverse-Vandermonde rows from host integers — exact and
-    dtype-agnostic (extension evaluations promote the base-field weights).
+    The inverse-Vandermonde weights are a precomputed constant matrix
+    (``_idft_weight``); the data contraction ``c_t = Σ_k chunks_k · W[t, k]`` is
+    one broadcast-multiply and a trailing-axis sum — exact (field addition is
+    associative), dtype-agnostic (extension evaluations promote the weights),
+    and jit-fusable (no host-int constants under the trace).
     """
     size = 1 << l_skip
-    w = omega_int(l_skip)
-    inv_n = pow(size, MODULUS - 2, MODULUS)
-    ext = chunks.dtype != F
-    out = []
-    for t in range(size):
-        acc = None
-        for k in range(size):
-            weight = f_const(inv_n * pow(w, (-t * k) % size, MODULUS))
-            if ext:
-                weight = f_to_ef(weight)
-            term = chunks[..., k] * weight
-            acc = term if acc is None else acc + term
-        out.append(acc)
-    return out
+    weight = _idft_weight(l_skip)
+    if chunks.dtype != F:
+        weight = f_to_ef(weight)
+    # (..., 1, size_k) · (size_t, size_k) → (..., size_t, size_k), sum over k.
+    rows = (chunks[..., None, :] * weight).sum(axis=-1)
+    return [rows[..., t] for t in range(size)]
 
 
 def eval_eq_uni(l_skip: int, x: Array, y: Array) -> Array:
@@ -230,23 +242,41 @@ def coset_evals(l_skip: int, mat: Array, num_cosets: int) -> Array:
     indexes ``z = g^{c+1}·ω^k``.
     """
     size = 1 << l_skip
-    w = omega_int(l_skip)
     height, width = mat.shape
     chunks = mat.reshape(height >> l_skip, size, width)
-    coeffs = _idft_rows(l_skip, jnp.moveaxis(chunks, 1, -1))
-    out = []
-    for c in range(num_cosets):
-        shift = pow(GENERATOR, c + 1, MODULUS)
-        evals_z = []
-        for k in range(size):
-            acc = None
-            for t in range(size):
-                weight = f_const(pow(shift, t, MODULUS) * pow(w, (t * k) % size, MODULUS))
-                term = coeffs[t] * weight
-                acc = term if acc is None else acc + term
-            evals_z.append(acc)
-        out.append(jnp.stack(evals_z))
-    return jnp.stack(out)
+    coeffs = jnp.stack(_idft_rows(l_skip, jnp.moveaxis(chunks, 1, -1)))
+    # coeffs: (size_t, rows, width). Contract against the constant coset-DFT
+    # weights V[c, k, t] = g^{(c+1)t}·ω^{tk}; trailing-axis sum over t.
+    weight = _coset_weight(l_skip, num_cosets)
+    if coeffs.dtype != F:
+        weight = f_to_ef(weight)
+    coeffs_t_last = jnp.moveaxis(coeffs, 0, -1)  # (rows, width, size_t)
+    return (
+        weight[:, :, None, None, :] * coeffs_t_last[None, None, :, :, :]
+    ).sum(axis=-1)  # (num_cosets, size_k, rows, width)
+
+
+@lru_cache(maxsize=None)
+def _coset_weight(l_skip: int, num_cosets: int) -> Array:
+    """The coset-DFT weights ``V[c, k, t] = g^{(c+1)t}·ω^{tk}`` as base-field
+    constants (depend only on ``l_skip``/``num_cosets``), shape
+    ``(num_cosets, 2^l_skip, 2^l_skip)``."""
+    size = 1 << l_skip
+    w = omega_int(l_skip)
+    return jnp.array(
+        [
+            [
+                [
+                    (pow(GENERATOR, (c + 1) * t, MODULUS) * pow(w, (t * k) % size, MODULUS))
+                    % MODULUS
+                    for t in range(size)
+                ]
+                for k in range(size)
+            ]
+            for c in range(num_cosets)
+        ],
+        F,
+    )
 
 
 def geometric_cosets_to_coeffs(
@@ -264,18 +294,33 @@ def geometric_cosets_to_coeffs(
     chirp-z bookkeeping (interpolation through the same points is unique).
     """
     size = 1 << l_skip
+    # Q_t(s_c^N) for all cosets at once: iDFT over the trailing z-axis, then
+    # unshift by g^{-(c+1)t}. ``idft[t, c]`` is the t-th iDFT coefficient.
+    idft = jnp.stack(_idft_rows(l_skip, evals))  # (size_t, num_cosets)
+    unshift, basis = _geom_weights(l_skip, num_cosets)  # (size_t, c), (m, c)
+    if idft.dtype != F:
+        unshift, basis = f_to_ef(unshift), f_to_ef(basis)
+    q_t = idft * unshift  # Q_t(s_c^N), shape (size_t, num_cosets)
+    # coeffs[m·N + t] = Σ_c Q_t(s_c^N)·basis[c][m]; contract the cosets (last).
+    coeffs = (q_t[:, None, :] * basis[None, :, :]).sum(axis=-1)  # (size_t, m)
+    return [coeffs[t, m] for m in range(num_cosets) for t in range(size)]
+
+
+@lru_cache(maxsize=None)
+def _geom_weights(l_skip: int, num_cosets: int) -> tuple[Array, Array]:
+    """The geometric-coset interpolation weights as base-field constants, laid
+    out for the contraction in ``geometric_cosets_to_coeffs`` (cosets last):
+    ``unshift[t, c] = g^{-(c+1)t}`` (the per-coset iDFT unshift) and
+    ``basis[m, c]`` (the Lagrange basis over the points ``s_c^N``, in
+    coefficient form). Both depend only on ``l_skip``/``num_cosets``."""
+    size = 1 << l_skip
     shifts = [pow(GENERATOR, c + 1, MODULUS) for c in range(num_cosets)]
-    # Q_t(s_c^N): per-coset iDFT, unshifted.
-    q_at = []  # [coset][t]
-    for c in range(num_cosets):
-        rows = _idft_rows(l_skip, evals[c])
-        inv_s = pow(shifts[c], MODULUS - 2, MODULUS)
-        q_at.append(
-            [row * f_const(pow(inv_s, t, MODULUS)) for t, row in enumerate(rows)]
-        )
-    # Lagrange basis over the points s_c^N, in coefficient form (host ints).
+    inv_shifts = [pow(s, MODULUS - 2, MODULUS) for s in shifts]
+    unshift = jnp.array(
+        [[pow(inv_s, t, MODULUS) for inv_s in inv_shifts] for t in range(size)], F
+    )
     points = [pow(s, size, MODULUS) for s in shifts]
-    basis: list[list[int]] = []
+    basis_cols: list[list[int]] = []  # [coset c][coeff m]
     for i in range(num_cosets):
         coeffs = [1]
         denom = 1
@@ -287,14 +332,8 @@ def geometric_cosets_to_coeffs(
             coeffs = [(a + b) % MODULUS for a, b in zip(coeffs, lower)]
             denom = denom * (points[i] - points[j]) % MODULUS
         inv_denom = pow(denom, MODULUS - 2, MODULUS)
-        basis.append([c * inv_denom % MODULUS for c in coeffs])
-    # coeffs[m·N + t] = Σ_c Q_t(s_c^N) · basis[c][m]
-    out: list[Array] = []
-    for m in range(num_cosets):
-        for t in range(size):
-            acc = None
-            for c in range(num_cosets):
-                term = q_at[c][t] * f_const(basis[c][m])
-                acc = term if acc is None else acc + term
-            out.append(acc)
-    return out
+        basis_cols.append([c * inv_denom % MODULUS for c in coeffs])
+    basis = jnp.array(
+        [[basis_cols[c][m] for c in range(num_cosets)] for m in range(num_cosets)], F
+    )
+    return unshift, basis
