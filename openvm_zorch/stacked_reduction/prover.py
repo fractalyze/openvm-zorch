@@ -20,9 +20,11 @@ https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/s
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Sequence
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 
@@ -87,6 +89,51 @@ def _uni_kernel_args(l_skip: int, n: int, omega: int, r_0: Array):
     return l_skip, omega, r_0
 
 
+@functools.partial(jax.jit, static_argnums=(0, 1, 2))
+def _round0_group_contrib(
+    l_skip: int,
+    l_eff: int,
+    n: int,
+    ce: Array,
+    z_grid: Array,
+    r_uni: Array,
+    omega_eff_ef: Array,
+    eq_const: Array,
+    eq_uni_1_grid: Array,
+    eq_rs: Array,
+    k_rot_rs: Array,
+    lam_eq_w: Array,
+    lam_rot_w: Array,
+) -> Array:
+    """One stacking group's round-0 contribution to ``s_evals`` (shape
+    ``(num_cosets, 2^l_skip)``), as a single fused kernel.
+
+    Evaluates the eq / κ_rot univariate kernels over the whole ``(coset, z)``
+    grid, contracts ``q``'s coset windows (``ce``), then λ-batches the columns.
+    Jitted so XLA fuses the per-grid array ops into a handful of kernels
+    instead of dispatching the field arithmetic op-by-op (the lever that
+    turned GKR/WHIR eager dispatch into a compute win); each distinct group
+    shape compiles once. ``coset_evals`` is kept eager and passed in as ``ce``
+    — its host-int Lagrange weight construction crashes the zkx backend's
+    compiler when traced.
+    """
+    ind = prism.eval_in_uni(l_skip, n, z_grid)  # (C, S) or scalar 1
+    eq_uni_r0 = prism.eval_eq_uni(l_eff, z_grid, r_uni)  # (C, S)
+    eq_uni_r0_rot = prism.eval_eq_uni(l_eff, z_grid, r_uni * omega_eff_ef)
+    # eq / κ_rot cube vectors over the windows axis, transposed so the window
+    # contraction reduces the *trailing* axis (the EF reduce shape the zkx
+    # backend lowers cleanly — a strided mid-axis EF reduce crashes codegen).
+    eq_vec = eq_uni_r0[..., None] * eq_rs  # (C, S, windows)
+    k_rot_vec = eq_uni_r0_rot[..., None] * eq_rs + (
+        eq_const * eq_uni_1_grid[..., None] * (k_rot_rs - eq_rs)
+    )
+    ce_t = jnp.moveaxis(ce, 2, -1)  # (C, S, columns, windows)
+    eq_per_col = (ce_t * eq_vec[:, :, None, :]).sum(axis=-1)  # (C, S, columns)
+    rot_per_col = (ce_t * k_rot_vec[:, :, None, :]).sum(axis=-1)
+    contrib = (lam_eq_w * eq_per_col + lam_rot_w * rot_per_col).sum(axis=-1)
+    return contrib * ind  # (C, S)
+
+
 def prove_stacked_opening_reduction(
     transcript: DuplexTranscript,
     l_skip: int,
@@ -145,9 +192,33 @@ def prove_stacked_opening_reduction(
             eq_tables[lht] = prism.eq_cube_table(list(r[1 : 1 + n_lift]))
 
     # --- Round 0: s_0 from evaluations on the cosets g·D, g²·D ---
+    # The whole (coset, z-index) grid is evaluated at once: the per-x kernels
+    # (eq_D, κ_rot, in_{D,n}) are elementwise and broadcast over the grid, and
+    # the per-column window contraction folds into one batched reduction. This
+    # replaces a 2·2^l_skip scalar-op nest per group — eager op-by-op dispatch
+    # that XLA cannot fuse — with a handful of array ops over leading
+    # (coset, z) batch axes (field arithmetic is exactly associative, so the
+    # reduction order does not change s_0).
     num_cosets = 2  # q · (eq or κ_rot) is degree 2 per variable
     size = 1 << l_skip
-    s_acc = [[jnp.zeros((), EF) for _ in range(size)] for _ in range(num_cosets)]
+    # z[c, k] = g^{c+1}·ω^k, the z-index of coset c (host ints → one EF grid).
+    z_grid = jnp.stack(
+        [
+            jnp.stack(
+                [
+                    _ef_const(
+                        pow(prism.GENERATOR, c + 1, MODULUS)
+                        * pow(omega, k, MODULUS)
+                        % MODULUS
+                    )
+                    for k in range(size)
+                ]
+            )
+            for c in range(num_cosets)
+        ]
+    )  # (num_cosets, size) EF
+    eq_uni_1_grid = prism.eval_eq_uni_at_one(l_skip, z_grid)  # group-invariant
+    s_evals = jnp.zeros((num_cosets, size), EF)
     for g_start, g_end in groups:
         g_views = views[g_start:g_end]
         lht = g_views[0].slice.log_height
@@ -165,8 +236,6 @@ def prove_stacked_opening_reduction(
             ],
             axis=1,
         )
-        # (num_cosets, 2^l_skip, 2^ñ_T windows, columns)
-        ce = prism.coset_evals(l_skip, q_cols, num_cosets)
         lam_eq_w = jnp.stack([lam_pows[v.lam_eq] for v in g_views])
         lam_rot_w = jnp.stack(
             [
@@ -175,31 +244,24 @@ def prove_stacked_opening_reduction(
             ]
         )
         l_eff, omega_eff, r_uni = _uni_kernel_args(l_skip, n, omega, r_0)
-        omega_eff_ef = _ef_const(omega_eff)
-        for c in range(num_cosets):
-            for k in range(size):
-                z_int = (
-                    pow(prism.GENERATOR, c + 1, MODULUS)
-                    * pow(omega, k, MODULUS)
-                    % MODULUS
-                )
-                z = _ef_const(z_int)
-                ind = prism.eval_in_uni(l_skip, n, z)
-                eq_uni_r0 = prism.eval_eq_uni(l_eff, z, r_uni)
-                eq_uni_r0_rot = prism.eval_eq_uni(l_eff, z, r_uni * omega_eff_ef)
-                eq_uni_1 = prism.eval_eq_uni_at_one(l_skip, z)
-                eq_vec = eq_uni_r0 * eq_rs
-                k_rot_vec = eq_uni_r0_rot * eq_rs + eq_const * eq_uni_1 * (
-                    k_rot_rs - eq_rs
-                )
-                q_zx = f_to_ef(ce[c, k])  # (windows, columns)
-                eq_per_col = (q_zx * eq_vec[:, None]).sum(axis=0)
-                rot_per_col = (q_zx * k_rot_vec[:, None]).sum(axis=0)
-                contrib = (
-                    lam_eq_w * eq_per_col + lam_rot_w * rot_per_col
-                ).sum() * ind
-                s_acc[c][k] = s_acc[c][k] + contrib
-    s_evals = jnp.stack([jnp.stack(row) for row in s_acc])
+        # (num_cosets, 2^l_skip, 2^ñ_T windows, columns) — coset_evals stays
+        # eager; only the kernel-eval + contraction is jitted.
+        ce = f_to_ef(prism.coset_evals(l_skip, q_cols, num_cosets))
+        s_evals = s_evals + _round0_group_contrib(
+            l_skip,
+            l_eff,
+            n,
+            ce,
+            z_grid,
+            r_uni,
+            _ef_const(omega_eff),
+            eq_const,
+            eq_uni_1_grid,
+            eq_rs,
+            k_rot_rs,
+            lam_eq_w,
+            lam_rot_w,
+        )  # (C, S)
     s_0_deg = num_cosets * (size - 1)
     s_0 = jnp.stack(
         prism.geometric_cosets_to_coeffs(l_skip, s_evals, num_cosets)[: s_0_deg + 1]
