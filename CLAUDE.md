@@ -64,7 +64,13 @@ Gotchas that recur across stages:
   `jnp.concatenate([a[-1:], a[:-1]])`), and `jnp.arange` iota is
   unsupported for extension dtypes (zorch builds domains via `jnp.stack`
   of scalars). When an attribute error names a jnp function, reach for a
-  concat/stack equivalent before suspecting your logic.
+  concat/stack equivalent before suspecting your logic. Also: `jnp.stack`
+  (and `jnp.concatenate`) require each element to ALREADY be an array — they
+  do NOT `asarray` a nested Python list (`stack requires ndarray or scalar
+  arguments, got list`). A flat `list[Array]` of 0-D scalars stacks directly,
+  but to stack rows of scalars (a `list[list[Array]]`) into a matrix you must
+  inner-stack each row first: `jnp.stack([jnp.stack(row) for row in rows])`.
+  `jnp.pad`, by contrast, DOES work on extension dtypes (verified byte-exact).
 - **Perf: a host-int weight loop (a `pow()` nest building a constant
   matrix, contracted into field cells with scalar `acc += w*cell` adds) is
   a dispatch storm, not a FLOP cost.** It dominates eagerly. Fix: build the
