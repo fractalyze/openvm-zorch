@@ -99,12 +99,28 @@ def _horner(coeffs: list[Array], x: Array) -> Array:
     return acc
 
 
-def _conv(a: list[Array], b: list[Array]) -> list[Array]:
-    out: list[Array] = [jnp.zeros((), EF) for _ in range(len(a) + len(b) - 1)]
-    for i, ai in enumerate(a):
-        for j, bj in enumerate(b):
-            out[i + j] = out[i + j] + ai * bj
-    return out
+def _batched_conv(coeffs: Array, kernel: Array) -> Array:
+    """Convolve every row of ``coeffs`` ``(..., La)`` with the shared
+    ``kernel`` ``(Lb,)``, returning ``(..., La + Lb - 1)``.
+
+    The batched array form of a schoolbook polynomial convolution for a shared
+    short kernel: shift the rows by each kernel tap (static loop over ``Lb``),
+    stack the shifts on a trailing axis, broadcast-multiply by ``kernel`` and
+    reduce that last axis. Keeping the contracted axis last avoids the mid-axis
+    EF reduce fault, and the shift-and-add avoids ``jnp.dot``/``@`` (both
+    mis-lower on this fork — see CLAUDE.md). Dispatch-free and jit-fusable,
+    unlike a per-scalar coefficient loop. (``conv_test`` pins it against the
+    reference scalar convolution.)"""
+    la = coeffs.shape[-1]
+    lb = kernel.shape[-1]
+    lo = la + lb - 1
+    lead = coeffs.shape[:-1]
+    shifts = [
+        jnp.pad(coeffs, ((0, 0),) * len(lead) + ((j, lo - la - j),))
+        for j in range(lb)
+    ]
+    stacked = jnp.stack(shifts, axis=-1)  # (..., lo, lb)
+    return (stacked * kernel).sum(axis=-1)
 
 
 def _pad(coeffs: list[Array], n: int) -> list[Array]:
@@ -288,45 +304,53 @@ def prove_batch_constraints(
         sp_logup.append(([c * norm for c in p_coeffs], q_coeffs))
 
     # --- eq♯/eq univariate factors, μ batching, sum claims, s_0 ---
-    eq_sharp = prism.eq_sharp_uni_poly(l_skip, xi[:l_skip])
-    logup_prods: list[tuple[list[Array], list[Array]]] = [
-        (
-            _pad(_conv(_pad(p, sp_0_deg + 1), eq_sharp), s_0_deg + 1),
-            _pad(_conv(_pad(q, sp_0_deg + 1), eq_sharp), s_0_deg + 1),
-        )
-        for p, q in sp_logup
-    ]
-    skip_domain_size = f_to_ef(f_const(1 << l_skip))
+    # The per-trace s'_p/s'_q · eq♯ products and the μ-batched s_0 are degree
+    # ≤ s_0_deg (≤ 13–61 coeffs) but there are 2·num_traces of them — a scalar
+    # _conv storm under eager dispatch. Stack the per-trace coefficient rows
+    # and convolve them in one batched array op instead (issue #3); the eq♯/eq
+    # kernels are exactly 1<<l_skip long, so the conv lands at s_0_deg+1 with
+    # no padding. Two islands, split by the observe(claims)→sample(μ) seam.
+    skip = 1 << l_skip
+    eq_sharp = jnp.stack(prism.eq_sharp_uni_poly(l_skip, xi[:l_skip]))
+    skip_domain_size = f_to_ef(f_const(skip))
+
+    # Island A (pre-μ): per-trace logup products + sum claims.
+    sp_p = jnp.stack([jnp.stack(_pad(p, sp_0_deg + 1)) for p, _ in sp_logup])
+    sp_q = jnp.stack([jnp.stack(_pad(q, sp_0_deg + 1)) for _, q in sp_logup])
+    p_prods = _batched_conv(sp_p, eq_sharp)  # (num_traces, s_0_deg+1)
+    q_prods = _batched_conv(sp_q, eq_sharp)
+    # Σ_D Z^j = N iff N | j: read the sum claim off the strided coefficients.
+    p_claims = p_prods[:, ::skip].sum(axis=-1) * skip_domain_size
+    q_claims = q_prods[:, ::skip].sum(axis=-1) * skip_domain_size
+
     numerator_term_per_air = []
     denominator_term_per_air = []
-    for p_prod, q_prod in logup_prods:
-        claims = []
-        for prod in (p_prod, q_prod):
-            acc = jnp.zeros((), EF)
-            for j in range(0, s_0_deg + 1, 1 << l_skip):
-                acc = acc + prod[j]
-            claims.append(acc * skip_domain_size)
-        transcript = transcript.observe(jnp.stack(claims))
-        numerator_term_per_air.append(claims[0])
-        denominator_term_per_air.append(claims[1])
+    for t in range(num_traces):
+        transcript = transcript.observe(jnp.stack([p_claims[t], q_claims[t]]))
+        numerator_term_per_air.append(p_claims[t])
+        denominator_term_per_air.append(q_claims[t])
 
     transcript, mu = sample_ext(transcript)
     mu_pows = _powers(mu, 3 * num_traces)
 
-    zc_batched = [jnp.zeros((), EF) for _ in range(sp_0_deg + 1)]
-    for t, coeffs in enumerate(sp_zc):
-        for j, c in enumerate(_pad(coeffs, sp_0_deg + 1)):
-            zc_batched[j] = zc_batched[j] + mu_pows[2 * num_traces + t] * c
-    eq_uni = prism.eq_uni_poly(l_skip, xi[0])
-    zc_prod = _pad(_conv(zc_batched, eq_uni), s_0_deg + 1)
+    # Island B (post-μ): μ-batch the zerocheck rows, multiply in eq_D, then add
+    # the μ-weighted logup products to form s_0. Contracted axes kept last so
+    # the EF reduce stays jit-safe (CLAUDE.md).
+    eq_uni = jnp.stack(prism.eq_uni_poly(l_skip, xi[0]))
+    sp_zc_rows = jnp.stack(
+        [jnp.stack(_pad(coeffs, sp_0_deg + 1)) for coeffs in sp_zc]
+    )  # (num_traces, sp_0_deg+1)
+    zc_weights = jnp.stack(mu_pows[2 * num_traces : 3 * num_traces])
+    zc_batched = (sp_zc_rows.T * zc_weights).sum(axis=-1)  # (sp_0_deg+1,)
+    zc_prod = _batched_conv(zc_batched, eq_uni)  # (s_0_deg+1,)
 
-    s_0 = []
-    for j in range(s_0_deg + 1):
-        coeff = zc_prod[j]
-        for t, (p_prod, q_prod) in enumerate(logup_prods):
-            coeff = coeff + mu_pows[2 * t] * p_prod[j] + mu_pows[2 * t + 1] * q_prod[j]
-        s_0.append(coeff)
-    transcript = transcript.observe(jnp.stack(s_0))
+    mu_p = jnp.stack(mu_pows[0 : 2 * num_traces : 2])
+    mu_q = jnp.stack(mu_pows[1 : 2 * num_traces : 2])
+    s_0_arr = (
+        zc_prod + (p_prods.T * mu_p).sum(axis=-1) + (q_prods.T * mu_q).sum(axis=-1)
+    )
+    transcript = transcript.observe(s_0_arr)
+    s_0 = list(s_0_arr)  # downstream _horner / the proof field want list[Array]
 
     transcript, r_0 = sample_ext(transcript)
     r = [r_0]
