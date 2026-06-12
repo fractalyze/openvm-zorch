@@ -201,6 +201,11 @@ def prove(
         params.whir,
         [(pcs_data.matrix, pcs_data.tree)],
         u_cube,
+        # Lower each Stage-5 device island to one fused kernel (byte-identical —
+        # whir_test gates both paths). The strided merkle_commit marker only
+        # fuses under jit; eager dispatch decomposes it, so this flip is what
+        # turns fuse=True into an actual compute win.
+        jit=True,
     )
 
     return transcript, Proof(
