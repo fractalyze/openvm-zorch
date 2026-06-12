@@ -50,5 +50,7 @@ def stacked_commit(
     height). Returns ``(root, data)``."""
     matrix, layout = stacked_matrix(l_skip, n_stack, traces)
     codeword = rs_code_matrix(l_skip, log_blowup, matrix)
-    tree = stacked_merkle_commit(sponge, compressor, codeword, 1 << k_whir)
+    tree = stacked_merkle_commit(
+        sponge, compressor, codeword, 1 << k_whir, jit=True
+    )
     return tree.root, StackedPcsData(layout, matrix, tree)
