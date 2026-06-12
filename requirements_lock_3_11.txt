@@ -13,8 +13,8 @@ absl-py==2.4.0 \
 jax==0.0.5.dev20260611070701 \
     --hash=sha256:5007c15f8f05450a02a4c75c788c0f703cfd5899cb7e77b9113071b98b59e2d4
     # via -r requirements.in
-jax-cuda12-plugin==0.0.5.dev20260524000415 \
-    --hash=sha256:00d8bfb5d178ba514486c463e544ced648f2943b5bd632d38e28dfa62da12cda
+jax-cuda12-plugin==0.0.5.dev20260611070701 \
+    --hash=sha256:f5f4931cfcae109922690aec94567a976ba660262acd330743b4c3616ebb5a66
     # via -r requirements.in
 jaxlib==0.0.5.dev20260611070701 \
     --hash=sha256:0a6856dc96c1b850597e05a816e94cf73c8e7f641e2be4e7e7e425d9ae2a8846
