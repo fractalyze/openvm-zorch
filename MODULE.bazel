@@ -25,9 +25,11 @@ bazel_dep(name = "zorch", version = "0.0.0")
 git_override(
     module_name = "zorch",
     remote = "https://github.com/fractalyze/zorch.git",
-    # main @ BaseFold batch open + transcript PoW grind — the same pin
-    # sp1-zorch carries, so the two consumers exercise one zorch surface.
-    commit = "b2a15826abc5036517415a8dd8b5ffc700dee75f",
+    # main @ WHIR batch-open RLC (#237). Must be >= #212, which migrated the
+    # poseidon2 marker to the `zorch.poseidon2` composite.attributes form the
+    # pinned zkx wheel requires — the older b2a15826 pin emitted the legacy
+    # `poseidon2:16:4:13:7` string the wheel rejects (CI red).
+    commit = "13fe6f3ca056d6b25494a37376cec4c9a9f73f36",
 )
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
