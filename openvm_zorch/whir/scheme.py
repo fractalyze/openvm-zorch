@@ -27,11 +27,11 @@ from typing import Sequence
 
 import jax.numpy as jnp
 from jax import Array
+from zorch.transcript import Transcript
+from zorch.utils.bits import log2_strict_usize
 
 from openvm_zorch.commit.rs_message import eval_to_coeff_rs_message, mle_coeffs_to_evals
 from openvm_zorch.fields import EF, f_to_ef
-from zorch.transcript import Transcript
-from zorch.utils.bits import log2_strict_usize
 
 
 def _mobius_eq_table(u: Sequence[Array]) -> Array:
