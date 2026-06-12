@@ -65,6 +65,18 @@ Gotchas that recur across stages:
   unsupported for extension dtypes (zorch builds domains via `jnp.stack`
   of scalars). When an attribute error names a jnp function, reach for a
   concat/stack equivalent before suspecting your logic.
+- **Perf: a host-int weight loop (a `pow()` nest building a constant
+  matrix, contracted into field cells with scalar `acc += w*cell` adds) is
+  a dispatch storm, not a FLOP cost.** It dominates eagerly. Fix: build the
+  constant weight matrix once (`@lru_cache` keyed on `l_skip`/`num_cosets`,
+  as a field array) and replace the scalar nest with one broadcast-multiply
+  + a **trailing-axis** `.sum` (mid-axis EF reduce faults under jit; keep
+  the contracted axis last). This is eager-fast and jit-fusable. Do NOT use
+  `jnp.dot`/`@`/`tensordot` — they mis-lower under `jax.jit` on this fork
+  (see `zorch/fusion.py`, `zorch/pcs/whir/_math.py`). And do NOT wrap a
+  scalar-list polynomial (`_conv` over 0-D coeffs) in `jax.jit` directly —
+  hundreds of pytree-leaf scalars regress; vectorize into arrays first.
+  (PR #14 took round-0 prism 4.26→1.0s, whole prove −29%, this way.)
 
 ## Byte-match
 
