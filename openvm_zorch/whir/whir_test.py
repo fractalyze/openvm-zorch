@@ -68,7 +68,7 @@ class WhirByteMatchTest(absltest.TestCase):
         cls.values = np.load(_FIXTURE / "outputs" / "transcript_values.npy")
         cls.is_sample = np.load(_FIXTURE / "outputs" / "transcript_is_sample.npy")
 
-    def test_stage5_matches(self) -> None:
+    def _check_stage5(self, jit: bool) -> None:
         meta = self.meta
         params = meta["params"]
         l_skip = params["l_skip"]
@@ -115,6 +115,7 @@ class WhirByteMatchTest(absltest.TestCase):
             config,
             [(data.matrix, data.tree)],
             u_cube,
+            jit=jit,
         )
 
         out = _FIXTURE / "outputs"
@@ -179,6 +180,15 @@ class WhirByteMatchTest(absltest.TestCase):
                     want_paths[q],
                     err_msg=f"round {r + 1} path, query {q}",
                 )
+
+    def test_stage5_matches(self) -> None:
+        """Eager path byte-matches the reference."""
+        self._check_stage5(jit=False)
+
+    def test_stage5_matches_jit(self) -> None:
+        """The jit path lowers each device island to one fused kernel and stays
+        byte-identical to the reference — the boundary is transparent."""
+        self._check_stage5(jit=True)
 
 
 if __name__ == "__main__":
