@@ -20,6 +20,7 @@ as the leaf layer.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 import jax
@@ -75,8 +76,21 @@ class StackedMerkleTree:
         return jax.numpy.stack(siblings)
 
 
+@functools.partial(jax.jit, static_argnums=0)
+def _jitted_commit(tree: StridedMerkleTree, matrix: Array):
+    """``commit`` under ``jax.jit`` with ``tree`` static. ``StridedMerkleTree``
+    hashes/compares by value (built for static jit-zone keys, zorch #214), so
+    JAX's compile cache reuses one lowering per sponge/compressor/stride config."""
+    return tree.commit(matrix)
+
+
 def stacked_merkle_commit(
-    sponge: Sponge, compressor: Compression, matrix: Array, rows_per_query: int
+    sponge: Sponge,
+    compressor: Compression,
+    matrix: Array,
+    rows_per_query: int,
+    *,
+    jit: bool = False,
 ) -> StackedMerkleTree:
     """Hash each row of ``(height, width)`` ``matrix`` to a leaf, fold
     ``log2(rows_per_query)`` query-strided levels, then plain pairs to the root.
@@ -87,8 +101,16 @@ def stacked_merkle_commit(
     ``ExpandMerkleCommit`` (zkx #648, in the dev20260611070701 wheel) lowers the
     whole commit — including the ``log2(rows_per_query)`` strided levels — through
     the cross-leaf Poseidon2 fusion instead of dispatching one composite per pair.
+
+    The fusion marker only lowers under ``jax.jit``; an eager ``commit`` dispatches
+    the Poseidon2 tree op-by-op (the dominant cost — Stage-1's whole ~3.2s warm).
+    ``jit=True`` runs ``commit`` under ``jax.jit`` so the marker fuses, collapsing
+    the eager dispatch storm (Stage-1 commit ~3.2s -> ~1ms; issue #1). Callers
+    already inside their own jit (WHIR's ``_encode_commit``) leave it ``False`` —
+    the region fuses under the outer trace and a nested jit would only re-trace.
     """
-    _, digest_layers = StridedMerkleTree(
-        sponge, compressor, rows_per_query, fuse=True
-    ).commit(matrix)
+    tree = StridedMerkleTree(sponge, compressor, rows_per_query, fuse=True)
+    _, digest_layers = (
+        _jitted_commit(tree, matrix) if jit else tree.commit(matrix)
+    )
     return StackedMerkleTree(matrix, digest_layers, rows_per_query)
