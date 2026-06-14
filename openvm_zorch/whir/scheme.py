@@ -27,8 +27,8 @@ from typing import Sequence
 
 import jax.numpy as jnp
 from jax import Array
+from zorch.poly.univariate import eval_coeffs
 from zorch.transcript import Transcript
-from zorch.utils.bits import log2_strict_usize
 
 from openvm_zorch.commit.rs_message import eval_to_coeff_rs_message, mle_coeffs_to_evals
 from openvm_zorch.fields import EF, f_to_ef
@@ -91,14 +91,12 @@ class SwirlWhirScheme:
         return (f_to_ef(self._messages(mle)) * table[None, :]).sum(1)  # (W,) EF
 
     def combined_f_evals(self, mle: Array, mu: Array) -> Array:
-        m = log2_strict_usize(mle.shape[0])
-        messages = self._messages(mle)
-        f_evals = jnp.zeros((1 << m,), EF)
-        mu_pow = jnp.ones((), EF)
-        for col in range(messages.shape[0]):
-            f_evals = f_evals + mu_pow * f_to_ef(messages[col])
-            mu_pow = mu_pow * mu
-        return f_evals
+        # Σ_col μ^col·f̂_col — the column power-combine, the reference scheme's
+        # ``eval_coeffs`` form. ``f_to_ef`` batches the limb→EF read; the column
+        # is the coefficient axis, so transpose to contract it (eval_coeffs
+        # powers the trailing axis).
+        messages = f_to_ef(self._messages(mle))  # (W, 2^m) EF
+        return eval_coeffs(messages.T, mu)
 
     def initial_weight(self, z: Array) -> Array:
         return _mobius_eq_table(_unstack(z))

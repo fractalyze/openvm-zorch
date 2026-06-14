@@ -85,17 +85,16 @@ def _per_query_rows(opening: Opening) -> list[Array]:
     """The generic ``Opening`` is one pytree vmapped over the ``Q`` queries — its
     ``row`` is ``(Q, rows_per_query, width)``. The reference proof carries a
     per-query list, so unstack the leading query axis."""
-    return [opening.row[q] for q in range(opening.row.shape[0])]
+    return list(opening.row)
 
 
 def _per_query_paths(opening: Opening) -> list[Array]:
     """Per-query Merkle authentication path. The generic ``path`` is a list over
     levels (query layer up, leaf-first) each ``(Q, digest_elems)``; the reference
-    stores ``(depth, digest_elems)`` per query, so stack the levels for each."""
-    return [
-        jnp.stack([level[q] for level in opening.path])
-        for q in range(opening.row.shape[0])
-    ]
+    stores ``(depth, digest_elems)`` per query, so stack the levels into a
+    ``(Q, depth, digest_elems)`` array once and unstack the leading query axis
+    (one batched ``stack`` rather than one per query)."""
+    return list(jnp.stack(opening.path, axis=1))
 
 
 def prove_whir_opening(
@@ -173,8 +172,7 @@ def prove_whir_opening(
         initial_round_opened_rows=[_per_query_rows(gproof.initial_opening)],
         initial_round_merkle_proofs=[_per_query_paths(gproof.initial_opening)],
         codeword_opened_values=[
-            [ef_from_limbs(op.row[q]) for q in range(op.row.shape[0])]
-            for op in gproof.codeword_openings
+            list(ef_from_limbs(op.row)) for op in gproof.codeword_openings
         ],
         codeword_merkle_proofs=[
             _per_query_paths(op) for op in gproof.codeword_openings
