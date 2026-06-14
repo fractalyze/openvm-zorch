@@ -1,5 +1,5 @@
-load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@openvm_zorch_pip//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
 # Transcript-only golden vectors from tools/fixture-gen (--transcript-out).
 filegroup(
@@ -77,10 +77,11 @@ py_library(
         "//openvm_zorch/logup_zerocheck:prover",
         "//openvm_zorch/stacked_reduction:prover",
         "//openvm_zorch/whir:prover",
+        "@zorch//zorch:round",
+        "@zorch//zorch:transcript",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/utils:bits",
-        "@zorch//zorch:transcript",
         requirement("jax"),
         requirement("zk_dtypes"),
     ],
@@ -133,10 +134,10 @@ py_library(
         "//openvm_zorch/logup_zerocheck:prover",
         "//openvm_zorch/stacked_reduction:prover",
         "//openvm_zorch/whir:prover",
+        "@zorch//zorch:transcript",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/utils:bits",
-        "@zorch//zorch:transcript",
         requirement("jax"),
         requirement("zk_dtypes"),
     ],
@@ -188,6 +189,7 @@ py_binary(
         "//openvm_zorch/logup_zerocheck:constraints",
         "//openvm_zorch/poseidon2:babybear16",
         "//openvm_zorch/whir:prover",
+        "@zorch//zorch:round",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
