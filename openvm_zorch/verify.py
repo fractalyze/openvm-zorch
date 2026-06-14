@@ -43,12 +43,18 @@ from openvm_zorch.logup_zerocheck.constraints import (
 from openvm_zorch.logup_zerocheck.prover import BatchConstraintProof
 from openvm_zorch.prove import Proof, SystemParams
 from openvm_zorch.stacked_reduction.prover import StackingProof
-from openvm_zorch.transcript import check_witness, sample_bits, sample_ext
+from openvm_zorch.transcript import check_witness, sample_ext
 from openvm_zorch.whir.prover import WhirProof
+from openvm_zorch.whir.scheme import SwirlWhirScheme
+from zorch.coding.reed_solomon import ReedSolomon
+from zorch.commit.merkle import Opening
+from zorch.commit.strided_merkle import StridedMerkleTree
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
+from zorch.pcs.whir.config import WhirParams
+from zorch.pcs.whir.config import WhirProof as GenericWhirProof
+from zorch.pcs.whir.verifier import WhirVerifier
 from zorch.transcript import DuplexTranscript
-from zorch.utils.bits import log2_strict_usize
 
 
 class VerificationError(Exception):
@@ -157,88 +163,6 @@ def _exp_pow_2(x: Array, k: int) -> Array:
     for _ in range(k):
         x = x * x
     return x
-
-
-def _eval_mobius_eq_mle(u: Sequence[Array], x: Sequence[Array]) -> Array:
-    acc = _ONE
-    for u_i, x_i in zip(u, x):
-        w0 = _ONE - u_i * 2
-        acc = acc * (w0 * (_ONE - x_i) + u_i * x_i)
-    return acc
-
-
-def _eval_mle_evals_at_point(evals: list[Array], x: Sequence[Array]) -> Array:
-    """Evaluate the MLE given by its ``2^len(x)`` hypercube values at ``x``."""
-    buf = list(evals)
-    length = len(buf)
-    for xj in reversed(list(x)):
-        length >>= 1
-        buf = [buf[i] * (_ONE - xj) + buf[length + i] * xj for i in range(length)]
-    return buf[0]
-
-
-# --- Merkle verification (hasher.rs / stacked_merkle.py) ------------------
-
-
-def _tree_compress(compressor: Compression, hashes: list[Array]) -> Array:
-    """Balanced 2-ary compression of a power-of-two list of digests
-    (hasher.rs ``tree_compress``) — the digest a single query's opened rows
-    fold to under the query-strided tree."""
-    while len(hashes) > 1:
-        hashes = [
-            compressor.compress(jnp.stack([hashes[2 * i], hashes[2 * i + 1]]))
-            for i in range(len(hashes) // 2)
-        ]
-    return hashes[0]
-
-
-def _merkle_verify(
-    compressor: Compression, root: Array, idx: int, leaf: Array, path: Array
-) -> None:
-    """Recompute the root from the query layer up and compare (whir.rs
-    ``merkle_verify``): sibling order follows the index bits."""
-    cur = leaf
-    for sibling in path:
-        if idx & 1 == 0:
-            cur = compressor.compress(jnp.stack([cur, sibling]))
-        else:
-            cur = compressor.compress(jnp.stack([sibling, cur]))
-        idx >>= 1
-    if not _eq(cur, root):
-        raise VerificationError("Merkle path does not match the committed root")
-
-
-def _binary_k_fold(values: list[Array], alphas: Sequence[Array], x_root: int) -> Array:
-    """``g_k(x^{2^k})`` from codeword values on the coset ``{x·ω^j}`` and the
-    fold points (whir.rs ``binary_k_fold``). ``x_root`` is a host int (a power
-    of the RS-domain generator)."""
-    n = len(values)
-    k = len(alphas)
-    if n != 1 << k:
-        raise VerificationError("binary_k_fold: values length != 2^k")
-    omega_k = prism.omega_int(k) if k > 0 else 1
-    omega_k_inv = pow(omega_k, MODULUS - 2, MODULUS)
-    half = (MODULUS + 1) // 2
-    tw = [pow(omega_k, (i % (1 << max(k - 1, 0))), MODULUS) for i in range(1 << max(k - 1, 0))]
-    inv_tw = [pow(omega_k_inv, i, MODULUS) for i in range(1 << max(k - 1, 0))]
-    x_pow = x_root
-    x_inv = pow(x_root, MODULUS - 2, MODULUS)
-    x_pow_j = x_pow
-    x_inv_j = x_inv
-    vals = list(values)
-    for j, alpha in enumerate(alphas):
-        m = n >> (j + 1)
-        new = list(vals)
-        for i in range(m):
-            t = (tw[(i << j)] * x_pow_j) % MODULUS
-            t_inv = (inv_tw[(i << j)] * x_inv_j) % MODULUS
-            coef = f_to_ef(f_const((t_inv * half) % MODULUS))
-            alpha_minus_t = alpha - f_to_ef(f_const(t))
-            new[i] = vals[i] + alpha_minus_t * (vals[i] - vals[m + i]) * coef
-        vals = new
-        x_pow_j = (x_pow_j * x_pow_j) % MODULUS
-        x_inv_j = (x_inv_j * x_inv_j) % MODULUS
-    return vals[0]
 
 
 # --- Stage 2: GKR fractional sumcheck ------------------------------------
@@ -590,6 +514,32 @@ def _verify_stacked_reduction(
 # --- Stage 5: WHIR -------------------------------------------------------
 
 
+def _stack_paths(paths: Sequence[Array]) -> list[Array]:
+    """Per-query reference Merkle paths (``Q`` × ``(depth, digest_elems)``) → the
+    generic ``Opening.path``: a list over levels, each ``(Q, digest_elems)``. The
+    inverse of the prover adapter's ``_per_query_paths``."""
+    stacked = jnp.stack(list(paths))  # (Q, depth, digest_elems)
+    return list(jnp.moveaxis(stacked, 1, 0))  # depth × (Q, digest_elems)
+
+
+def _opening_from_rows(rows: Sequence[Array], paths: Sequence[Array]) -> Opening:
+    """Round-0 strided opening from per-query base-field rows (``Q`` × ``(2^k, W)``)
+    and Merkle paths — the inverse of the prover's ``_per_query_rows`` /
+    ``_per_query_paths``."""
+    return Opening(row=jnp.stack(list(rows)), path=_stack_paths(paths))
+
+
+def _opening_from_ef_values(
+    values: Sequence[Array], paths: Sequence[Array]
+) -> Opening:
+    """Later-round strided opening. The reference stores the opened coset as ``Q``
+    EF values (``(2^k,)`` each); the generic ``Opening.row`` is their base-field
+    limbs (``(Q, 2^k, limbs)``), so bitcast back — the inverse of the prover's
+    ``ef_from_limbs``."""
+    row = lax.bitcast_convert_type(jnp.stack(list(values)), F)  # (Q, 2^k, limbs)
+    return Opening(row=row, path=_stack_paths(paths))
+
+
 def _verify_whir(
     transcript: DuplexTranscript,
     sponge: Sponge,
@@ -600,159 +550,71 @@ def _verify_whir(
     commitments: Sequence[Array],
     u: Sequence[Array],
 ) -> DuplexTranscript:
-    whir = params.whir
-    k_whir = whir.k
-    num_rounds = len(whir.num_queries)
-    widths = [len(v) for v in stacking_openings]
-    m = params.l_skip + params.n_stack
+    """Check Stage 5 over the generic ``zorch.pcs.whir`` ``WhirVerifier``.
 
-    transcript, ok = check_witness(transcript, whir.mu_pow_bits, proof.mu_pow_witness)
-    if not bool(ok):
-        raise VerificationError("invalid WHIR μ PoW witness")
-    transcript, mu = sample_ext(transcript)
+    The inverse of ``openvm_zorch.whir.prover.prove_whir_opening``: repackage the
+    reference ``WhirProof`` (per-query lists of opened rows and Merkle paths) into
+    the generic ``WhirProof`` (``Opening`` pytrees vmapped over the queries),
+    rebuild the same ``WhirVerifier`` the prover drove, and replay one ``verify``.
+    The scheme-agnostic round driver — sumcheck replay, query-position sampling,
+    strided root reconstruction, k-fold consistency, final residual constraint —
+    lives in ``WhirVerifier``; the SWIRL-specific maps (prismalinear initial
+    message, Möbius weight, no-op bind) ride ``SwirlWhirScheme``.
 
-    total_width = sum(widths)
-    mu_pows = [_ONE]
-    for _ in range(total_width - 1):
-        mu_pows.append(mu_pows[-1] * mu)
-
-    claim = _ZERO
-    flat_openings = [o for v in stacking_openings for o in v]
-    for opening, mu_pow in zip(flat_openings, mu_pows):
-        claim = claim + mu_pow * opening
-
-    log_rs = m + params.log_blowup
-    sc_idx = 0
-    alphas: list[Array] = []
-    z0s: list[Array] = []
-    zs: list[list[int]] = []
-    gammas: list[Array] = []
-
-    for whir_round in range(num_rounds):
-        is_final = whir_round == num_rounds - 1
-        alphas_round: list[Array] = []
-        for _ in range(k_whir):
-            evals = proof.whir_sumcheck_polys[sc_idx]
-            transcript = transcript.observe(evals)
-            transcript, ok = check_witness(
-                transcript, whir.folding_pow_bits, proof.folding_pow_witnesses[sc_idx]
-            )
-            if not bool(ok):
-                raise VerificationError("invalid WHIR folding PoW witness")
-            transcript, alpha = sample_ext(transcript)
-            alphas_round.append(alpha)
-            ev0 = claim - evals[0]
-            claim = _interp_quadratic_012([ev0, evals[0], evals[1]], alpha)
-            sc_idx += 1
-
-        y0 = None
-        if is_final:
-            transcript = transcript.observe(proof.final_poly)
-        else:
-            commit = proof.codeword_commits[whir_round]
-            transcript = transcript.observe(commit)
-            transcript, z0 = sample_ext(transcript)
-            z0s.append(z0)
-            y0 = proof.ood_values[whir_round]
-            transcript = transcript.observe(y0)
-
-        transcript, ok = check_witness(
-            transcript, whir.query_phase_pow_bits,
-            proof.query_phase_pow_witnesses[whir_round],
+    A single common-main commitment is the supported shape, matching the prover
+    adapter (SWIRL multi-commitment μ-batching is out of scope).
+    """
+    if len(commitments) != 1:
+        raise VerificationError(
+            f"the generic WHIR consumer opens a single commitment, got "
+            f"{len(commitments)} (SWIRL multi-commitment μ-batch is out of scope)"
         )
-        if not bool(ok):
-            raise VerificationError("invalid WHIR query-phase PoW witness")
+    whir = params.whir
+    k = whir.k
+    m = params.l_skip + params.n_stack
+    num_rounds = len(whir.num_queries)
 
-        num_queries = whir.num_queries[whir_round]
-        index_bits = log_rs - k_whir
-        omega = prism.omega_int(log_rs)
-        ys_round: list[Array] = []
-        zs_round: list[int] = []
-        for q in range(num_queries):
-            transcript, index = sample_bits(transcript, index_bits)
-            zi_root = pow(omega, index, MODULUS)
-            zi = pow(zi_root, 1 << k_whir, MODULUS)
-            if whir_round == 0:
-                codeword_vals = [_ZERO] * (1 << k_whir)
-                mu_iter = 0
-                for com_idx in range(len(commitments)):
-                    rows = proof.initial_round_opened_rows[com_idx][q]  # (2^k, width)
-                    leaf_hashes = [sponge.hash(rows[j]) for j in range(1 << k_whir)]
-                    digest = _tree_compress(compressor, leaf_hashes)
-                    path = proof.initial_round_merkle_proofs[com_idx][q]
-                    _merkle_verify(compressor, commitments[com_idx], index, digest, path)
-                    for c in range(widths[com_idx]):
-                        mu_pow = mu_pows[mu_iter]
-                        mu_iter += 1
-                        for j in range(1 << k_whir):
-                            codeword_vals[j] = codeword_vals[j] + mu_pow * f_to_ef(rows[j][c])
-                yi = _binary_k_fold(codeword_vals, alphas_round, zi_root)
-            else:
-                vals = proof.codeword_opened_values[whir_round - 1][q]  # (2^k,) EF
-                leaf_hashes = [
-                    sponge.hash(_ef_to_limbs(vals[j])) for j in range(1 << k_whir)
-                ]
-                digest = _tree_compress(compressor, leaf_hashes)
-                path = proof.codeword_merkle_proofs[whir_round - 1][q]
-                _merkle_verify(
-                    compressor, proof.codeword_commits[whir_round - 1], index, digest, path
-                )
-                yi = _binary_k_fold(list(vals), alphas_round, zi_root)
-            ys_round.append(yi)
-            zs_round.append(zi)
+    code = ReedSolomon(message_len=1 << m, blowup=1 << params.log_blowup, dtype=F)
+    strided = StridedMerkleTree(sponge, compressor, 1 << k, fuse=True)
+    wparams = WhirParams(
+        k_whir=k,
+        num_queries=tuple(whir.num_queries),
+        mu_pow_bits=whir.mu_pow_bits,
+        folding_pow_bits=whir.folding_pow_bits,
+        query_pow_bits=whir.query_phase_pow_bits,
+        rate_increase=True,
+    )
+    verifier = WhirVerifier(code, strided, wparams, SwirlWhirScheme(params.l_skip))
 
-        transcript, gamma = sample_ext(transcript)
-        if y0 is not None:
-            claim = claim + y0 * gamma
-        gpow = gamma * gamma
-        for yi in ys_round:
-            claim = claim + yi * gpow
-            gpow = gpow * gamma
-        gammas.append(gamma)
-        zs.append(zs_round)
-        alphas.extend(alphas_round)
-        log_rs -= 1
+    z = jnp.stack(list(u))  # the opening point (m,) — == u_cube on the cube
+    # The running claim is the μ-power combine of the per-column opening claims
+    # (the generic verifier's ``eval_coeffs(values, μ)``); pass them as that vector.
+    values = jnp.stack(list(stacking_openings[0]))  # (W,) EF
 
-    if proof.final_poly.shape[0] != 1 << (m - num_rounds * k_whir):
-        raise VerificationError("WHIR final poly degree mismatch")
-
-    # Final WHIR constraint.
-    t = k_whir * num_rounds
-    final_poly = list(proof.final_poly)
-    prefix = _eval_mobius_eq_mle(u[:t], alphas[:t])
-    suffix = _eval_mle_evals_at_point(final_poly, u[t:])
-    acc = prefix * suffix
-    j = k_whir
-    for i in range(num_rounds):
-        gamma = gammas[i]
-        alpha_slc = alphas[j:t]
-        slc_len = (t - j) + 1
-        if i != num_rounds - 1:
-            z0 = z0s[i]
-            z0_pow = [z0]
-            for _ in range(slc_len - 1):
-                z0_pow.append(z0_pow[-1] * z0_pow[-1])
-            acc = acc + gamma * prism.eval_eq_mle(alpha_slc, z0_pow[:-1]) * _horner(
-                final_poly, z0_pow[-1]
+    gproof = GenericWhirProof(
+        mu_pow_witness=proof.mu_pow_witness,
+        sumcheck_polys=proof.whir_sumcheck_polys,
+        codeword_roots=proof.codeword_commits,
+        ood_values=proof.ood_values,
+        folding_pow_witnesses=proof.folding_pow_witnesses,
+        query_pow_witnesses=proof.query_phase_pow_witnesses,
+        initial_opening=_opening_from_rows(
+            proof.initial_round_opened_rows[0],
+            proof.initial_round_merkle_proofs[0],
+        ),
+        codeword_openings=[
+            _opening_from_ef_values(
+                proof.codeword_opened_values[r], proof.codeword_merkle_proofs[r]
             )
-        gpow = gamma * gamma
-        for zi in zs[i]:
-            zi_pow_hi = f_to_ef(f_const(pow(zi, 1 << (slc_len - 1), MODULUS)))
-            zi_pow_left = [f_to_ef(f_const(pow(zi, 1 << p, MODULUS))) for p in range(slc_len - 1)]
-            acc = acc + gpow * prism.eval_eq_mle(alpha_slc, zi_pow_left) * _horner(
-                final_poly, zi_pow_hi
-            )
-            gpow = gpow * gamma
-        j += k_whir
+            for r in range(num_rounds - 1)
+        ],
+        final_poly=proof.final_poly,
+    )
 
-    if not _eq(acc, claim):
-        raise VerificationError("WHIR final constraint failed")
+    ok, transcript = verifier.verify(commitments[0], [z], values, gproof, transcript)
+    if not bool(ok):
+        raise VerificationError("WHIR verification failed")
     return transcript
-
-
-def _ef_to_limbs(x: Array) -> Array:
-    """The 4 base-field limbs of one EF element (basis-coefficient order)."""
-    return lax.bitcast_convert_type(jnp.atleast_1d(x), F)[0]
 
 
 # --- driver --------------------------------------------------------------
