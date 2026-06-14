@@ -64,6 +64,19 @@ const K_WHIR: usize = 2;
 /// Height 2 < 2^L_SKIP exercises the striding path.
 const TRACE_DIMS: &[(usize, usize)] = &[(3, 16), (2, 8), (5, 2)];
 
+/// An optional `usize` env override for the `--prove-out` scaling knobs.
+/// Absent → `default`; present-but-unparseable → panic. The fail-fast is
+/// deliberate: a benchmark-knob typo (`N_STACK=oops`, `FIB_LOG_HEIGHT=200`)
+/// must error, not silently fall back to a wrong-scale default.
+fn env_usize(key: &str, default: usize) -> usize {
+    match std::env::var(key) {
+        Ok(s) => s
+            .parse()
+            .unwrap_or_else(|_| panic!("{key} must be a non-negative integer")),
+        Err(_) => default,
+    }
+}
+
 /// Deterministic trace cell; arbitrary but fixed forever (fixtures regenerate
 /// bit-identically from the pin).
 fn trace_val(mat: usize, row: usize, col: usize) -> F {
@@ -336,7 +349,18 @@ impl Stage2Fixture {
     ///    2^{min(n_T,0)} numerator scaling), message width 2.
     /// 4. bus-1 receiver, height 2, message width 2.
     fn specs(&self) -> Vec<AirSpec> {
-        let fib_n = 64usize;
+        // Tallest trace height, as a log2 exponent. Default 2^6 (64) — the
+        // committed fixtures. FIB_LOG_HEIGHT overrides it for scaling studies
+        // (only matters for --prove-out, the self-contained perf fixture); the
+        // other generators keep the default so their golden values are
+        // unchanged. Bound the exponent so the shift below can't overflow.
+        let fib_log_height = env_usize("FIB_LOG_HEIGHT", 6);
+        assert!(
+            fib_log_height < usize::BITS as usize,
+            "FIB_LOG_HEIGHT must be < {}",
+            usize::BITS
+        );
+        let fib_n = 1usize << fib_log_height;
         let (a, b) = (0u64, 1u64);
         let fib_trace = ColMajorMatrix::from_row_major(&generate_trace_rows::<F>(a, b, fib_n));
         let f_n = {
@@ -1658,7 +1682,13 @@ fn gen_prove_fixture(out: &Path) {
     fs::create_dir_all(&inputs).unwrap();
     fs::create_dir_all(&outputs).unwrap();
 
-    let inst = prove_instance_with(test_system_params_small(4, 8, 4));
+    // Defaults (4, 8, 4) reproduce the committed fixture; env overrides let a
+    // scaling study grow the stacked matrix (and thus the WHIR work).
+    let inst = prove_instance_with(test_system_params_small(
+        env_usize("L_SKIP", 4),
+        env_usize("N_STACK", 8),
+        env_usize("K_WHIR", 4),
+    ));
     let params = &inst.params;
     let whir = &params.whir;
     let gkr = &inst.proof.gkr_proof;
