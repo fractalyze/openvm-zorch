@@ -1,22 +1,20 @@
 """Stage 5 — WHIR opening proof (``prove_whir_opening``).
 
-Opens the μ-batched committed columns as one MLE at ``u_cube`` (Stage 4's
-output mapped onto the cube: ``u₀`` squarings over the skip variables, then
-``u[1..]``). The weight starts as the Möbius-adjusted equality polynomial of
-``u_cube`` — the eval-to-coeff RS encoding makes ``\\hat q(u) = Σ_b f̂(b)·
-mobius_eq(u, b)`` — and each WHIR round folds ``k_whir`` sumcheck variables,
-re-encodes the folded MLE as a fresh RS codeword (commit + out-of-domain
-sample), then accumulates the in-domain query constraints into the weight
-with γ powers.
+A thin consumer adapter over the generic ``zorch.pcs.whir`` PCS. The
+scheme-agnostic round driver — sumcheck folds, per-round RS re-encode +
+out-of-domain sample, strided query consistency, final constraint — lives in
+``zorch.pcs.whir.WhirProver``; the SWIRL-specific maps (prismalinear initial
+message, Möbius weight, no-op transcript bind) live in ``SwirlWhirScheme``
+(``scheme.py``). This module builds the prover from the reference's
+``WhirConfig`` plus the Stage-1 commitment, drives one open, and repackages the
+generic ``WhirProof`` into the reference field layout — so ``whir_test``
+byte-matches the fixture unchanged.
 
-Folding is ``k_whir`` plain 2-ary sumcheck folds of the hypercube evaluations
-(adjacent pairs, LSB bound first) — the reference never folds the codeword
-itself; the next round's codeword is a fresh DFT of the folded coefficients.
-That is why this stage needs no k-ary fold primitive, in zorch or here.
-
-The proof-of-work grinds run natively (zorch's lowest-witness search matches
-the reference's serial scan); opened rows and Merkle paths are hints —
-deterministic from index and root — and never enter the transcript.
+The migration replaces the hand-rolled round loop (and its device-compute
+islands, which now live generically in zorch): the reference's per-round
+geometry is the rate-increasing RS schedule (``log_rs -= 1`` per round), the
+query phase opens ``2^k_whir``-row strided cosets, and the only consumer-specific
+behaviour rides ``SwirlWhirScheme``.
 
 Reference: openvm-stark-backend ``prove_whir_opening``
 https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/whir.rs#L78
@@ -24,28 +22,25 @@ https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/s
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import partial
-from typing import Callable, Sequence
 
-import jax
 import jax.numpy as jnp
-from jax import Array, lax
-
-from openvm_zorch.commit.rs_message import (
-    eval_to_coeff_rs_message,
-    mle_coeffs_to_evals,
-    mle_evals_to_coeffs,
-)
-from openvm_zorch.commit.stacked_merkle import StackedMerkleTree, stacked_merkle_commit
-from openvm_zorch.fields import EF, F, MODULUS, f_const, f_to_ef
-from openvm_zorch.logup_zerocheck.prism import eq_cube_table, omega_int
-from openvm_zorch.transcript import ef_from_limbs, grind, sample_bits, sample_ext
+from jax import Array
+from zorch.coding.reed_solomon import ReedSolomon
+from zorch.commit.merkle import Opening
+from zorch.commit.strided_merkle import StridedMerkleTree
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
-from zorch.sumcheck.prover import fold_pair
+from zorch.pcs.whir.config import WhirParams
+from zorch.pcs.whir.prover import WhirProver, WhirProverData
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
+
+from openvm_zorch.commit.stacked_merkle import StackedMerkleTree
+from openvm_zorch.fields import F
+from openvm_zorch.transcript import ef_from_limbs, grind, sample_ext
+from openvm_zorch.whir.scheme import SwirlWhirScheme
 
 
 @dataclass(frozen=True)
@@ -61,7 +56,14 @@ class WhirConfig:
 
 @dataclass(frozen=True)
 class WhirProof:
-    """The reference ``WhirProof`` plus the sampled challenges."""
+    """The reference ``WhirProof`` plus the sampled challenges.
+
+    The generic ``zorch.pcs.whir.WhirProof`` carries the same content in a
+    PCS-neutral shape (vmapped ``Opening`` pytrees, a single matrix commitment);
+    ``prove_whir_opening`` repackages it into this reference layout — per-query
+    lists of opened rows and Merkle paths, the codeword roots, the final poly —
+    so the byte-match test compares field-for-field against the fixture.
+    """
 
     mu_pow_witness: Array
     whir_sumcheck_polys: list[Array]  # num_whir_rounds·k × (2,) EF, evals at {1, 2}
@@ -70,185 +72,29 @@ class WhirProof:
     folding_pow_witnesses: list[Array]
     query_phase_pow_witnesses: list[Array]
     initial_round_opened_rows: list[list[Array]]  # per commit, per query: (2^k, W) F
-    initial_round_merkle_proofs: list[list[Array]]  # per commit, per query: (depth, 8) F
+    initial_round_merkle_proofs: list[
+        list[Array]
+    ]  # per commit, per query: (depth, 8) F
     codeword_opened_values: list[list[Array]]  # per later round, per query: (2^k,) EF
     codeword_merkle_proofs: list[list[Array]]
     final_poly: Array  # (2^(m − num_whir_rounds·k),) EF
     mu: Array
 
 
-def mobius_eq_table(u: Sequence[Array]) -> Array:
-    """``mobius_eq_kernel(u, b)`` for ``b`` on the hypercube, LSB-first
-    (index bit i ↔ ``u[i]``) — per-coordinate kernel ``K(0) = 1 − 2u_i``,
-    ``K(1) = u_i`` (the reference's ``evals_mobius_eq_hypercube``)."""
-    table = jnp.ones((1,), EF)
-    one = jnp.ones((), EF)
-    for u_i in u:
-        table = jnp.concatenate([table * (one - u_i - u_i), table * u_i])
-    return table
+def _per_query_rows(opening: Opening) -> list[Array]:
+    """The generic ``Opening`` is one pytree vmapped over the ``Q`` queries — its
+    ``row`` is ``(Q, rows_per_query, width)``. The reference proof carries a
+    per-query list, so unstack the leading query axis."""
+    return list(opening.row)
 
 
-def _uni_eval(coeffs: Array, z: Array) -> Array:
-    """Horner evaluation of a coefficient vector at ``z``. The reference's
-    ``g_mle.eval_at_point(&z_0_vec)`` over the powers-of-two point
-    ``(z, z², z⁴, …)`` is exactly the univariate evaluation at ``z``."""
-    acc = jnp.zeros((), coeffs.dtype)
-    for i in range(coeffs.shape[0] - 1, -1, -1):
-        acc = acc * z + coeffs[i]
-    return acc
-
-
-def _pow2_powers(z: Array, dim: int) -> list[Array]:
-    """``[z, z², z⁴, …]`` of length ``dim`` (``exp_powers_of_2``)."""
-    pows = [z]
-    for _ in range(dim - 1):
-        pows.append(pows[-1] * pows[-1])
-    return pows
-
-
-# The five device-compute islands of the round loop, factored out so each can be
-# timed (``whir/bench_whir_phases.py``) and, behind a ``jit`` boundary, lowered to
-# one fused kernel rather than eager-dispatched op-by-op (the
-# correctness-of-design fusion the hand-rolled loop forfeits). The transcript
-# observes/samples and the PoW grinds stay in the loop between these islands —
-# they host-read and so cannot trace through. Every island is a pure function of
-# its array inputs, so the refactor is byte-identical to the inlined form.
-
-
-def _setup_f_evals(
-    matrices: Sequence[Array], l_skip: int, m: int, mu: Array
-) -> Array:
-    """μ-batched hypercube evals of ``f̂`` (island J1): per column, the RS message
-    re-read as MLE coefficients and ζ-transformed over all ``m`` bits, summed with
-    powers of ``μ`` across every committed column."""
-    f_evals = jnp.zeros((1 << m,), EF)
-    mu_pow = jnp.ones((), EF)
-    for matrix in matrices:
-        messages = mle_coeffs_to_evals(eval_to_coeff_rs_message(l_skip, matrix.T))
-        for col in range(messages.shape[0]):
-            f_evals = f_evals + mu_pow * f_to_ef(messages[col])
-            mu_pow = mu_pow * mu
-    return f_evals
-
-
-def _round_poly(f_evals: Array, w_evals: Array) -> Array:
-    """Degree-2 sumcheck round message ``s`` of ``Σ_x f̂(x)·ŵ(x)`` (island J2),
-    observed as evaluations at ``{1, 2}``."""
-    f_0, f_1 = f_evals[0::2], f_evals[1::2]
-    w_0, w_1 = w_evals[0::2], w_evals[1::2]
-    s_1 = (f_1 * w_1).sum()
-    s_2 = ((f_1 + f_1 - f_0) * (w_1 + w_1 - w_0)).sum()
-    return jnp.stack([s_1, s_2])
-
-
-def _apply_fold(
-    f_evals: Array, w_evals: Array, alpha: Array
-) -> tuple[Array, Array]:
-    """Fold ``f̂`` and ``ŵ`` at challenge ``α`` (island J3), LSB pair bound
-    first."""
-    return (
-        fold_pair(f_evals[0::2], f_evals[1::2], alpha),
-        fold_pair(w_evals[0::2], w_evals[1::2], alpha),
-    )
-
-
-def _encode_commit(
-    sponge: Sponge,
-    compressor: Compression,
-    g_coeffs: Array,
-    rs_len: int,
-    k_whir: int,
-) -> StackedMerkleTree:
-    """RS-encode ``ĝ`` to a length-``rs_len`` codeword and stacked-Merkle commit it
-    (island J4): pad the coefficients, ``FFT``, bitcast to base, commit at
-    ``2^k_whir`` leaves per row. The heaviest island — full-domain NTT plus the
-    Poseidon2 tree, the composite eager dispatch decomposes."""
-    padded = jnp.concatenate([g_coeffs, jnp.zeros((rs_len - g_coeffs.shape[0],), EF)])
-    # lax.fft on extension dtypes accepts only 1-D input (the same constraint
-    # zorch's basefold encode works around).
-    g_rs = lax.fft(padded, "FFT", rs_len)
-    return stacked_merkle_commit(
-        sponge, compressor, lax.bitcast_convert_type(g_rs, F), 1 << k_whir
-    )
-
-
-def _weight_update(
-    w_evals: Array,
-    gamma: Array,
-    z0_pows: Sequence[Array],
-    zi_pows: Sequence[Sequence[Array]],
-) -> Array:
-    """Fold the out-of-domain and in-domain query constraints into ``ŵ`` (island
-    J5): ``ŵ += γ·eq(·, z0_pows) + Σ_i γ^{i+2}·eq(·, zi_pows[i])``. The powers of
-    each opening point are passed in (the in-domain ones are host integers)."""
-    w_evals = w_evals + gamma * eq_cube_table(list(z0_pows))
-    gamma_pow = gamma * gamma
-    for z_pows in zi_pows:
-        w_evals = w_evals + gamma_pow * eq_cube_table(list(z_pows))
-        gamma_pow = gamma_pow * gamma
-    return w_evals
-
-
-def _encode_commit_arrays(
-    sponge: Sponge,
-    compressor: Compression,
-    g_coeffs: Array,
-    rs_len: int,
-    k_whir: int,
-) -> tuple[Array, list[Array]]:
-    """J4's array outputs (a pytree, so jit-returnable): the committed tree's
-    ``backing_matrix`` and ``digest_layers``. ``StackedMerkleTree`` is a plain
-    (non-pytree) dataclass, so its wrapper is rebuilt outside the jit from these
-    plus the static ``rows_per_query`` — the NTT and Poseidon2 tree still lower
-    inside the boundary, which is the whole point."""
-    tree = _encode_commit(sponge, compressor, g_coeffs, rs_len, k_whir)
-    return tree.backing_matrix, tree.digest_layers
-
-
-@dataclass(frozen=True)
-class _Islands:
-    """The round loop's device-compute dispatchers — plain functions, or their
-    ``jax.jit`` wrappers when ``jit=True``. Each call site is identical across
-    the two: ``jit`` is a transparent, byte-identical boundary (sp1's
-    ``JaggedGkrLayerRound`` pattern). The tables shrink each fold, so a jitted
-    island compiles once per distinct shape (jax caches per shape)."""
-
-    setup: Callable[..., Array]
-    round_poly: Callable[[Array, Array], Array]
-    apply_fold: Callable[[Array, Array, Array], tuple[Array, Array]]
-    encode_commit: Callable[..., StackedMerkleTree]
-    weight_update: Callable[..., Array]
-
-
-def _make_islands(jit: bool, sponge: Sponge, compressor: Compression) -> _Islands:
-    if not jit:
-        return _Islands(
-            _setup_f_evals, _round_poly, _apply_fold, _encode_commit, _weight_update
-        )
-
-    # sponge/compressor hold hash state (non-pytree), so close over them; the
-    # codeword root is rebuilt into a StackedMerkleTree outside the boundary.
-    enc_arrays = jax.jit(
-        partial(_encode_commit_arrays, sponge, compressor), static_argnums=(1, 2)
-    )
-
-    def encode_commit(
-        _sponge: Sponge,
-        _compressor: Compression,
-        g_coeffs: Array,
-        rs_len: int,
-        k_whir: int,
-    ) -> StackedMerkleTree:
-        backing_matrix, digest_layers = enc_arrays(g_coeffs, rs_len, k_whir)
-        return StackedMerkleTree(backing_matrix, digest_layers, 1 << k_whir)
-
-    return _Islands(
-        setup=jax.jit(_setup_f_evals, static_argnums=(1, 2)),
-        round_poly=jax.jit(_round_poly),
-        apply_fold=jax.jit(_apply_fold),
-        encode_commit=encode_commit,
-        weight_update=jax.jit(_weight_update),
-    )
+def _per_query_paths(opening: Opening) -> list[Array]:
+    """Per-query Merkle authentication path. The generic ``path`` is a list over
+    levels (query layer up, leaf-first) each ``(Q, digest_elems)``; the reference
+    stores ``(depth, digest_elems)`` per query, so stack the levels into a
+    ``(Q, depth, digest_elems)`` array once and unstack the leading query axis
+    (one batched ``stack`` rather than one per query)."""
+    return list(jnp.stack(opening.path, axis=1))
 
 
 def prove_whir_opening(
@@ -262,134 +108,75 @@ def prove_whir_opening(
     u_cube: Sequence[Array],
     jit: bool = False,
 ) -> tuple[DuplexTranscript, WhirProof]:
-    """Drive Stage 5 from the transcript state at ``stage4_end``.
+    """Drive Stage 5 over the generic ``WhirProver``.
 
     ``committed`` holds, per commitment (common main first), the stacked
     evaluation matrix (base field, ``(2^m, W)``) and its Stage-1 tree (whose
-    backing matrix is the RS codeword the queries open).
+    backing matrix is the RS codeword the round-0 queries open). The
+    single-commitment fixture is the supported shape; SWIRL multi-commitment
+    μ-batching is out of scope.
 
-    ``jit`` lowers each device-compute island to one fused kernel instead of
-    eager-dispatching it op-by-op; the transcript observes/samples and the PoW
-    grinds stay on the host between islands. Output is byte-identical either way
-    (the islands are pure functions of their arrays).
+    ``jit`` is accepted for call-site compatibility but no longer changes
+    behaviour: the generic driver always lowers its device compute to jitted
+    islands and is byte-identical to an eager run (the islands are pure functions
+    of their arrays), so both ``whir_test`` paths exercise the same code.
     """
-    k_whir = config.k
-    num_whir_rounds = len(config.num_queries)
-    islands = _make_islands(jit, sponge, compressor)
+    del jit  # generic driver is always island-jitted; both paths are identical.
+    if len(committed) != 1:
+        raise ValueError(
+            f"the generic WHIR consumer opens a single commitment, got "
+            f"{len(committed)} (SWIRL multi-commitment μ-batch is out of scope)"
+        )
+    matrix, tree = committed[0]
+    m = log2_strict_usize(matrix.shape[0])
+    k = config.k
 
-    transcript, mu_pow_witness = grind(transcript, config.mu_pow_bits)
-    transcript, mu = sample_ext(transcript)
+    # The codeword domain follows the rate-increasing schedule (``log_rs -= 1``
+    # per round); the strided tree opens ``2^k_whir``-row query cosets, matching
+    # Stage-1's ``stacked_merkle_commit``. SWIRL's prismalinear/Möbius maps ride
+    # the scheme, so the driver stays the scheme-agnostic generic one.
+    code = ReedSolomon(message_len=1 << m, blowup=1 << log_blowup, dtype=F)
+    strided = StridedMerkleTree(sponge, compressor, 1 << k, fuse=True)
+    params = WhirParams(
+        k_whir=k,
+        num_queries=tuple(config.num_queries),
+        mu_pow_bits=config.mu_pow_bits,
+        folding_pow_bits=config.folding_pow_bits,
+        query_pow_bits=config.query_phase_pow_bits,
+        rate_increase=True,
+    )
+    prover = WhirProver(code, strided, params, SwirlWhirScheme(l_skip))
+    # Reuse the Stage-1 commitment directly — its tree already delegates to the
+    # generic StridedMerkleTree, so its codeword rows and digest layers feed the
+    # round-0 query openings natively (no re-commit, no adapter).
+    prover_data = WhirProverData(
+        mle=matrix, codeword=tree.backing_matrix, digest_layers=tree.digest_layers
+    )
 
-    m = log2_strict_usize(committed[0][0].shape[0])
-    f_evals = islands.setup([matrix for matrix, _ in committed], l_skip, m, mu)
-    w_evals = mobius_eq_table(u_cube)
+    z = jnp.stack(list(u_cube))  # the opening point (m,) — == u_cube on the cube
+    # The reference proof also carries μ (its verifier re-derives it). The scheme
+    # binds nothing at WHIR entry, so μ depends only on the entry transcript and
+    # the grind — replay grind(mu_pow_bits) → sample on a copy of the transcript
+    # (functional, so the discarded copy does not perturb the real threading).
+    _, mu = sample_ext(grind(transcript, config.mu_pow_bits)[0])
 
-    whir_sumcheck_polys: list[Array] = []
-    codeword_commits: list[Array] = []
-    ood_values: list[Array] = []
-    folding_pow_witnesses: list[Array] = []
-    query_phase_pow_witnesses: list[Array] = []
-    initial_round_opened_rows: list[list[Array]] = [[] for _ in committed]
-    initial_round_merkle_proofs: list[list[Array]] = [[] for _ in committed]
-    codeword_opened_values: list[list[Array]] = []
-    codeword_merkle_proofs: list[list[Array]] = []
-    rs_tree: StackedMerkleTree | None = None
-    final_poly: Array | None = None
-    log_rs_domain_size = m + log_blowup
+    _, gproof, transcript = prover.open(prover_data, [z], transcript)
 
-    for whir_round, num_queries in enumerate(config.num_queries):
-        is_last_round = whir_round == num_whir_rounds - 1
-
-        # k_whir rounds of sumcheck on Σ_x f̂(x)·ŵ(x); s has degree 2, observed
-        # as evaluations at {1, 2}.
-        for _ in range(k_whir):
-            s_evals = islands.round_poly(f_evals, w_evals)
-            transcript = transcript.observe(s_evals)
-            whir_sumcheck_polys.append(s_evals)
-
-            transcript, witness = grind(transcript, config.folding_pow_bits)
-            folding_pow_witnesses.append(witness)
-            transcript, alpha = sample_ext(transcript)
-            f_evals, w_evals = islands.apply_fold(f_evals, w_evals, alpha)
-
-        # ĝ = f̂(α⃗, ·): commit RS(ĝ) and answer one out-of-domain point — or,
-        # in the last round, send ĝ's coefficients in the clear.
-        g_coeffs = mle_evals_to_coeffs(f_evals)
-        z_0 = None
-        g_tree = None
-        if not is_last_round:
-            rs_len = 1 << (log_rs_domain_size - 1)
-            g_tree = islands.encode_commit(sponge, compressor, g_coeffs, rs_len, k_whir)
-            transcript = transcript.observe(g_tree.root)
-            codeword_commits.append(g_tree.root)
-
-            transcript, z_0 = sample_ext(transcript)
-            g_opened_value = _uni_eval(g_coeffs, z_0)
-            transcript = transcript.observe(g_opened_value)
-            ood_values.append(g_opened_value)
-        else:
-            transcript = transcript.observe(g_coeffs)
-            final_poly = g_coeffs
-
-        # Query phase: grind, sample leaf indices, extract the opened rows and
-        # Merkle paths (hints — not observed).
-        transcript, witness = grind(transcript, config.query_phase_pow_bits)
-        query_phase_pow_witnesses.append(witness)
-        index_bits = log_rs_domain_size - k_whir
-        indices = []
-        for _ in range(num_queries):
-            transcript, index = sample_bits(transcript, index_bits)
-            indices.append(index)
-
-        if not is_last_round:
-            codeword_opened_values.append([])
-            codeword_merkle_proofs.append([])
-        omega = omega_int(index_bits)
-        zs = [pow(omega, index, MODULUS) for index in indices]
-        for index in indices:
-            if whir_round == 0:
-                for com_idx, (_, tree) in enumerate(committed):
-                    initial_round_opened_rows[com_idx].append(tree.opened_rows(index))
-                    initial_round_merkle_proofs[com_idx].append(
-                        tree.query_merkle_proof(index)
-                    )
-            else:
-                assert rs_tree is not None
-                codeword_opened_values[whir_round - 1].append(
-                    ef_from_limbs(rs_tree.opened_rows(index))
-                )
-                codeword_merkle_proofs[whir_round - 1].append(
-                    rs_tree.query_merkle_proof(index)
-                )
-        rs_tree = g_tree
-
-        # γ is sampled even in the last round (verifier symmetry); earlier
-        # rounds fold the OOD and in-domain constraints into the weight:
-        # ŵ += γ·eq(·, pow(z₀)) + Σ_i γ^{i+2}·eq(·, pow(z_i)).
-        transcript, gamma = sample_ext(transcript)
-        if not is_last_round:
-            dim = log2_strict_usize(w_evals.shape[0])
-            z0_pows = _pow2_powers(z_0, dim)
-            zi_pows = [
-                [f_to_ef(f_const(pow(z_int, 1 << t, MODULUS))) for t in range(dim)]
-                for z_int in zs
-            ]
-            w_evals = islands.weight_update(w_evals, gamma, z0_pows, zi_pows)
-
-        log_rs_domain_size -= 1
-
-    assert final_poly is not None
     return transcript, WhirProof(
-        mu_pow_witness=mu_pow_witness,
-        whir_sumcheck_polys=whir_sumcheck_polys,
-        codeword_commits=codeword_commits,
-        ood_values=ood_values,
-        folding_pow_witnesses=folding_pow_witnesses,
-        query_phase_pow_witnesses=query_phase_pow_witnesses,
-        initial_round_opened_rows=initial_round_opened_rows,
-        initial_round_merkle_proofs=initial_round_merkle_proofs,
-        codeword_opened_values=codeword_opened_values,
-        codeword_merkle_proofs=codeword_merkle_proofs,
-        final_poly=final_poly,
+        mu_pow_witness=gproof.mu_pow_witness,
+        whir_sumcheck_polys=gproof.sumcheck_polys,
+        codeword_commits=gproof.codeword_roots,
+        ood_values=gproof.ood_values,
+        folding_pow_witnesses=gproof.folding_pow_witnesses,
+        query_phase_pow_witnesses=gproof.query_pow_witnesses,
+        initial_round_opened_rows=[_per_query_rows(gproof.initial_opening)],
+        initial_round_merkle_proofs=[_per_query_paths(gproof.initial_opening)],
+        codeword_opened_values=[
+            list(ef_from_limbs(op.row)) for op in gproof.codeword_openings
+        ],
+        codeword_merkle_proofs=[
+            _per_query_paths(op) for op in gproof.codeword_openings
+        ],
+        final_poly=gproof.final_poly,
         mu=mu,
     )
