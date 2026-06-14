@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@openvm_zorch_pip//:requirements.bzl", "requirement")
 
 # Transcript-only golden vectors from tools/fixture-gen (--transcript-out).
@@ -162,5 +162,40 @@ py_test(
         requirement("jax"),
         requirement("numpy"),
         requirement("zk_dtypes"),
+    ],
+)
+
+# Wall-clock baseline (cold vs warm) for the full prover on the production
+# fixture. A GPU-only manual tool (deps the cuda plugin, which jax loads at
+# import — so it requires libcuda; it is NOT a CI test). Run on a GPU box:
+#   CPU: bazel run //openvm_zorch:prove_bench -- --runs 4
+#   GPU: JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 \
+#        bazel run //openvm_zorch:prove_bench -- --runs 4
+py_binary(
+    name = "prove_bench",
+    srcs = ["prove_bench.py"],
+    data = [
+        ":prove_testdata",
+        "//openvm_zorch/logup_gkr:testdata",
+        "//openvm_zorch/logup_zerocheck:testdata",
+        "//openvm_zorch/stacked_reduction:testdata",
+        "//openvm_zorch/whir:testdata",
+    ],
+    deps = [
+        ":prove",
+        ":transcript",
+        "//openvm_zorch/logup_gkr:input_layer",
+        "//openvm_zorch/logup_zerocheck:constraints",
+        "//openvm_zorch/poseidon2:babybear16",
+        "//openvm_zorch/whir:prover",
+        "@zorch//zorch/hash:compression",
+        "@zorch//zorch/hash:sponge",
+        "@zorch//zorch/hash/poseidon2",
+        requirement("absl_py"),
+        requirement("jax"),
+        requirement("jax_cuda12_plugin"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+        requirement("zkx_cuda_pjrt"),
     ],
 )
