@@ -36,7 +36,15 @@ common --override_module=zorch=/abs/path/to/your/zorch/checkout
 ```
 
 Bump the pin when you need newer `zorch` blocks; keep it on `main` commits so
-CI is reproducible.
+CI is reproducible. A pin bump's commit range often also moves `zorch`'s own
+zkx wheel pins (`jax`/`jaxlib`/`zkx-cuda-pjrt`) — that does **not** force a
+matching bump here. This repo pins those wheels independently in
+`requirements.in`, on a separate pip hub from `zorch`'s, and the two are
+allowed to skew. Only touch `requirements.in` if a build actually breaks;
+otherwise the pin bump is a one-line `MODULE.bazel` change. (To validate the
+pin the way CI resolves it, temporarily disable the `.bazelrc.user`
+`--override_module=zorch` line — otherwise the build silently uses your local
+checkout, not the pinned commit.)
 
 ## Development environment
 
