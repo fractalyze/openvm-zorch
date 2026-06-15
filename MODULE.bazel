@@ -24,14 +24,17 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "zorch", version = "0.0.0")
 git_override(
     module_name = "zorch",
-    # main @ generic WHIR final-residual support on BOTH prover and verifier
-    # (#250 prover + per-query sampling, #251 verifier) — this consumer slice
-    # drives Stage-5 prove AND verify over it. Builds on the WHIR PCS lineage
-    # (#234/#236/#237/#242–#246) and >= #212 (poseidon2 marker on the
-    # `zorch.poseidon2` composite.attributes form the pinned zkx wheel requires;
-    # the older b2a15826 pin emitted the legacy `poseidon2:16:4:13:7` string the
-    # wheel rejects — CI red).
-    commit = "b1dd05b43f285199510a081a76b73b296de72272",
+    # main @ #257 (eval_coeffs via lax.scan, not a Python-unrolled power
+    # chain) — removes the ptxas 32 KB kernel-parameter overflow in WHIR's
+    # _island_ood at stacked >= 2^16, so prove() compiles on GPU at
+    # production scale. Carries the generic WHIR final-residual lineage
+    # (#250 prover + per-query sampling, #251 verifier) this consumer's
+    # Stage-5 prove AND verify drive, the WHIR PCS lineage
+    # (#234/#236/#237/#242–#246), and >= #212 (poseidon2 marker on the
+    # `zorch.poseidon2` composite.attributes form the pinned zkx wheel
+    # requires; the older b2a15826 pin emitted the legacy
+    # `poseidon2:16:4:13:7` string the wheel rejects — CI red).
+    commit = "7a176ecd282243b02628d4acb21e7c15fabc8dc5",
     remote = "https://github.com/fractalyze/zorch.git",
 )
 
