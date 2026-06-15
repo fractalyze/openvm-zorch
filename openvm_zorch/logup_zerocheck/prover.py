@@ -26,7 +26,8 @@ Structure per the reference (driver mod.rs, per-trace math cpu.rs):
 
 zorch reuse: ``lift_to_domain``/``fold_pair`` (LSB pairing — identical to the
 reference's MLE fold), ``expand_eq_to_hypercube`` (fed reversed ξ slices, the
-Stage-2 convention), ``eval_eq``, ``compute_inv_vandermonde``. The
+Stage-2 convention), ``eval_eq``, ``compute_inv_vandermonde``, ``eval_coeffs``
+(coefficient-form univariate eval, O(1) graph in degree). The
 prismalinear/univariate-skip pieces live in ``prism.py``; the constraint DAG
 evaluator in ``constraints.py``.
 
@@ -53,7 +54,7 @@ from openvm_zorch.logup_zerocheck.constraints import (
 )
 from openvm_zorch.transcript import sample_ext
 from zorch.poly.eq import eval_eq, expand_eq_to_hypercube
-from zorch.poly.univariate import compute_inv_vandermonde
+from zorch.poly.univariate import compute_inv_vandermonde, eval_coeffs
 from zorch.sumcheck.prover import fold_pair, lift_to_domain
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
@@ -98,13 +99,6 @@ def _row0(a: Array) -> Array:
     constraints (resp. no interactions) accumulates to a 0-d zero instead, which
     is already that cell's value, so pass it through."""
     return a[0, 0] if a.ndim == 2 else a
-
-
-def _horner(coeffs: list[Array], x: Array) -> Array:
-    acc = jnp.zeros((), EF)
-    for c in reversed(coeffs):
-        acc = acc * x + c
-    return acc
 
 
 def _batched_conv(coeffs: Array, kernel: Array) -> Array:
@@ -357,11 +351,11 @@ def prove_batch_constraints(
         zc_prod + (p_prods.T * mu_p).sum(axis=-1) + (q_prods.T * mu_q).sum(axis=-1)
     )
     transcript = transcript.observe(s_0_arr)
-    s_0 = list(s_0_arr)  # downstream _horner / the proof field want list[Array]
+    s_0 = list(s_0_arr)  # the proof field wants list[Array]
 
     transcript, r_0 = sample_ext(transcript)
     r = [r_0]
-    prev_s_eval = _horner(s_0, r_0)
+    prev_s_eval = eval_coeffs(s_0_arr, r_0)
 
     # --- Fold the prism at r_0 ---
     mats = [
@@ -385,6 +379,9 @@ def prove_batch_constraints(
     # dynamic scan index instead of a Python branch. The round math is unchanged
     # from the eager body — only the loop carrier moved into the scan carry.
     inv_vdm = _inv_vandermonde_rows(s_deg - 1)
+    domain_pts = jnp.stack(
+        [f_to_ef(f_const(i)) for i in range(1, s_deg + 1)]
+    )  # the {1..s_deg} round-poly sample points
     n_lifts = [max(n, 0) for n in n_per_trace]
     norms = [f_to_ef(f_inv_const(1 << max(-n, 0))) for n in n_per_trace]
 
@@ -546,12 +543,11 @@ def prove_batch_constraints(
         coeffs[0] = coeffs[0] * b
         coeffs[1] = coeffs[1] + sp_tail
 
-        batch_s_evals = jnp.stack(
-            [_horner(coeffs, f_to_ef(f_const(i))) for i in range(1, s_deg + 1)]
-        )
+        coeffs_arr = jnp.stack(coeffs)
+        batch_s_evals = eval_coeffs(coeffs_arr, domain_pts)
         transcript = transcript.observe(batch_s_evals)
         transcript, r_round = sample_ext(transcript)
-        new_prev_s_eval = _horner(coeffs, r_round)
+        new_prev_s_eval = eval_coeffs(coeffs_arr, r_round)
 
         # Fold MLEs (LSB pairing, re-pad zeros), frozen once the trace exhausts
         # so the fully-folded f̂(r⃗) at index 0 survives for the tilde reads and
