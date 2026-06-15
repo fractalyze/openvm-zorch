@@ -1,21 +1,36 @@
 """End-to-end SWIRL verifier — the five stages checked from a proof + vk.
 
-The mirror of ``prove`` (``openvm_zorch/prove.py``): it re-derives every
-Fiat-Shamir challenge from the same preamble and checks each stage's
-algebraic relation, taking only the verifying key (per-AIR shape + constraint
-DAG, no traces) and the proof. A failed check raises ``VerificationError``;
-returning normally means the proof is accepted.
+The structural dual of ``prove`` (``openvm_zorch/prove.py``): ``verify_chain``
+builds a ``zorch.round.VerifyChain`` of one verifier Round per prover stage —
+``CommitVerifierRound`` / ``GkrVerifierRound`` / ``ZeroCheckVerifierRound`` /
+``StackingVerifierRound`` / ``WhirVerifierRound``, the duals of ``prove_chain``'s
+``CommitRound`` … ``WhirRound``. Each Round re-derives its stage's Fiat-Shamir
+challenges and checks the stage's algebraic relation, threading a witness-free
+``VerifyCarry`` (the dual of ``ProveCarry``); the chain consumes the prover's
+one-message-per-round proof, so a stage present on one side and not the other is
+a structural reject, not a silent Fiat-Shamir desync. The verifier takes only
+the verifying key (per-AIR shape + constraint DAG, no traces) and the proof. A
+failed check raises ``VerificationError``; returning normally means the proof is
+accepted.
 
-Structure follows the reference verifier (crates/stark-backend/src/verifier):
+The Rounds wrap the per-stage check helpers, which follow the reference verifier
+(crates/stark-backend/src/verifier):
 
-- Stage 2-3 ``verify_zerocheck_and_logup``: GKR fractional-sumcheck verify,
-  then the batched ZeroCheck+LogUp sumcheck, closed by re-evaluating the
-  constraint/interaction claim at the folded point from the column openings.
-- Stage 4 ``verify_stacked_reduction``: re-derive λ, check s₀ against the
+- Stage 2 ``_verify_gkr_stage``: GKR fractional-sumcheck verify, ξ padding.
+- Stage 3 ``_verify_zerocheck_stage``: the batched ZeroCheck+LogUp sumcheck,
+  closed by re-evaluating the constraint/interaction claim at the folded point
+  from the column openings. (Stages 2–3 were one ``verify_zerocheck_and_logup``
+  before the chain split them at the prover's GKR/ZeroCheck seam.)
+- Stage 4 ``_verify_stacked_reduction``: re-derive λ, check s₀ against the
   opening claims, run the sumcheck, close on the stacking-opening claim.
-- Stage 5 ``verify_whir``: μ batching, per-round sumcheck folds + OOD, the
+- Stage 5 ``_verify_whir``: μ batching, per-round sumcheck folds + OOD, the
   query phase (Merkle-path verification + k-fold codeword consistency), and
   the final WHIR polynomial constraint.
+
+A verifier Round raises ``VerificationError`` on its stage's check rather than
+threading an ``ok`` (openvm's verifier checks were raise-based before the chain,
+and keeping that is a pure refactor); each returns ``ok = True`` and the chain's
+structural AND is the honest path's verdict.
 
 PoW witnesses are checked, not re-ground. Opened rows and Merkle paths are
 verified against the committed roots.
@@ -23,7 +38,7 @@ verified against the committed roots.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Sequence
 
@@ -41,7 +56,7 @@ from openvm_zorch.logup_zerocheck.constraints import (
     eval_nodes,
 )
 from openvm_zorch.logup_zerocheck.prover import BatchConstraintProof
-from openvm_zorch.prove import Proof, SystemParams
+from openvm_zorch.prove import GkrStageMsg, Proof, SystemParams
 from openvm_zorch.stacked_reduction.prover import StackingProof
 from openvm_zorch.transcript import check_witness, sample_ext
 from openvm_zorch.whir.prover import WhirProof
@@ -54,6 +69,7 @@ from zorch.hash.sponge import Sponge
 from zorch.pcs.whir.config import WhirParams
 from zorch.pcs.whir.config import WhirProof as GenericWhirProof
 from zorch.pcs.whir.verifier import WhirVerifier
+from zorch.round import Round, VerifyChain
 from zorch.transcript import DuplexTranscript
 
 
@@ -229,19 +245,28 @@ def _by_rot(flat: Array, need_rot: bool) -> list[tuple[Array, Array]]:
     return [(flat[i], _ZERO) for i in range(flat.shape[0])]
 
 
-def _verify_zerocheck_and_logup(
+def _verify_gkr_stage(
     transcript: DuplexTranscript,
     params: SystemParams,
     sorted_vks: Sequence[AirVk],
+    n_logup: int,
+    n_global: int,
     gkr_proof: FracSumcheckProof,
-    bcp: BatchConstraintProof,
-    logup_pow_bits: int,
     logup_pow_witness: Array,
-) -> tuple[DuplexTranscript, list[Array]]:
+) -> tuple[DuplexTranscript, Array, Array, list[Array], Array, Array]:
+    """Stage 2 verifier — the dual of ``GkrRound``: check the LogUp PoW witness,
+    re-derive α/β, verify the GKR fractional sumcheck, and pad ξ to
+    ``l_skip + n_global``. Returns α, β, the padded point ξ, and the reduced
+    GKR numerator/denominator claims (``p_xi`` / ``q_xi``) the ZeroCheck stage
+    reduces the per-air sum claims against. ``n_logup`` / ``n_global`` are the
+    protocol-derived sizes ``verify_chain`` binds (the same values the prover's
+    ``prove_chain`` derives)."""
     l_skip = params.l_skip
     n_per_trace = [vk.log_height - l_skip for vk in sorted_vks]
 
-    transcript, ok = check_witness(transcript, logup_pow_bits, logup_pow_witness)
+    transcript, ok = check_witness(
+        transcript, params.logup_pow_bits, logup_pow_witness
+    )
     if not bool(ok):
         raise VerificationError("invalid LogUp PoW witness")
     transcript, alpha = sample_ext(transcript)
@@ -251,7 +276,6 @@ def _verify_zerocheck_and_logup(
         len(vk.dag.interactions) << (l_skip + max(n, 0))
         for vk, n in zip(sorted_vks, n_per_trace)
     )
-    n_logup = total_interactions.bit_length() - l_skip if total_interactions else 0
 
     xi: list[Array] = []
     p_xi = _ZERO
@@ -261,11 +285,33 @@ def _verify_zerocheck_and_logup(
             transcript, gkr_proof, l_skip + n_logup
         )
 
-    n_max = max(max(n_per_trace), 0)
-    n_global = max(n_max, n_logup)
     while len(xi) != l_skip + n_global:
         transcript, extra = sample_ext(transcript)
         xi.append(extra)
+
+    return transcript, alpha, beta, xi, p_xi, q_xi
+
+
+def _verify_zerocheck_stage(
+    transcript: DuplexTranscript,
+    params: SystemParams,
+    sorted_vks: Sequence[AirVk],
+    n_logup: int,
+    n_max: int,
+    bcp: BatchConstraintProof,
+    alpha: Array,
+    beta: Array,
+    xi: list[Array],
+    p_xi: Array,
+    q_xi: Array,
+) -> tuple[DuplexTranscript, list[Array]]:
+    """Stage 3 verifier — the dual of ``ZeroCheckRound``: the batched ZeroCheck
+    + LogUp sumcheck. Consumes the Stage-2 outputs off the carry (α/β, the
+    padded point ξ, and the GKR claims ``p_xi`` / ``q_xi``), re-evaluates the
+    constraint/interaction claim at the folded point from the proof's column
+    openings, and returns the sumcheck point ``r``."""
+    l_skip = params.l_skip
+    n_per_trace = [vk.log_height - l_skip for vk in sorted_vks]
 
     transcript, lam = sample_ext(transcript)
 
@@ -617,6 +663,249 @@ def _verify_whir(
     return transcript
 
 
+# --- chain ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VerifyCarry:
+    """What flows between the verifier's stage Rounds: the verifying keys (set
+    at construction) plus each stage's outputs the next stage reads — the
+    witness-free dual of ``prove.ProveCarry``. Stage Rounds return it via
+    ``replace`` — a Round writes its own fields and passes the rest through.
+
+    Like ``ProveCarry`` (and for the same reason) this is a plain dataclass, not
+    a registered pytree: the verifier's stages jit *internally* (Stage 5's WHIR
+    islands), so the carry is host-side Python that never crosses a ``jax.jit``
+    boundary and need not flatten.
+    """
+
+    # Verifying keys in input (verifying-key) order and stacking order — the
+    # dual of ``ProveCarry.airs`` / ``sorted_airs``. The preamble observes per
+    # AIR in input order; the stages consume stacking order.
+    air_vks: Sequence[AirVk]
+    sorted_vks: Sequence[AirVk]
+    # Stage 1 (commit) output: the commitment, read by Stage 5 as the opened
+    # root — dual of ``ProveCarry.root``.
+    common_main_commit: Array | None = None
+    # Stage 2 (GKR) outputs read by Stage 3: the sampled α/β, the padded point
+    # ξ, and the reduced GKR numerator/denominator claims.
+    alpha: Array | None = None
+    beta: Array | None = None
+    xi: list[Array] | None = None
+    gkr_numer: Array | None = None
+    gkr_denom: Array | None = None
+    # Stage 3 (ZeroCheck) outputs: the sumcheck point read by Stage 4, plus the
+    # proof's column openings Stage 4 batches. The prover reads the committed
+    # matrix off the carry; the verifier reads its openings off the proof, so
+    # they ride the carry from here — dual of ``ProveCarry.bcp_r``.
+    r: list[Array] | None = None
+    column_openings: Sequence[Sequence[Array]] | None = None
+    # Stage 4 (stacking) outputs read by Stage 5: the opening point ``u`` and
+    # the stacking openings (WHIR's running claim) — dual of
+    # ``ProveCarry.stacking_u``.
+    u: list[Array] | None = None
+    stacking_openings: Sequence[Sequence[Array]] | None = None
+
+
+class CommitVerifierRound(Round):
+    """Stage 1 dual of ``CommitRound``: replays the preamble absorb stream (vk
+    pre-hash, the commitment, then per AIR in *input* order an optional present
+    flag, log height, and public values) with the proof's commitment message,
+    and writes it onto the carry for the WHIR dual. No local check: the
+    commitment is validated downstream by Stage 5's Merkle openings against this
+    root (sp1-zorch's ``TraceCommitVerifierRound``)."""
+
+    def __init__(self, *, vk_pre_hash: Sequence[int]) -> None:
+        self._vk_pre_hash = vk_pre_hash
+
+    def __call__(
+        self, carry: VerifyCarry, msg: Array, transcript: DuplexTranscript
+    ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
+        transcript = transcript.observe(jnp.array(list(self._vk_pre_hash), dtype=F))
+        transcript = transcript.observe(msg)
+        for vk in carry.air_vks:
+            meta: list[int] = [] if vk.is_required else [1]
+            meta.append(vk.log_height)
+            meta.extend(vk.public_values)
+            transcript = transcript.observe(jnp.array(meta, dtype=F))
+        carry = replace(carry, common_main_commit=msg)
+        return carry, transcript, jnp.bool_(True)
+
+
+class GkrVerifierRound(Round):
+    """Stage 2 dual of ``GkrRound`` over ``_verify_gkr_stage``: writes α/β, the
+    padded point ξ, and the GKR claims onto the carry for ZeroCheck. The message
+    is the GKR stage's proof contribution (``GkrStageMsg``); its ``xi`` field is
+    the prover's record — the verifier re-derives ξ rather than trusting it,
+    exactly as the flat verifier did."""
+
+    def __init__(self, *, params: SystemParams, n_logup: int, n_global: int) -> None:
+        self._params = params
+        self._n_logup = n_logup
+        self._n_global = n_global
+
+    def __call__(
+        self, carry: VerifyCarry, msg: GkrStageMsg, transcript: DuplexTranscript
+    ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
+        transcript, alpha, beta, xi, p_xi, q_xi = _verify_gkr_stage(
+            transcript,
+            self._params,
+            carry.sorted_vks,
+            self._n_logup,
+            self._n_global,
+            msg.gkr_proof,
+            msg.logup_pow_witness,
+        )
+        carry = replace(
+            carry, alpha=alpha, beta=beta, xi=xi, gkr_numer=p_xi, gkr_denom=q_xi
+        )
+        return carry, transcript, jnp.bool_(True)
+
+
+class ZeroCheckVerifierRound(Round):
+    """Stage 3 dual of ``ZeroCheckRound`` over ``_verify_zerocheck_stage``:
+    consumes the Stage-2 outputs off the carry, verifies the batched ZeroCheck +
+    LogUp sumcheck, and writes the sumcheck point ``r`` plus the proof's column
+    openings (Stage 4 batches them) onto the carry."""
+
+    def __init__(self, *, params: SystemParams, n_logup: int, n_max: int) -> None:
+        self._params = params
+        self._n_logup = n_logup
+        self._n_max = n_max
+
+    def __call__(
+        self,
+        carry: VerifyCarry,
+        msg: BatchConstraintProof,
+        transcript: DuplexTranscript,
+    ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
+        transcript, r = _verify_zerocheck_stage(
+            transcript,
+            self._params,
+            carry.sorted_vks,
+            self._n_logup,
+            self._n_max,
+            msg,
+            carry.alpha,
+            carry.beta,
+            carry.xi,
+            carry.gkr_numer,
+            carry.gkr_denom,
+        )
+        carry = replace(carry, r=r, column_openings=msg.column_openings)
+        return carry, transcript, jnp.bool_(True)
+
+
+class StackingVerifierRound(Round):
+    """Stage 4 dual of ``StackingRound`` over ``_verify_stacked_reduction``:
+    rebuilds the stacked layout from the verifying keys, batches the column
+    openings off the carry, and verifies the stacked opening reduction. Writes
+    the opening point ``u`` and the proof's stacking openings (WHIR's running
+    claim) onto the carry."""
+
+    def __init__(self, *, params: SystemParams) -> None:
+        self._params = params
+
+    def __call__(
+        self, carry: VerifyCarry, msg: StackingProof, transcript: DuplexTranscript
+    ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
+        sorted_vks = carry.sorted_vks
+        layout = StackedLayout.new(
+            self._params.l_skip,
+            self._params.l_skip + self._params.n_stack,
+            [(vk.width, vk.log_height) for vk in sorted_vks],
+        )
+        need_rot = [vk.needs_next for vk in sorted_vks]
+        transcript, u = _verify_stacked_reduction(
+            transcript,
+            self._params,
+            msg,
+            layout,
+            need_rot,
+            carry.column_openings,
+            carry.r,
+        )
+        carry = replace(carry, u=u, stacking_openings=msg.stacking_openings)
+        return carry, transcript, jnp.bool_(True)
+
+
+class WhirVerifierRound(Round):
+    """Stage 5 dual of ``WhirRound`` over ``_verify_whir``: forms ``u_cube`` from
+    the opening point on the carry (the same Stage-4 → Stage-5 handoff
+    ``u_cube = (u₀ squarings over the skip domain) ‖ u[1..]`` the prover does),
+    then checks WHIR against the carry's commitment and stacking openings."""
+
+    def __init__(
+        self, sponge: Sponge, compressor: Compression, *, params: SystemParams
+    ) -> None:
+        self._sponge = sponge
+        self._compressor = compressor
+        self._params = params
+
+    def __call__(
+        self, carry: VerifyCarry, msg: WhirProof, transcript: DuplexTranscript
+    ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
+        u = carry.u
+        u_cube = [u[0]]
+        for _ in range(self._params.l_skip - 1):
+            u_cube.append(u_cube[-1] * u_cube[-1])
+        u_cube.extend(u[1:])
+        transcript = _verify_whir(
+            transcript,
+            self._sponge,
+            self._compressor,
+            self._params,
+            msg,
+            carry.stacking_openings,
+            [carry.common_main_commit],
+            u_cube,
+        )
+        return carry, transcript, jnp.bool_(True)
+
+
+def verify_chain(
+    sponge: Sponge,
+    compressor: Compression,
+    params: SystemParams,
+    vk_pre_hash: Sequence[int],
+    air_vks: Sequence[AirVk],
+) -> tuple[VerifyChain, VerifyCarry]:
+    """Build the SWIRL verifier as one ``VerifyChain`` of stage Rounds plus its
+    initial carry — the dual of ``prove.prove_chain``. One definition of the
+    stage wiring so ``verify`` and any future per-stage verify-timing harness
+    cannot drift on it (sp1-zorch's ``verify_shard_chain`` pattern).
+
+    The protocol-derived sizes (stacking order, ``n_logup`` / ``n_max`` /
+    ``n_global``) are computed here from the verifying keys — the same values
+    ``prove_chain`` derives from the traces — and bound onto the Rounds. Returns
+    the carry alongside the chain because the stacking order it derives is also
+    the carry's statement.
+    """
+    l_skip = params.l_skip
+    order = sorted(range(len(air_vks)), key=lambda i: (-air_vks[i].log_height, i))
+    sorted_vks = [air_vks[i] for i in order]
+
+    n_per_trace = [vk.log_height - l_skip for vk in sorted_vks]
+    total_interactions = sum(
+        len(vk.dag.interactions) << (l_skip + max(n, 0))
+        for vk, n in zip(sorted_vks, n_per_trace)
+    )
+    n_logup = total_interactions.bit_length() - l_skip if total_interactions else 0
+    n_max = max(max(n_per_trace), 0)
+    n_global = max(n_max, n_logup)
+
+    chain = VerifyChain(
+        [
+            CommitVerifierRound(vk_pre_hash=vk_pre_hash),
+            GkrVerifierRound(params=params, n_logup=n_logup, n_global=n_global),
+            ZeroCheckVerifierRound(params=params, n_logup=n_logup, n_max=n_max),
+            StackingVerifierRound(params=params),
+            WhirVerifierRound(sponge, compressor, params=params),
+        ]
+    )
+    return chain, VerifyCarry(air_vks=air_vks, sorted_vks=sorted_vks)
+
+
 # --- driver --------------------------------------------------------------
 
 
@@ -631,42 +920,24 @@ def verify(
     proof: Proof,
 ) -> None:
     """Verify a SWIRL proof. Raises ``VerificationError`` on any failed check;
-    returns ``None`` if the proof is accepted."""
-    l_skip = params.l_skip
-    order = sorted(range(len(air_vks)), key=lambda i: (-air_vks[i].log_height, i))
-    sorted_vks = [air_vks[i] for i in order]
+    returns ``None`` if the proof is accepted.
 
-    # Preamble.
-    transcript = transcript.observe(jnp.array(list(vk_pre_hash), dtype=F))
-    transcript = transcript.observe(common_main_commit)
-    for vk in air_vks:
-        meta: list[int] = [] if vk.is_required else [1]
-        meta.append(vk.log_height)
-        meta.extend(vk.public_values)
-        transcript = transcript.observe(jnp.array(meta, dtype=F))
-
-    transcript, r = _verify_zerocheck_and_logup(
-        transcript, params, sorted_vks, proof.gkr_proof,
-        proof.batch_constraint_proof, params.logup_pow_bits,
-        proof.logup_pow_witness,
-    )
-
-    layout = StackedLayout.new(
-        l_skip, l_skip + params.n_stack,
-        [(vk.width, vk.log_height) for vk in sorted_vks],
-    )
-    need_rot = [vk.needs_next for vk in sorted_vks]
-    transcript, u = _verify_stacked_reduction(
-        transcript, params, proof.stacking_proof, layout, need_rot,
-        proof.batch_constraint_proof.column_openings, r,
-    )
-
-    u_cube = [u[0]]
-    for _ in range(l_skip - 1):
-        u_cube.append(u_cube[-1] * u_cube[-1])
-    u_cube.extend(u[1:])
-
-    _verify_whir(
-        transcript, sponge, compressor, params, proof.whir_proof,
-        proof.stacking_proof.stacking_openings, [common_main_commit], u_cube,
-    )
+    A thin driver over ``verify_chain`` (the dual of ``prove``): deconstruct the
+    ``Proof`` into the per-round message list — the inverse of ``prove``'s
+    assembly, ``[commit, gkr, bcp, stacking, whir]`` — and replay the chain.
+    Each verifier Round raises ``VerificationError`` on its stage's failed
+    check, so rejection flows through exactly as the flat verifier's did; ``ok``
+    is the chain's structural AND of the rounds, guarded here so a future
+    ok-returning check cannot silently pass.
+    """
+    chain, carry = verify_chain(sponge, compressor, params, vk_pre_hash, air_vks)
+    msgs = [
+        common_main_commit,
+        GkrStageMsg(proof.logup_pow_witness, proof.gkr_proof, proof.xi),
+        proof.batch_constraint_proof,
+        proof.stacking_proof,
+        proof.whir_proof,
+    ]
+    _, _, ok = chain(carry, msgs, transcript)
+    if not bool(ok):
+        raise VerificationError("verification failed")
