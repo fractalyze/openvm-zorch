@@ -336,7 +336,15 @@ impl Stage2Fixture {
     ///    2^{min(n_T,0)} numerator scaling), message width 2.
     /// 4. bus-1 receiver, height 2, message width 2.
     fn specs(&self) -> Vec<AirSpec> {
-        let fib_n = 64usize;
+        // Tallest trace height. Default 2^6 (64) — the committed fixtures.
+        // FIB_LOG_HEIGHT overrides it for scaling studies (only matters for
+        // --prove-out, which is the self-contained perf fixture); the other
+        // generators keep the default so their golden values are unchanged.
+        let fib_n = std::env::var("FIB_LOG_HEIGHT")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(|lh| 1usize << lh)
+            .unwrap_or(64);
         let (a, b) = (0u64, 1u64);
         let fib_trace = ColMajorMatrix::from_row_major(&generate_trace_rows::<F>(a, b, fib_n));
         let f_n = {
@@ -1658,7 +1666,16 @@ fn gen_prove_fixture(out: &Path) {
     fs::create_dir_all(&inputs).unwrap();
     fs::create_dir_all(&outputs).unwrap();
 
-    let inst = prove_instance_with(test_system_params_small(4, 8, 4));
+    // Defaults (4, 8, 4) reproduce the committed fixture; env overrides let a
+    // scaling study grow the stacked matrix (and thus the WHIR work).
+    let envu = |k: &str, d: usize| {
+        std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+    };
+    let inst = prove_instance_with(test_system_params_small(
+        envu("L_SKIP", 4),
+        envu("N_STACK", 8),
+        envu("K_WHIR", 4),
+    ));
     let params = &inst.params;
     let whir = &params.whir;
     let gkr = &inst.proof.gkr_proof;

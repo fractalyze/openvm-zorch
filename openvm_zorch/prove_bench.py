@@ -39,6 +39,13 @@ from zorch.hash.sponge import Sponge, SpongeParams
 
 _FLAGS = flags.FLAGS
 flags.DEFINE_integer("runs", 3, "Total prove() runs; run 1 is cold, 2.. are warm.")
+flags.DEFINE_string(
+    "fixture",
+    None,
+    "Directory of a prove fixture (meta.json + inputs/). Defaults to the "
+    "committed testdata/prove; point at a fixture-gen --prove-out dir to bench "
+    "a larger instance (e.g. N_STACK-scaled).",
+)
 
 _PROVE = Path(__file__).parent / "testdata" / "prove"
 
@@ -74,16 +81,20 @@ def _poseidon2():
     )
 
 
-def _load_instance():
+def _load_instance(prove_dir):
     """Mirror prove_test.test_prove_production_params input construction."""
-    meta = json.loads((_PROVE / "meta.json").read_text())
+    meta = json.loads((prove_dir / "meta.json").read_text())
     pm = meta["params"]
     airs = []
     for air in meta["airs"]:
         air_idx = air["air_idx"]
-        trace = jnp.array(np.load(_PROVE / "inputs" / f"trace_{air_idx}.npy"), dtype=F)
+        trace = jnp.array(
+            np.load(prove_dir / "inputs" / f"trace_{air_idx}.npy"), dtype=F
+        )
         dag = ConstraintsDag.from_json(
-            json.loads((_PROVE / "inputs" / f"constraints_{air_idx}.json").read_text())
+            json.loads(
+                (prove_dir / "inputs" / f"constraints_{air_idx}.json").read_text()
+            )
         )
         airs.append(
             AirInstance(
@@ -123,12 +134,15 @@ def _load_instance():
 
 def main(argv):
     del argv
-    params, vk_pre_hash, airs = _load_instance()
+    prove_dir = Path(_FLAGS.fixture) if _FLAGS.fixture else _PROVE
+    params, vk_pre_hash, airs = _load_instance(prove_dir)
     sponge, comp = _poseidon2()
 
     backend = jax.default_backend()
     devices = jax.devices()
+    heights = [int(a.trace.shape[0]) for a in airs]
     print(f"backend={backend} devices={devices}")
+    print(f"fixture={prove_dir}  trace_heights={heights}  whir_rounds={len(params.whir.num_queries)}")
 
     times = []
     for i in range(_FLAGS.runs):
