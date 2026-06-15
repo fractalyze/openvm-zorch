@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 
@@ -185,6 +186,262 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     ]
 
 
+@dataclass(frozen=True)
+class _ZcAirStatic:
+    """The compile-time-static slice of an ``AirData`` the MLE region reads —
+    everything but the trace array (which it never touches; it folds ``mats``/
+    ``sels`` passed in). Stripping the array keeps it out of the jitted region's
+    closure constants and out of the lowering-cache key."""
+
+    dag: ConstraintsDag
+    needs_next: bool
+    public_values: tuple[int, ...]
+
+
+def _mle_impl(
+    static,
+    transcript,
+    mats,
+    sels,
+    eq_ns,
+    eq_sharp_ns,
+    r,
+    prev_s_eval,
+    xi,
+    lambda_pows,
+    beta_pows,
+    mu_pows,
+    eq_3bs,
+):
+    """MLE rounds 1..n_max + column openings, lowered as one jitted region.
+
+    round-0's host-int prism weight constructors (``coset_evals``,
+    ``geometric_cosets_to_coeffs``) stay eager upstream — they crash the zkx
+    compiler when traced — but everything from the first MLE round on is pure
+    jnp/EF arithmetic plus transcript ops. Eager, each round folds the
+    hypercube to half its size, so every round is a fresh shape and XLA
+    recompiles the per-round fusions from scratch (~726 one-shot compilations
+    at 2^16, issue #26). Under one jit the whole ``n_max``-round loop traces
+    into a single module compiled once."""
+    airs_static, n_per_trace, n_max, s_deg, num_traces, l_skip, inv_vdm = static
+    zero = jnp.zeros((), EF)
+    one_ef = f_to_ef(jnp.ones((), F))
+    # The lists are appended to / folded in place below; copy so a cached call
+    # never mutates the caller's round-0 outputs.
+    mats = [list(tm) for tm in mats]
+    sels = list(sels)
+    eq_ns = list(eq_ns)
+    eq_sharp_ns = list(eq_sharp_ns)
+    r = list(r)
+    zc_tilde = [zero] * num_traces
+    logup_tilde = [(zero, zero)] * num_traces
+    sumcheck_round_polys: list[Array] = []
+    for round_ in range(1, n_max + 1):
+        r_prev = r[round_ - 1]
+        sp_zc_evals: list[list[Array]] = []
+        sp_lg_evals: list[tuple[list[Array], list[Array]]] = []
+        for t, (air, n) in enumerate(zip(airs_static, n_per_trace)):
+            n_lift = max(n, 0)
+            norm = f_to_ef(f_inv_const(1 << max(-n, 0)))
+            if round_ > n_lift:
+                if round_ == n_lift + 1:
+                    # Evaluate f̂(r⃗) once; later rounds just multiply r.
+                    sels_row = sels[t][0]
+                    rows = [m[0] for m in mats[t]]
+                    node_vals = eval_nodes(
+                        air.dag,
+                        sels_row,
+                        _dag_parts(rows, air.needs_next),
+                        air.public_values,
+                    )
+                    zc_tilde[t] = eq_ns[round_ - 1] * acc_constraints(
+                        air.dag, node_vals, lambda_pows
+                    )
+                    if air.dag.interactions:
+                        numer, denom = acc_interactions(
+                            air.dag, node_vals, beta_pows, eq_3bs[t]
+                        )
+                        logup_tilde[t] = (
+                            eq_sharp_ns[round_ - 1] * numer * norm,
+                            eq_sharp_ns[round_ - 1] * denom,
+                        )
+                else:
+                    zc_tilde[t] = zc_tilde[t] * r_prev
+                    logup_tilde[t] = (
+                        logup_tilde[t][0] * r_prev,
+                        logup_tilde[t][1] * r_prev,
+                    )
+                sp_zc_evals.append([zc_tilde[t]])
+                sp_lg_evals.append(([logup_tilde[t][0]], [logup_tilde[t][1]]))
+            else:
+                eq_xi = _eq_table(xi[l_skip + round_ : l_skip + n_lift])
+                sels_dom = lift_to_domain(sels[t][0::2], sels[t][1::2], s_deg - 1)
+                mats_dom = [
+                    lift_to_domain(m[0::2], m[1::2], s_deg - 1) for m in mats[t]
+                ]
+                node_vals = eval_nodes(
+                    air.dag,
+                    sels_dom,
+                    _dag_parts(mats_dom, air.needs_next),
+                    air.public_values,
+                )
+                acc = acc_constraints(air.dag, node_vals, lambda_pows)
+                zc = (acc * eq_xi[None, :]).sum(axis=1)
+                sp_zc_evals.append([zc[x] for x in range(1, s_deg)])
+                if air.dag.interactions:
+                    numer, denom = acc_interactions(
+                        air.dag, node_vals, beta_pows, eq_3bs[t]
+                    )
+                    p = (numer * eq_xi[None, :]).sum(axis=1) * norm
+                    q = (denom * eq_xi[None, :]).sum(axis=1)
+                    sp_lg_evals.append(
+                        ([p[x] for x in range(1, s_deg)], [q[x] for x in range(1, s_deg)])
+                    )
+                else:
+                    zeros = [zero] * (s_deg - 1)
+                    sp_lg_evals.append((zeros, zeros))
+
+        # Head/tail combine (mod.rs): front-loaded exhaustion cutoff.
+        tail_start = num_traces
+        for t, n in enumerate(n_per_trace):
+            if round_ > n:
+                tail_start = t
+                break
+        sp_head_zc = [zero] * (s_deg - 1)
+        sp_head_logup = [zero] * (s_deg - 1)
+        sp_tail = zero
+        for t in range(num_traces):
+            mu_zc = mu_pows[2 * num_traces + t]
+            mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
+            p_evals, q_evals = sp_lg_evals[t]
+            if t < tail_start:
+                for i in range(s_deg - 1):
+                    sp_head_zc[i] = sp_head_zc[i] + mu_zc * sp_zc_evals[t][i]
+                    sp_head_logup[i] = (
+                        sp_head_logup[i] + mu_p * p_evals[i] + mu_q * q_evals[i]
+                    )
+            else:
+                sp_tail = (
+                    sp_tail
+                    + mu_zc * sp_zc_evals[t][0]
+                    + mu_p * p_evals[0]
+                    + mu_q * q_evals[0]
+                )
+
+        sp_head_evals = [zero] * s_deg
+        for i in range(s_deg - 1):
+            sp_head_evals[i + 1] = (
+                eq_ns[round_ - 1] * sp_head_zc[i]
+                + eq_sharp_ns[round_ - 1] * sp_head_logup[i]
+            )
+        # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
+        xi_cur = xi[l_skip + round_ - 1]
+        eq_xi_0 = one_ef - xi_cur
+        sp_head_evals[0] = (
+            prev_s_eval - xi_cur * sp_head_evals[1] - sp_tail
+        ) / eq_xi_0
+
+        sp_head = [
+            sum((row[j] * sp_head_evals[j] for j in range(s_deg)), start=zero)
+            for row in inv_vdm
+        ]
+        # batch_s = eq(ξ_cur, X)·s'_head(X) + s'_tail·X, in coefficient form.
+        coeffs = sp_head + [zero]
+        b = one_ef - xi_cur
+        a = xi_cur - b
+        for i in reversed(range(s_deg)):
+            coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1]
+        coeffs[0] = coeffs[0] * b
+        coeffs[1] = coeffs[1] + sp_tail
+
+        batch_s_evals = jnp.stack(
+            [_horner(coeffs, f_to_ef(f_const(i))) for i in range(1, s_deg + 1)]
+        )
+        transcript = transcript.observe(batch_s_evals)
+        sumcheck_round_polys.append(batch_s_evals)
+
+        transcript, r_round = sample_ext(transcript)
+        r.append(r_round)
+        prev_s_eval = _horner(coeffs, r_round)
+
+        # Fold MLEs (LSB pairing) and extend the eq accumulators.
+        mats = [
+            [fold_pair(m[0::2], m[1::2], r_round) if m.shape[0] > 1 else m for m in tm]
+            for tm in mats
+        ]
+        sels = [
+            fold_pair(s[0::2], s[1::2], r_round) if s.shape[0] > 1 else s
+            for s in sels
+        ]
+        eq_r = xi_cur * r_round + (one_ef - xi_cur) * (one_ef - r_round)
+        eq_ns.append(eq_ns[-1] * eq_r)
+        eq_sharp_ns.append(eq_sharp_ns[-1] * eq_r)
+
+    # --- Column openings: common main first, interleaved with rotations ---
+    column_openings: list[list[Array]] = []
+    for air, trace_mats in zip(airs_static, mats):
+        if air.needs_next:
+            local, rot = trace_mats[-2][0], trace_mats[-1][0]
+            part0 = jnp.stack([local, rot], axis=-1).reshape(-1)
+        else:
+            part0 = trace_mats[-1][0]
+        column_openings.append([part0])
+
+    zero_arr = jnp.zeros((1,), EF)
+    for air, openings in zip(airs_static, column_openings):
+        part0 = openings[0]
+        if air.needs_next:
+            transcript = transcript.observe(part0)
+        else:
+            for j in range(part0.shape[0]):
+                transcript = transcript.observe(part0[j : j + 1])
+                transcript = transcript.observe(zero_arr)
+
+    return transcript, sumcheck_round_polys, r, column_openings
+
+
+_MLE_REGION_CACHE: dict = {}
+
+
+def _mle_region(static):
+    """Build (and cache) the jitted MLE region for one static structure. The
+    structure (dags, per-trace heights, degree) is closed over so the trace
+    arrays and transcript are the only traced inputs; keyed so the bench's warm
+    runs and any repeated prove of the same shape reuse the single lowering."""
+
+    def wrapped(
+        transcript,
+        mats,
+        sels,
+        eq_ns,
+        eq_sharp_ns,
+        r,
+        prev_s_eval,
+        xi,
+        lambda_pows,
+        beta_pows,
+        mu_pows,
+        eq_3bs,
+    ):
+        return _mle_impl(
+            static,
+            transcript,
+            mats,
+            sels,
+            eq_ns,
+            eq_sharp_ns,
+            r,
+            prev_s_eval,
+            xi,
+            lambda_pows,
+            beta_pows,
+            mu_pows,
+            eq_3bs,
+        )
+
+    return jax.jit(wrapped)
+
+
 def prove_batch_constraints(
     transcript: DuplexTranscript,
     l_skip: int,
@@ -203,7 +460,6 @@ def prove_batch_constraints(
     n_max = max(max(n_per_trace), 0)
     s_deg = max_constraint_degree + 1
     sp_0_deg = max_constraint_degree * ((1 << l_skip) - 1)
-    s_0_deg = s_deg * ((1 << l_skip) - 1)
 
     zero = jnp.zeros((), EF)
     one_ef = f_to_ef(jnp.ones((), F))
@@ -365,171 +621,54 @@ def prove_batch_constraints(
     eq_ns = [prism.eval_eq_uni(l_skip, xi[0], r_0)]
     eq_sharp_ns = [prism.eval_eq_sharp_uni(l_skip, xi[:l_skip], r_0)]
 
-    # --- MLE rounds 1..=n_max ---
+    # --- MLE rounds + column openings, lowered as one jitted region (#26) ---
+    # round-0 above stays eager (its prism weight constructors are host-int and
+    # crash the compiler when traced); from here on it is pure jnp/EF +
+    # transcript, so a single jit collapses what was ~726 per-round
+    # shape-shrinking recompilations into one lowering. Cached per static
+    # structure so warm runs and repeated proves of the same shape reuse it.
     inv_vdm = _inv_vandermonde_rows(s_deg - 1)
-    zc_tilde = [zero] * num_traces
-    logup_tilde = [(zero, zero)] * num_traces
-    sumcheck_round_polys: list[Array] = []
-    for round_ in range(1, n_max + 1):
-        r_prev = r[round_ - 1]
-        sp_zc_evals: list[list[Array]] = []
-        sp_lg_evals: list[tuple[list[Array], list[Array]]] = []
-        for t, (air, n) in enumerate(zip(airs, n_per_trace)):
-            n_lift = max(n, 0)
-            norm = f_to_ef(f_inv_const(1 << max(-n, 0)))
-            if round_ > n_lift:
-                if round_ == n_lift + 1:
-                    # Evaluate f̂(r⃗) once; later rounds just multiply r.
-                    sels_row = sels[t][0]
-                    rows = [m[0] for m in mats[t]]
-                    node_vals = eval_nodes(
-                        air.dag,
-                        sels_row,
-                        _dag_parts(rows, air.needs_next),
-                        air.public_values,
-                    )
-                    zc_tilde[t] = eq_ns[round_ - 1] * acc_constraints(
-                        air.dag, node_vals, lambda_pows
-                    )
-                    if air.dag.interactions:
-                        numer, denom = acc_interactions(
-                            air.dag, node_vals, beta_pows, eq_3bs[t]
-                        )
-                        logup_tilde[t] = (
-                            eq_sharp_ns[round_ - 1] * numer * norm,
-                            eq_sharp_ns[round_ - 1] * denom,
-                        )
-                else:
-                    zc_tilde[t] = zc_tilde[t] * r_prev
-                    logup_tilde[t] = (
-                        logup_tilde[t][0] * r_prev,
-                        logup_tilde[t][1] * r_prev,
-                    )
-                sp_zc_evals.append([zc_tilde[t]])
-                sp_lg_evals.append(([logup_tilde[t][0]], [logup_tilde[t][1]]))
-            else:
-                eq_xi = _eq_table(xi[l_skip + round_ : l_skip + n_lift])
-                sels_dom = lift_to_domain(sels[t][0::2], sels[t][1::2], s_deg - 1)
-                mats_dom = [
-                    lift_to_domain(m[0::2], m[1::2], s_deg - 1) for m in mats[t]
-                ]
-                node_vals = eval_nodes(
-                    air.dag,
-                    sels_dom,
-                    _dag_parts(mats_dom, air.needs_next),
-                    air.public_values,
-                )
-                acc = acc_constraints(air.dag, node_vals, lambda_pows)
-                zc = (acc * eq_xi[None, :]).sum(axis=1)
-                sp_zc_evals.append([zc[x] for x in range(1, s_deg)])
-                if air.dag.interactions:
-                    numer, denom = acc_interactions(
-                        air.dag, node_vals, beta_pows, eq_3bs[t]
-                    )
-                    p = (numer * eq_xi[None, :]).sum(axis=1) * norm
-                    q = (denom * eq_xi[None, :]).sum(axis=1)
-                    sp_lg_evals.append(
-                        ([p[x] for x in range(1, s_deg)], [q[x] for x in range(1, s_deg)])
-                    )
-                else:
-                    zeros = [zero] * (s_deg - 1)
-                    sp_lg_evals.append((zeros, zeros))
-
-        # Head/tail combine (mod.rs): front-loaded exhaustion cutoff.
-        tail_start = num_traces
-        for t, n in enumerate(n_per_trace):
-            if round_ > n:
-                tail_start = t
-                break
-        sp_head_zc = [zero] * (s_deg - 1)
-        sp_head_logup = [zero] * (s_deg - 1)
-        sp_tail = zero
-        for t in range(num_traces):
-            mu_zc = mu_pows[2 * num_traces + t]
-            mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
-            p_evals, q_evals = sp_lg_evals[t]
-            if t < tail_start:
-                for i in range(s_deg - 1):
-                    sp_head_zc[i] = sp_head_zc[i] + mu_zc * sp_zc_evals[t][i]
-                    sp_head_logup[i] = (
-                        sp_head_logup[i] + mu_p * p_evals[i] + mu_q * q_evals[i]
-                    )
-            else:
-                sp_tail = (
-                    sp_tail
-                    + mu_zc * sp_zc_evals[t][0]
-                    + mu_p * p_evals[0]
-                    + mu_q * q_evals[0]
-                )
-
-        sp_head_evals = [zero] * s_deg
-        for i in range(s_deg - 1):
-            sp_head_evals[i + 1] = (
-                eq_ns[round_ - 1] * sp_head_zc[i]
-                + eq_sharp_ns[round_ - 1] * sp_head_logup[i]
-            )
-        # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
-        xi_cur = xi[l_skip + round_ - 1]
-        eq_xi_0 = one_ef - xi_cur
-        sp_head_evals[0] = (
-            prev_s_eval - xi_cur * sp_head_evals[1] - sp_tail
-        ) / eq_xi_0
-
-        sp_head = [
-            sum((row[j] * sp_head_evals[j] for j in range(s_deg)), start=zero)
-            for row in inv_vdm
-        ]
-        # batch_s = eq(ξ_cur, X)·s'_head(X) + s'_tail·X, in coefficient form.
-        coeffs = sp_head + [zero]
-        b = one_ef - xi_cur
-        a = xi_cur - b
-        for i in reversed(range(s_deg)):
-            coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1]
-        coeffs[0] = coeffs[0] * b
-        coeffs[1] = coeffs[1] + sp_tail
-
-        batch_s_evals = jnp.stack(
-            [_horner(coeffs, f_to_ef(f_const(i))) for i in range(1, s_deg + 1)]
-        )
-        transcript = transcript.observe(batch_s_evals)
-        sumcheck_round_polys.append(batch_s_evals)
-
-        transcript, r_round = sample_ext(transcript)
-        r.append(r_round)
-        prev_s_eval = _horner(coeffs, r_round)
-
-        # Fold MLEs (LSB pairing) and extend the eq accumulators.
-        mats = [
-            [fold_pair(m[0::2], m[1::2], r_round) if m.shape[0] > 1 else m for m in tm]
-            for tm in mats
-        ]
-        sels = [
-            fold_pair(s[0::2], s[1::2], r_round) if s.shape[0] > 1 else s
-            for s in sels
-        ]
-        eq_r = xi_cur * r_round + (one_ef - xi_cur) * (one_ef - r_round)
-        eq_ns.append(eq_ns[-1] * eq_r)
-        eq_sharp_ns.append(eq_sharp_ns[-1] * eq_r)
-
-    # --- Column openings: common main first, interleaved with rotations ---
-    column_openings: list[list[Array]] = []
-    for air, trace_mats in zip(airs, mats):
-        if air.needs_next:
-            local, rot = trace_mats[-2][0], trace_mats[-1][0]
-            part0 = jnp.stack([local, rot], axis=-1).reshape(-1)
-        else:
-            part0 = trace_mats[-1][0]
-        column_openings.append([part0])
-
-    zero_arr = jnp.zeros((1,), EF)
-    for air, openings in zip(airs, column_openings):
-        part0 = openings[0]
-        if air.needs_next:
-            transcript = transcript.observe(part0)
-        else:
-            for j in range(part0.shape[0]):
-                transcript = transcript.observe(part0[j : j + 1])
-                transcript = transcript.observe(zero_arr)
+    airs_static = tuple(
+        _ZcAirStatic(a.dag, a.needs_next, a.public_values) for a in airs
+    )
+    static = (
+        airs_static,
+        tuple(n_per_trace),
+        n_max,
+        s_deg,
+        num_traces,
+        l_skip,
+        inv_vdm,
+    )
+    key = (
+        tuple(
+            (repr(a.dag.nodes), a.dag.constraint_idx, a.dag.interactions)
+            for a in airs
+        ),
+        tuple(n_per_trace),
+        n_max,
+        s_deg,
+        num_traces,
+        l_skip,
+    )
+    run = _MLE_REGION_CACHE.get(key)
+    if run is None:
+        run = _mle_region(static)
+        _MLE_REGION_CACHE[key] = run
+    transcript, sumcheck_round_polys, r, column_openings = run(
+        transcript,
+        mats,
+        sels,
+        eq_ns,
+        eq_sharp_ns,
+        r,
+        prev_s_eval,
+        xi,
+        lambda_pows,
+        beta_pows,
+        mu_pows,
+        eq_3bs,
+    )
 
     proof = BatchConstraintProof(
         numerator_term_per_air=numerator_term_per_air,
