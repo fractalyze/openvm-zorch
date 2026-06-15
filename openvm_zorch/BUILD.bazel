@@ -134,6 +134,7 @@ py_library(
         "//openvm_zorch/logup_zerocheck:prover",
         "//openvm_zorch/stacked_reduction:prover",
         "//openvm_zorch/whir:prover",
+        "@zorch//zorch:round",
         "@zorch//zorch:transcript",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
