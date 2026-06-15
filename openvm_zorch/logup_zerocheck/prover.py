@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import jax.numpy as jnp
-from jax import Array
+from jax import Array, lax
 
 from openvm_zorch.fields import EF, F, f_const, f_inv_const, f_to_ef
 from openvm_zorch.logup_gkr.input_layer import interactions_layout
@@ -90,6 +90,14 @@ def _powers(x: Array, n: int) -> list[Array]:
     for _ in range(n - 1):
         out.append(out[-1] * x)
     return out
+
+
+def _row0(a: Array) -> Array:
+    """The first hypercube cell of a ``(s_deg, half)`` round-eval array — the
+    fully-folded ``f̂(r⃗)`` once the buffer is frozen. A trace with no zerocheck
+    constraints (resp. no interactions) accumulates to a 0-d zero instead, which
+    is already that cell's value, so pass it through."""
+    return a[0, 0] if a.ndim == 2 else a
 
 
 def _horner(coeffs: list[Array], x: Array) -> Array:
@@ -203,7 +211,6 @@ def prove_batch_constraints(
     n_max = max(max(n_per_trace), 0)
     s_deg = max_constraint_degree + 1
     sp_0_deg = max_constraint_degree * ((1 << l_skip) - 1)
-    s_0_deg = s_deg * ((1 << l_skip) - 1)
 
     zero = jnp.zeros((), EF)
     one_ef = f_to_ef(jnp.ones((), F))
@@ -365,53 +372,88 @@ def prove_batch_constraints(
     eq_ns = [prism.eval_eq_uni(l_skip, xi[0], r_0)]
     eq_sharp_ns = [prism.eval_eq_sharp_uni(l_skip, xi[:l_skip], r_0)]
 
-    # --- MLE rounds 1..=n_max ---
+    # --- MLE rounds 1..=n_max, as one lax.scan (issue #33) -------------------
+    # Eager, the round loop folds the hypercube to half its size each round, so
+    # every round is a fresh XLA shape → ~726 one-shot recompiles at 2^16 (#26).
+    # Wrapping the unrolled loop in one jit instead *regressed* compile time (one
+    # giant module; #33). The fix is a `lax.scan` whose body compiles once,
+    # independent of n_max: each trace keeps a fixed-width buffer and stride-pair
+    # folds in place, re-padding the dead tail with zeros (mirroring
+    # `zorch.sumcheck._prove_scan`'s fixed-width + dynamic-window scheme, but with
+    # the reference's LSB-stride pairing, not high/low halves). Front-load
+    # exhaustion (round > ñ_t, ñ_t static) becomes a per-trace `jnp.where` on the
+    # dynamic scan index instead of a Python branch. The round math is unchanged
+    # from the eager body — only the loop carrier moved into the scan carry.
     inv_vdm = _inv_vandermonde_rows(s_deg - 1)
-    zc_tilde = [zero] * num_traces
-    logup_tilde = [(zero, zero)] * num_traces
-    sumcheck_round_polys: list[Array] = []
-    for round_ in range(1, n_max + 1):
-        r_prev = r[round_ - 1]
-        sp_zc_evals: list[list[Array]] = []
-        sp_lg_evals: list[tuple[list[Array], list[Array]]] = []
-        for t, (air, n) in enumerate(zip(airs, n_per_trace)):
-            n_lift = max(n, 0)
-            norm = f_to_ef(f_inv_const(1 << max(-n, 0)))
-            if round_ > n_lift:
-                if round_ == n_lift + 1:
-                    # Evaluate f̂(r⃗) once; later rounds just multiply r.
-                    sels_row = sels[t][0]
-                    rows = [m[0] for m in mats[t]]
-                    node_vals = eval_nodes(
-                        air.dag,
-                        sels_row,
-                        _dag_parts(rows, air.needs_next),
-                        air.public_values,
-                    )
-                    zc_tilde[t] = eq_ns[round_ - 1] * acc_constraints(
-                        air.dag, node_vals, lambda_pows
-                    )
-                    if air.dag.interactions:
-                        numer, denom = acc_interactions(
-                            air.dag, node_vals, beta_pows, eq_3bs[t]
-                        )
-                        logup_tilde[t] = (
-                            eq_sharp_ns[round_ - 1] * numer * norm,
-                            eq_sharp_ns[round_ - 1] * denom,
-                        )
-                else:
-                    zc_tilde[t] = zc_tilde[t] * r_prev
-                    logup_tilde[t] = (
-                        logup_tilde[t][0] * r_prev,
-                        logup_tilde[t][1] * r_prev,
-                    )
-                sp_zc_evals.append([zc_tilde[t]])
-                sp_lg_evals.append(([logup_tilde[t][0]], [logup_tilde[t][1]]))
+    n_lifts = [max(n, 0) for n in n_per_trace]
+    norms = [f_to_ef(f_inv_const(1 << max(-n, 0))) for n in n_per_trace]
+
+    # Per-round, per-trace eq(ξ, ·) weight tables, padded to H_t/2 = 2^(ñ_t-1)
+    # and stacked over the n_max scan steps; the live sum `(acc·eq_xi).sum` reads
+    # these so the dead lanes (zero) need no separate live mask. Traces with no
+    # MLE round (ñ_t = 0) are pure-tilde and carry a 1-wide placeholder.
+    eq_xi_xs: list[Array] = []
+    for t, n_lift in enumerate(n_lifts):
+        half_t = 1 << (n_lift - 1) if n_lift >= 1 else 1
+        rows = []
+        for round_ in range(1, n_max + 1):
+            if n_lift >= 1 and round_ <= n_lift:
+                tab = _eq_table(xi[l_skip + round_ : l_skip + n_lift])
+                rows.append(
+                    jnp.concatenate([tab, jnp.zeros(half_t - tab.shape[0], EF)])
+                )
             else:
-                eq_xi = _eq_table(xi[l_skip + round_ : l_skip + n_lift])
-                sels_dom = lift_to_domain(sels[t][0::2], sels[t][1::2], s_deg - 1)
+                rows.append(jnp.zeros(half_t, EF))
+        eq_xi_xs.append(  # (n_max, H_t/2)
+            jnp.stack(rows) if rows else jnp.zeros((0, half_t), EF)
+        )
+
+    xi_cur_xs = (
+        jnp.stack([xi[l_skip + round_ - 1] for round_ in range(1, n_max + 1)])
+        if n_max >= 1
+        else jnp.zeros((0,), EF)
+    )
+
+    def step(carry, xs):
+        (
+            bufs_sels,
+            bufs_mats,
+            tilde_zc,
+            tilde_p,
+            tilde_q,
+            eq_n,
+            eq_sharp_n,
+            r_prev,
+            transcript,
+            prev_s_eval,
+            round_idx,
+        ) = carry
+        eq_xi_row, xi_cur = xs
+
+        sp_head_zc = [zero] * (s_deg - 1)
+        sp_head_logup = [zero] * (s_deg - 1)
+        sp_tail = zero
+        new_tilde_zc = list(tilde_zc)
+        new_tilde_p = list(tilde_p)
+        new_tilde_q = list(tilde_q)
+
+        for t, (air, n_lift) in enumerate(zip(airs, n_lifts)):
+            norm = norms[t]
+            mu_zc = mu_pows[2 * num_traces + t]
+            mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
+            is_head = round_idx <= n_lift  # live this round ⇔ in the head
+
+            if n_lift >= 1:
+                # Live evals on {1..s_deg-1}; the body runs every round but its
+                # head contribution is gated to round ≤ ñ_t. The fully-folded
+                # f̂(r⃗) lands at acc[0,0] once the buffer is frozen (below), so
+                # the tilde base reuses it — no second eval_nodes.
+                eq_xi = eq_xi_row[t]
+                sels_dom = lift_to_domain(
+                    bufs_sels[t][0::2], bufs_sels[t][1::2], s_deg - 1
+                )
                 mats_dom = [
-                    lift_to_domain(m[0::2], m[1::2], s_deg - 1) for m in mats[t]
+                    lift_to_domain(m[0::2], m[1::2], s_deg - 1) for m in bufs_mats[t]
                 ]
                 node_vals = eval_nodes(
                     air.dag,
@@ -421,55 +463,71 @@ def prove_batch_constraints(
                 )
                 acc = acc_constraints(air.dag, node_vals, lambda_pows)
                 zc = (acc * eq_xi[None, :]).sum(axis=1)
-                sp_zc_evals.append([zc[x] for x in range(1, s_deg)])
+                zc0 = eq_n * _row0(acc)
                 if air.dag.interactions:
                     numer, denom = acc_interactions(
                         air.dag, node_vals, beta_pows, eq_3bs[t]
                     )
                     p = (numer * eq_xi[None, :]).sum(axis=1) * norm
                     q = (denom * eq_xi[None, :]).sum(axis=1)
-                    sp_lg_evals.append(
-                        ([p[x] for x in range(1, s_deg)], [q[x] for x in range(1, s_deg)])
-                    )
+                    p0t = eq_sharp_n * _row0(numer) * norm
+                    q0t = eq_sharp_n * _row0(denom)
                 else:
-                    zeros = [zero] * (s_deg - 1)
-                    sp_lg_evals.append((zeros, zeros))
-
-        # Head/tail combine (mod.rs): front-loaded exhaustion cutoff.
-        tail_start = num_traces
-        for t, n in enumerate(n_per_trace):
-            if round_ > n:
-                tail_start = t
-                break
-        sp_head_zc = [zero] * (s_deg - 1)
-        sp_head_logup = [zero] * (s_deg - 1)
-        sp_tail = zero
-        for t in range(num_traces):
-            mu_zc = mu_pows[2 * num_traces + t]
-            mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
-            p_evals, q_evals = sp_lg_evals[t]
-            if t < tail_start:
+                    p = jnp.zeros((s_deg,), EF)
+                    q = jnp.zeros((s_deg,), EF)
+                    p0t = zero
+                    q0t = zero
                 for i in range(s_deg - 1):
-                    sp_head_zc[i] = sp_head_zc[i] + mu_zc * sp_zc_evals[t][i]
-                    sp_head_logup[i] = (
-                        sp_head_logup[i] + mu_p * p_evals[i] + mu_q * q_evals[i]
+                    sp_head_zc[i] = sp_head_zc[i] + jnp.where(
+                        is_head, mu_zc * zc[i + 1], zero
+                    )
+                    sp_head_logup[i] = sp_head_logup[i] + jnp.where(
+                        is_head, mu_p * p[i + 1] + mu_q * q[i + 1], zero
                     )
             else:
-                sp_tail = (
-                    sp_tail
-                    + mu_zc * sp_zc_evals[t][0]
-                    + mu_p * p_evals[0]
-                    + mu_q * q_evals[0]
+                # Pure-tilde trace (height 1): eval over its single row.
+                node0 = eval_nodes(
+                    air.dag,
+                    bufs_sels[t][0],
+                    _dag_parts([m[0] for m in bufs_mats[t]], air.needs_next),
+                    air.public_values,
                 )
+                zc0 = eq_n * acc_constraints(air.dag, node0, lambda_pows)
+                if air.dag.interactions:
+                    numer0, denom0 = acc_interactions(
+                        air.dag, node0, beta_pows, eq_3bs[t]
+                    )
+                    p0t = eq_sharp_n * numer0 * norm
+                    q0t = eq_sharp_n * denom0
+                else:
+                    p0t = zero
+                    q0t = zero
 
+            # tilde carry: init f̂-term at round ñ_t+1, then ×r each later round.
+            is_init = round_idx == n_lift + 1
+            is_accum = round_idx > n_lift + 1
+            new_tilde_zc[t] = jnp.where(
+                is_init, zc0, jnp.where(is_accum, tilde_zc[t] * r_prev, tilde_zc[t])
+            )
+            new_tilde_p[t] = jnp.where(
+                is_init, p0t, jnp.where(is_accum, tilde_p[t] * r_prev, tilde_p[t])
+            )
+            new_tilde_q[t] = jnp.where(
+                is_init, q0t, jnp.where(is_accum, tilde_q[t] * r_prev, tilde_q[t])
+            )
+            tail_term = (
+                mu_zc * new_tilde_zc[t]
+                + mu_p * new_tilde_p[t]
+                + mu_q * new_tilde_q[t]
+            )
+            sp_tail = sp_tail + jnp.where(is_head, zero, tail_term)
+
+        # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
         sp_head_evals = [zero] * s_deg
         for i in range(s_deg - 1):
             sp_head_evals[i + 1] = (
-                eq_ns[round_ - 1] * sp_head_zc[i]
-                + eq_sharp_ns[round_ - 1] * sp_head_logup[i]
+                eq_n * sp_head_zc[i] + eq_sharp_n * sp_head_logup[i]
             )
-        # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
-        xi_cur = xi[l_skip + round_ - 1]
         eq_xi_0 = one_ef - xi_cur
         sp_head_evals[0] = (
             prev_s_eval - xi_cur * sp_head_evals[1] - sp_tail
@@ -492,24 +550,66 @@ def prove_batch_constraints(
             [_horner(coeffs, f_to_ef(f_const(i))) for i in range(1, s_deg + 1)]
         )
         transcript = transcript.observe(batch_s_evals)
-        sumcheck_round_polys.append(batch_s_evals)
-
         transcript, r_round = sample_ext(transcript)
-        r.append(r_round)
-        prev_s_eval = _horner(coeffs, r_round)
+        new_prev_s_eval = _horner(coeffs, r_round)
 
-        # Fold MLEs (LSB pairing) and extend the eq accumulators.
-        mats = [
-            [fold_pair(m[0::2], m[1::2], r_round) if m.shape[0] > 1 else m for m in tm]
-            for tm in mats
-        ]
-        sels = [
-            fold_pair(s[0::2], s[1::2], r_round) if s.shape[0] > 1 else s
-            for s in sels
-        ]
+        # Fold MLEs (LSB pairing, re-pad zeros), frozen once the trace exhausts
+        # so the fully-folded f̂(r⃗) at index 0 survives for the tilde reads and
+        # the column openings.
+        new_bufs_sels = []
+        new_bufs_mats = []
+        for t, n_lift in enumerate(n_lifts):
+            if n_lift >= 1:
+                live = round_idx <= n_lift
+                fs = fold_pair(bufs_sels[t][0::2], bufs_sels[t][1::2], r_round)
+                fs = jnp.concatenate([fs, jnp.zeros_like(fs)], axis=0)
+                new_bufs_sels.append(jnp.where(live, fs, bufs_sels[t]))
+                folded_m = []
+                for m in bufs_mats[t]:
+                    fm = fold_pair(m[0::2], m[1::2], r_round)
+                    fm = jnp.concatenate([fm, jnp.zeros_like(fm)], axis=0)
+                    folded_m.append(jnp.where(live, fm, m))
+                new_bufs_mats.append(folded_m)
+            else:
+                new_bufs_sels.append(bufs_sels[t])
+                new_bufs_mats.append(list(bufs_mats[t]))
+
         eq_r = xi_cur * r_round + (one_ef - xi_cur) * (one_ef - r_round)
-        eq_ns.append(eq_ns[-1] * eq_r)
-        eq_sharp_ns.append(eq_sharp_ns[-1] * eq_r)
+        new_carry = (
+            new_bufs_sels,
+            new_bufs_mats,
+            new_tilde_zc,
+            new_tilde_p,
+            new_tilde_q,
+            eq_n * eq_r,
+            eq_sharp_n * eq_r,
+            r_round,
+            transcript,
+            new_prev_s_eval,
+            round_idx + 1,
+        )
+        return new_carry, (batch_s_evals, r_round)
+
+    init_carry = (
+        sels,
+        mats,
+        [zero] * num_traces,
+        [zero] * num_traces,
+        [zero] * num_traces,
+        eq_ns[0],
+        eq_sharp_ns[0],
+        r_0,
+        transcript,
+        prev_s_eval,
+        jnp.int32(1),
+    )
+    final_carry, (round_polys, r_rounds) = lax.scan(
+        step, init_carry, (eq_xi_xs, xi_cur_xs), length=n_max
+    )
+    mats = final_carry[1]
+    transcript = final_carry[8]
+    sumcheck_round_polys = list(round_polys)
+    r = [r_0] + list(r_rounds)
 
     # --- Column openings: common main first, interleaved with rotations ---
     column_openings: list[list[Array]] = []
