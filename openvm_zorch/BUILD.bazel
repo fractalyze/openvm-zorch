@@ -166,15 +166,17 @@ py_test(
     ],
 )
 
-# Wall-clock baseline (cold vs warm) for the full prover on the production
-# fixture. A GPU-only manual tool (deps the cuda plugin, which jax loads at
-# import — so it requires libcuda; it is NOT a CI test). Run on a GPU box:
-#   CPU: bazel run //openvm_zorch:prove_bench -- --runs 4
-#   GPU: JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 \
-#        bazel run //openvm_zorch:prove_bench -- --runs 4
+# Byte-match harness + per-stage wall-clock for the full prover on a
+# production fixture (the openvm sibling of sp1-zorch's verify_prove_shard).
+# A GPU-capable manual tool (deps the cuda plugin, which jax loads at import —
+# so it requires libcuda; it is NOT a CI test) — the way to gate GPU
+# byte-match at scale, where the backend-agnostic prove_test cannot run. Run:
+#   CPU: bazel run //openvm_zorch:verify_prove
+#   GPU: JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+#        bazel run //openvm_zorch:verify_prove -- --fixture_dir /path/to/fixture
 py_binary(
-    name = "prove_bench",
-    srcs = ["prove_bench.py"],
+    name = "verify_prove",
+    srcs = ["verify_prove.py"],
     data = [
         ":prove_testdata",
         "//openvm_zorch/logup_gkr:testdata",

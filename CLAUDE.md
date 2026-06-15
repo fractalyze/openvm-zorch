@@ -49,7 +49,9 @@ bazel test //...                 # hermetic, sandboxed
 export PYTHONPATH="$PWD:/abs/path/to/zorch"
 ```
 
-Running on GPU (`//openvm_zorch:prove_bench` is the entry point):
+Running on GPU (`//openvm_zorch:verify_prove` is the entry point — the
+byte-match + per-stage-timing runnable, openvm's sibling of sp1-zorch's
+`verify_prove_shard`):
 
 - A target only sees the GPU if it deps **both** `requirement("jax_cuda12_plugin")`
   and `requirement("zkx_cuda_pjrt")`; without them jax **silently falls back to
@@ -58,7 +60,7 @@ Running on GPU (`//openvm_zorch:prove_bench` is the entry point):
 - Those plugin `.so`s require **`libcuda` at import**, so a cuda-dep'd target
   cannot even import on a driverless machine. Therefore tests stay
   **backend-agnostic** (no cuda deps) so `bazel test //...` runs on any
-  machine; GPU lives only in `bazel run` tools like `prove_bench`.
+  machine; GPU lives only in `bazel run` tools like `verify_prove`.
 - `Proof` (and its stage sub-proofs) are plain dataclasses, not registered
   pytrees, so `jax.block_until_ready(proof)` is a **no-op** — walk the tree
   and block on the array leaves to time the device honestly.
