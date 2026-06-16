@@ -9,9 +9,20 @@ publish = false
 # default-features = false drops `parallel` so the LogUp PoW grind inside the
 # prover is a sequential first-match search — deterministic witnesses, hence
 # bit-identical fixtures across regen runs.
+[features]
+# GPU baseline: `--features cuda` makes `--baseline-out` time the CUDA
+# `BabyBearPoseidon2GpuEngine` instead of the CPU reference engine (writes
+# native_prod_gpu.json). OFF by default because openvm-cuda-backend compiles
+# `.cu` kernels at build time -- it needs a CUDA toolchain + GPU, so build and
+# run this on a GPU box (a41). Fixture generation (the other --*-out flags) is
+# unaffected and stays CPU-only.
+cuda = ["dep:openvm-cuda-backend"]
+
 [dependencies]
 openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false, features = ["test-utils"] }
 openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false }
+# Optional GPU prover for the GPU baseline; pulled in only by `--features cuda`.
+openvm-cuda-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", optional = true }
 p3-baby-bear = "=0.4.1"
 p3-field = "=0.4.1"
 serde_json = "1"

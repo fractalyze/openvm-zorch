@@ -1888,50 +1888,24 @@ fn gen_prove_fixture(out: &Path) {
     );
 }
 
-/// Native-prover baseline: time the reference SWIRL prover (the exact prover
-/// `gen_prove_fixture` byte-matches against) at the SAME production params,
-/// and write the numbers to one JSON keyed by platform + params. This is the
-/// single source of truth milestone #4's per-stage issues measure against.
+/// Per-engine prove timing: keygen + tracegen (one-time setup) then a warm loop
+/// timing `prover.prove(&d_pk, d_ctx)` ALONE — the trace-in → proof-out step,
+/// exactly openvm-zorch `prove_chain`'s scope. Returns
+/// `(keygen_s, tracegen_s, prove_runs)`.
 ///
-/// The timed unit is `prover.prove(&d_pk, d_ctx)` ALONE — the trace-in →
-/// proof-out step. That is exactly the scope of openvm-zorch's `prove_chain`
-/// (commit → LogUp-GKR → ZeroCheck → stacking → WHIR), which consumes the
-/// fixture traces as input. keygen, tracegen (`generate_proving_ctx`) and the
-/// device transport are one-time setup, reported separately, NOT folded into
-/// the prove number — including them would compare against work `prove_chain`
-/// never does.
-///
-/// Uses the non-recording `DuplexSponge` transcript, not the `DuplexSpongeRecorder`
-/// the fixture path uses: the recorder appends every observe/sample to a log,
-/// pure overhead that has nothing to do with proving cost. Both derive identical
-/// Fiat-Shamir challenges, so the proof is byte-identical either way.
-///
-/// `BabyBearPoseidon2RefEngine` is CPU-only (`CpuColMajorBackend`); the reference
-/// prover has no GPU backend at this pin, so this baseline is a CPU number. The
-/// GPU comparison lives on the zorch side (`verify_prove` on CUDA), measured
-/// against this same CPU bar.
-///
-/// Scaling knobs (shared with `--prove-out`): `L_SKIP` / `N_STACK` / `K_WHIR`
-/// (params) and `FIB_LOG_HEIGHT` (tallest trace). `BENCH_RUNS` (default 3) sets
-/// the warm-run count; `BENCH_PLATFORM_LABEL` (default "cpu") tags the machine.
-fn gen_baseline(out_file: &Path) {
+/// Generic over the engine so the CPU reference engine and the CUDA
+/// `BabyBearPoseidon2GpuEngine` share one timing path. The body type-checks
+/// against the `StarkEngine` bound alone, so compiling it for the CPU engine
+/// (the default, GPU-free build) also validates it for the GPU engine.
+fn measure<E: StarkEngine<SC = SC>>(
+    engine: &E,
+    fx: &Stage2Fixture,
+    runs: usize,
+) -> (f64, f64, Vec<f64>) {
     use openvm_stark_backend::prover::Prover;
-    use openvm_stark_sdk::config::baby_bear_poseidon2::DuplexSponge;
-
-    let params = test_system_params_small(
-        env_usize("L_SKIP", 4),
-        env_usize("N_STACK", 8),
-        env_usize("K_WHIR", 4),
-    );
-    let runs = env_usize("BENCH_RUNS", 3).max(1);
-    let platform = std::env::var("BENCH_PLATFORM_LABEL").unwrap_or_else(|_| "cpu".to_string());
-
-    let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
-    let fx = Stage2Fixture;
-    let trace_heights: Vec<usize> = fx.specs().iter().map(|s| s.trace.height()).collect();
 
     let t = Instant::now();
-    let (pk, _vk) = fx.keygen(&engine);
+    let (pk, _vk) = fx.keygen(engine);
     let keygen_s = t.elapsed().as_secs_f64();
 
     let t = Instant::now();
@@ -1954,6 +1928,58 @@ fn gen_baseline(out_file: &Path) {
         prove_runs.push(dt);
         println!("[baseline] prove run {}/{}: {dt:.3}s", i + 1, runs);
     }
+    (keygen_s, tracegen_s, prove_runs)
+}
+
+/// Native-prover baseline: time the reference SWIRL prover (the exact prover
+/// `gen_prove_fixture` byte-matches against) at the SAME production params, and
+/// write the numbers to one JSON keyed by platform + params. This is the single
+/// source of truth milestone #4's per-stage issues measure against. See
+/// `measure` for what is timed (the prove step alone; setup reported separately).
+///
+/// The default build times the CPU reference engine
+/// (`BabyBearPoseidon2RefEngine` / `CpuColMajorBackend`), using the non-recording
+/// `DuplexSponge` (not the `DuplexSpongeRecorder` the fixture path uses — the
+/// recorder's per-step log append is pure overhead; the proof is byte-identical).
+///
+/// `--features cuda` swaps in the CUDA `BabyBearPoseidon2GpuEngine` instead, for
+/// the GPU baseline (`native_prod_gpu.json`). That path needs a CUDA toolchain +
+/// GPU at *build* time (`openvm-cuda-backend` compiles `.cu` kernels), so it is
+/// off by default and must be built and run on a GPU box (a41). The GPU prover
+/// derives identical Fiat-Shamir challenges, so its proof byte-matches the CPU
+/// one — gate that separately with `verify_prove` on CUDA.
+///
+/// Scaling knobs (shared with `--prove-out`): `L_SKIP` / `N_STACK` / `K_WHIR`
+/// (params) and `FIB_LOG_HEIGHT` (tallest trace). `BENCH_RUNS` (default 3) sets
+/// the warm-run count; `BENCH_PLATFORM_LABEL` overrides the machine tag (default
+/// "cpu", or "gpu" under `--features cuda`).
+fn gen_baseline(out_file: &Path) {
+    let params = test_system_params_small(
+        env_usize("L_SKIP", 4),
+        env_usize("N_STACK", 8),
+        env_usize("K_WHIR", 4),
+    );
+    let runs = env_usize("BENCH_RUNS", 3).max(1);
+    let fx = Stage2Fixture;
+    let trace_heights: Vec<usize> = fx.specs().iter().map(|s| s.trace.height()).collect();
+
+    #[cfg(not(feature = "cuda"))]
+    let (default_platform, keygen_s, tracegen_s, prove_runs) = {
+        use openvm_stark_sdk::config::baby_bear_poseidon2::DuplexSponge;
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
+        let (k, t, r) = measure(&engine, &fx, runs);
+        ("cpu", k, t, r)
+    };
+    #[cfg(feature = "cuda")]
+    let (default_platform, keygen_s, tracegen_s, prove_runs) = {
+        use openvm_cuda_backend::BabyBearPoseidon2GpuEngine;
+        let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
+        let (k, t, r) = measure(&engine, &fx, runs);
+        ("gpu", k, t, r)
+    };
+
+    let platform =
+        std::env::var("BENCH_PLATFORM_LABEL").unwrap_or_else(|_| default_platform.to_string());
     let prove_min = prove_runs.iter().copied().fold(f64::INFINITY, f64::min);
     let prove_mean = prove_runs.iter().sum::<f64>() / prove_runs.len() as f64;
 
