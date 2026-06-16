@@ -3,6 +3,7 @@
 - **Overview & quick start:** [`README.md`](README.md)
 - **Conventions:** [`docs/conventions.md`](docs/conventions.md) — comments (why-not-what), external OpenVM references (pinned permalinks).
 - **Pipeline & terminology:** [`docs/swirl-pipeline.md`](docs/swirl-pipeline.md) — SWIRL stages as Round compositions, openvm-stark-backend vocabulary mapping.
+- **Native baseline:** [`docs/native-baseline.md`](docs/native-baseline.md) — the native (Rust) prover wall-clock milestone #4 measures against, what is timed, and the CPU / GPU (`--features cuda`) split.
 
 ## One non-negotiable
 

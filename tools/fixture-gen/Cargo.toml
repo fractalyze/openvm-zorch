@@ -9,9 +9,30 @@ publish = false
 # default-features = false drops `parallel` so the LogUp PoW grind inside the
 # prover is a sequential first-match search — deterministic witnesses, hence
 # bit-identical fixtures across regen runs.
+[features]
+# GPU baseline: `--features cuda` makes `--baseline-out` time the CUDA
+# `BabyBearPoseidon2GpuEngine` instead of the CPU reference engine (writes
+# native_prod_gpu.json). OFF by default because openvm-cuda-backend compiles
+# `.cu` kernels at build time -- it needs a CUDA toolchain + GPU, so build and
+# run this on a GPU box (a41). Fixture generation (the other --*-out flags) is
+# unaffected and stays CPU-only.
+# Multi-threaded CPU baseline. The production native prover runs rayon-parallel
+# (openvm-stark-backend's default = ["parallel", "metrics"]); the `default-
+# features = false` above keeps fixture GENERATION single-threaded so the LogUp
+# PoW grind picks a deterministic witness (byte-identical fixtures). Enable
+# `parallel` ONLY for `--baseline-out`, so the CPU bar reflects the real
+# multi-core prover -- NEVER for the `--*-out` generators (it would break
+# fixture determinism).
+parallel = ["openvm-stark-backend/parallel", "openvm-stark-sdk/parallel"]
+cuda = ["dep:openvm-cuda-backend", "dep:openvm-cuda-common"]
+
 [dependencies]
 openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false, features = ["test-utils"] }
 openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false }
+# Optional GPU prover for the GPU baseline; pulled in only by `--features cuda`.
+# openvm-cuda-common provides the CUDA stream sync the GPU prove timing needs.
+openvm-cuda-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", optional = true }
+openvm-cuda-common = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", optional = true }
 p3-baby-bear = "=0.4.1"
 p3-field = "=0.4.1"
 serde_json = "1"

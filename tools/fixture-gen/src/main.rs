@@ -15,7 +15,7 @@
 //!   transcript log, the `GkrProof`, named challenges (alpha/beta/xi) and the
 //!   reconstructed GKR input layer.
 
-use std::{fs, io::Write as _, path::Path, path::PathBuf};
+use std::{fs, io::Write as _, path::Path, path::PathBuf, time::Instant};
 
 use openvm_stark_backend::{
     air_builders::symbolic::{
@@ -37,15 +37,15 @@ use openvm_stark_backend::{
         TraceCommitter,
     },
     test_utils::{
-        default_test_params_small, test_system_params_small,
+        default_test_params_small,
         dummy_airs::{
             fib_air::{air::FibonacciAir, trace::generate_trace_rows},
             interaction::dummy_interaction_air::DummyInteractionAir,
         },
-        TestFixture,
+        test_system_params_small, TestFixture,
     },
-    AirRef, FiatShamirTranscript, ReadOnlyTranscript, StarkEngine, SystemParams,
-    TranscriptHistory, TranscriptLog,
+    AirRef, FiatShamirTranscript, ReadOnlyTranscript, StarkEngine, SystemParams, TranscriptHistory,
+    TranscriptLog,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::{
     default_duplex_sponge_recorder, BabyBearPoseidon2RefEngine, DuplexSpongeRecorder, EF,
@@ -1398,7 +1398,11 @@ fn walk_whir_log(
             for &eval in &wp.whir_sumcheck_polys[flat] {
                 assert_eq!(read_ext(false, &mut idx), eval);
             }
-            read_grind(whir.folding_pow_bits, wp.folding_pow_witnesses[flat], &mut idx);
+            read_grind(
+                whir.folding_pow_bits,
+                wp.folding_pow_witnesses[flat],
+                &mut idx,
+            );
             let _alpha = read_ext(true, &mut idx);
         }
         if !is_last_round {
@@ -1452,7 +1456,12 @@ fn gen_whir_fixture(out: &Path) {
         .iter()
         .map(|&i| inst.pk.per_air[i].vk.params.need_rot)
         .collect();
-    let walk3 = walk_zerocheck_log(&inst.log, inst.walk.stage2_end, &inst.proof.batch_constraint_proof, &needs_next);
+    let walk3 = walk_zerocheck_log(
+        &inst.log,
+        inst.walk.stage2_end,
+        &inst.proof.batch_constraint_proof,
+        &needs_next,
+    );
     let walk4 = walk_stacking_log(&inst.log, walk3.stage3_end, &inst.proof.stacking_proof);
 
     // Stage-4 → Stage-5 input: u_cube = (u₀ squarings over the skip domain) ‖ u[1..].
@@ -1597,7 +1606,10 @@ fn gen_whir_fixture(out: &Path) {
     let depth0 = proofs0[0].len();
     let proofs0_flat: Vec<u32> = proofs0
         .iter()
-        .flat_map(|p| p.iter().flat_map(|d| d.iter().map(|x| x.as_canonical_u32())))
+        .flat_map(|p| {
+            p.iter()
+                .flat_map(|d| d.iter().map(|x| x.as_canonical_u32()))
+        })
         .collect();
     write_npy_u32(
         &outputs.join("initial_merkle_proofs_c0.npy"),
@@ -1625,7 +1637,10 @@ fn gen_whir_fixture(out: &Path) {
         let depth = proofs[0].len();
         let proofs_flat: Vec<u32> = proofs
             .iter()
-            .flat_map(|p| p.iter().flat_map(|d| d.iter().map(|x| x.as_canonical_u32())))
+            .flat_map(|p| {
+                p.iter()
+                    .flat_map(|d| d.iter().map(|x| x.as_canonical_u32()))
+            })
             .collect();
         write_npy_u32(
             &outputs.join(format!("codeword_merkle_proofs_r{}.npy", r + 1)),
@@ -1741,7 +1756,11 @@ fn gen_prove_fixture(out: &Path) {
     let xi_flat: Vec<u32> = inst.walk.xi.iter().flat_map(|&x| ef_limbs(x)).collect();
     write_npy_u32(&outputs.join("xi.npy"), &[inst.walk.xi.len(), 4], &xi_flat);
     // Stage 3.
-    write_npy_u32(&outputs.join("zc_lambda.npy"), &[4], &ef_limbs(walk3.lambda));
+    write_npy_u32(
+        &outputs.join("zc_lambda.npy"),
+        &[4],
+        &ef_limbs(walk3.lambda),
+    );
     let s0_flat: Vec<u32> = bcp
         .univariate_round_coeffs
         .iter()
@@ -1755,7 +1774,11 @@ fn gen_prove_fixture(out: &Path) {
     let r_flat: Vec<u32> = walk3.r.iter().flat_map(|&x| ef_limbs(x)).collect();
     write_npy_u32(&outputs.join("zc_r.npy"), &[walk3.r.len(), 4], &r_flat);
     // Stage 4.
-    write_npy_u32(&outputs.join("st_lambda.npy"), &[4], &ef_limbs(walk4.lambda));
+    write_npy_u32(
+        &outputs.join("st_lambda.npy"),
+        &[4],
+        &ef_limbs(walk4.lambda),
+    );
     let u_flat: Vec<u32> = walk4.u.iter().flat_map(|&x| ef_limbs(x)).collect();
     write_npy_u32(&outputs.join("st_u.npy"), &[walk4.u.len(), 4], &u_flat);
     let open_flat: Vec<u32> = sp.stacking_openings[0]
@@ -1859,7 +1882,165 @@ fn gen_prove_fixture(out: &Path) {
         serde_json::to_string_pretty(&meta).unwrap(),
     )
     .unwrap();
-    println!("prove (production-params) fixture written to {}", out.display());
+    println!(
+        "prove (production-params) fixture written to {}",
+        out.display()
+    );
+}
+
+/// Block until the device's current stream drains. The CUDA prover dispatches
+/// kernels on the current stream and returns *before* they finish, so a timer
+/// around `prove` alone would catch only the launch overhead (~ms), not the
+/// compute. Sync after `prove` to time real completion, and before `t0` to
+/// drain the prior run + the async H2D ctx transport so neither bleeds into the
+/// timed region — exactly what openvm-cuda-backend's own bench does
+/// (`crates/cuda-backend/src/bin/bench.rs`). A no-op for the CPU engine, whose
+/// `prove` is synchronous.
+#[cfg(feature = "cuda")]
+fn sync_stream() {
+    openvm_cuda_common::stream::current_stream_sync().expect("cuda stream sync");
+}
+#[cfg(not(feature = "cuda"))]
+fn sync_stream() {}
+
+/// Per-engine prove timing: keygen + tracegen (one-time setup) then a warm loop
+/// timing `prover.prove(&d_pk, d_ctx)` ALONE — the trace-in → proof-out step,
+/// exactly openvm-zorch `prove_chain`'s scope. Returns
+/// `(keygen_s, tracegen_s, prove_runs)`.
+///
+/// Generic over the engine so the CPU reference engine and the CUDA
+/// `BabyBearPoseidon2GpuEngine` share one timing path. The body type-checks
+/// against the `StarkEngine` bound alone, so compiling it for the CPU engine
+/// (the default, GPU-free build) also validates it for the GPU engine.
+fn measure<E: StarkEngine<SC = SC>>(
+    engine: &E,
+    fx: &Stage2Fixture,
+    runs: usize,
+) -> (f64, f64, Vec<f64>) {
+    use openvm_stark_backend::prover::Prover;
+
+    let t = Instant::now();
+    let (pk, _vk) = fx.keygen(engine);
+    let keygen_s = t.elapsed().as_secs_f64();
+
+    let t = Instant::now();
+    let ctx = fx.generate_proving_ctx();
+    let tracegen_s = t.elapsed().as_secs_f64();
+
+    let device = engine.device();
+    let d_pk = device.transport_pk_to_device(&pk);
+
+    // Warm loop: a fresh transcript + freshly transported ctx each run (both are
+    // consumed by `prove`), but only the `prove` call itself is timed. On GPU,
+    // `prove` is async on the current stream, so bracket the timer with stream
+    // syncs (see `sync_stream`); on CPU both syncs are no-ops.
+    let mut prove_runs = Vec::with_capacity(runs);
+    for i in 0..runs {
+        let d_ctx = device.transport_proving_ctx_to_device(&ctx);
+        let mut prover = engine.prover_from_transcript(engine.initial_transcript());
+        sync_stream();
+        let t = Instant::now();
+        let proof = prover.prove(&d_pk, d_ctx).unwrap();
+        sync_stream();
+        let dt = t.elapsed().as_secs_f64();
+        std::hint::black_box(&proof);
+        prove_runs.push(dt);
+        println!("[baseline] prove run {}/{}: {dt:.3}s", i + 1, runs);
+    }
+    (keygen_s, tracegen_s, prove_runs)
+}
+
+/// Native-prover baseline: time the reference SWIRL prover (the exact prover
+/// `gen_prove_fixture` byte-matches against) at the SAME production params, and
+/// write the numbers to one JSON keyed by platform + params. This is the single
+/// source of truth milestone #4's per-stage issues measure against. See
+/// `measure` for what is timed (the prove step alone; setup reported separately).
+///
+/// The default build times the CPU reference engine
+/// (`BabyBearPoseidon2RefEngine` / `CpuColMajorBackend`), using the non-recording
+/// `DuplexSponge` (not the `DuplexSpongeRecorder` the fixture path uses — the
+/// recorder's per-step log append is pure overhead; the proof is byte-identical).
+///
+/// `--features cuda` swaps in the CUDA `BabyBearPoseidon2GpuEngine` instead, for
+/// the GPU baseline (`native_prod_gpu.json`). That path needs a CUDA toolchain +
+/// GPU at *build* time (`openvm-cuda-backend` compiles `.cu` kernels), so it is
+/// off by default and must be built and run on a GPU box (a41). The GPU prover
+/// derives identical Fiat-Shamir challenges, so its proof byte-matches the CPU
+/// one — gate that separately with `verify_prove` on CUDA.
+///
+/// Scaling knobs (shared with `--prove-out`): `L_SKIP` / `N_STACK` / `K_WHIR`
+/// (params) and `FIB_LOG_HEIGHT` (tallest trace). `BENCH_RUNS` (default 3) sets
+/// the warm-run count; `BENCH_PLATFORM_LABEL` overrides the machine tag (default
+/// "cpu", or "gpu" under `--features cuda`).
+fn gen_baseline(out_file: &Path) {
+    let params = test_system_params_small(
+        env_usize("L_SKIP", 4),
+        env_usize("N_STACK", 8),
+        env_usize("K_WHIR", 4),
+    );
+    let runs = env_usize("BENCH_RUNS", 3).max(1);
+    let fx = Stage2Fixture;
+    let trace_heights: Vec<usize> = fx.specs().iter().map(|s| s.trace.height()).collect();
+
+    #[cfg(not(feature = "cuda"))]
+    let (default_platform, keygen_s, tracegen_s, prove_runs) = {
+        use openvm_stark_sdk::config::baby_bear_poseidon2::DuplexSponge;
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
+        let (k, t, r) = measure(&engine, &fx, runs);
+        ("cpu", k, t, r)
+    };
+    #[cfg(feature = "cuda")]
+    let (default_platform, keygen_s, tracegen_s, prove_runs) = {
+        use openvm_cuda_backend::BabyBearPoseidon2GpuEngine;
+        let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
+        let (k, t, r) = measure(&engine, &fx, runs);
+        ("gpu", k, t, r)
+    };
+
+    let platform =
+        std::env::var("BENCH_PLATFORM_LABEL").unwrap_or_else(|_| default_platform.to_string());
+    let prove_min = prove_runs.iter().copied().fold(f64::INFINITY, f64::min);
+    let prove_mean = prove_runs.iter().sum::<f64>() / prove_runs.len() as f64;
+
+    let whir = &params.whir;
+    let baseline = serde_json::json!({
+        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "platform": platform,
+        "available_parallelism": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        "runs": runs,
+        "trace_heights": trace_heights,
+        "params": {
+            "l_skip": params.l_skip,
+            "n_stack": params.n_stack,
+            "log_blowup": params.log_blowup,
+            "k_whir": whir.k,
+            "logup_pow_bits": params.logup.pow_bits,
+            "max_constraint_degree": params.max_constraint_degree,
+            "mu_pow_bits": whir.mu_pow_bits,
+            "folding_pow_bits": whir.folding_pow_bits,
+            "query_phase_pow_bits": whir.query_phase_pow_bits,
+        },
+        "num_queries": whir.rounds.iter().map(|r| r.num_queries).collect::<Vec<_>>(),
+        // The e2e prove number every per-stage issue compares against. Excludes
+        // setup (keygen/tracegen/transport); matches `prove_chain`'s scope.
+        "prove_e2e_s": {
+            "warm_min": prove_min,
+            "warm_mean": prove_mean,
+            "runs": prove_runs,
+        },
+        "setup_s": {
+            "keygen": keygen_s,
+            "tracegen": tracegen_s,
+        },
+    });
+    if let Some(parent) = out_file.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(out_file, serde_json::to_string_pretty(&baseline).unwrap()).unwrap();
+    println!(
+        "baseline written to {} (prove warm_min={prove_min:.3}s over {runs} runs, platform={platform})",
+        out_file.display()
+    );
 }
 
 fn main() {
@@ -1870,6 +2051,7 @@ fn main() {
     let mut stacking_out: Option<PathBuf> = None;
     let mut whir_out: Option<PathBuf> = None;
     let mut prove_out: Option<PathBuf> = None;
+    let mut baseline_out: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -1880,8 +2062,9 @@ fn main() {
             "--stacking-out" => stacking_out = args.next().map(PathBuf::from),
             "--whir-out" => whir_out = args.next().map(PathBuf::from),
             "--prove-out" => prove_out = args.next().map(PathBuf::from),
+            "--baseline-out" => baseline_out = args.next().map(PathBuf::from),
             other => panic!(
-                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>] [--stacking-out <dir>] [--whir-out <dir>] [--prove-out <dir>]"
+                "unknown arg {other}; usage: [--out <dir>] [--transcript-out <dir>] [--gkr-out <dir>] [--zerocheck-out <dir>] [--stacking-out <dir>] [--whir-out <dir>] [--prove-out <dir>] [--baseline-out <file>]"
             ),
         }
     }
@@ -1892,9 +2075,10 @@ fn main() {
         && stacking_out.is_none()
         && whir_out.is_none()
         && prove_out.is_none()
+        && baseline_out.is_none()
     {
         panic!(
-            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out / --stacking-out / --whir-out / --prove-out is required"
+            "at least one of --out / --transcript-out / --gkr-out / --zerocheck-out / --stacking-out / --whir-out / --prove-out / --baseline-out is required"
         );
     }
     if let Some(out) = out_dir {
@@ -1917,5 +2101,8 @@ fn main() {
     }
     if let Some(out) = prove_out {
         gen_prove_fixture(&out);
+    }
+    if let Some(out) = baseline_out {
+        gen_baseline(&out);
     }
 }

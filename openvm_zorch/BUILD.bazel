@@ -15,6 +15,13 @@ filegroup(
     visibility = ["//openvm_zorch:__subpackages__"],
 )
 
+# Native-prover baseline JSONs (--baseline-out); see docs/native-baseline.md.
+filegroup(
+    name = "baseline_testdata",
+    srcs = glob(["testdata/baseline/**"]),
+    visibility = ["//openvm_zorch:__subpackages__"],
+)
+
 # BabyBear / BabyBear⁴ dtype helpers shared across stages.
 py_library(
     name = "fields",
@@ -179,6 +186,7 @@ py_binary(
     name = "verify_prove",
     srcs = ["verify_prove.py"],
     data = [
+        ":baseline_testdata",
         ":prove_testdata",
         "//openvm_zorch/logup_gkr:testdata",
         "//openvm_zorch/logup_zerocheck:testdata",

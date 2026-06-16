@@ -31,6 +31,7 @@ Exits non-zero on any mismatch.
 
 import dataclasses
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -59,6 +60,14 @@ _FIXTURE_DIR = flags.DEFINE_string(
     "Directory of a prove fixture (meta.json + inputs/ + outputs/). Defaults "
     "to the committed testdata/prove; point at a generated fixture dir to "
     "byte-match a larger, production-scale instance.",
+)
+
+_BASELINE = flags.DEFINE_string(
+    "baseline",
+    None,
+    "Optional native-prover baseline JSON (see docs/native-baseline.md). When "
+    "set, the chain is run a second (warm) time and its per-stage _TimedRound "
+    "sum is printed against the native e2e prove time, with the delta.",
 )
 
 _PROVE = Path(__file__).parent / "testdata" / "prove"
@@ -103,19 +112,27 @@ class _TimedRound(Round):
     on every run. Blocking is mandatory -- async dispatch returns before the
     device finishes, so an unblocked timing would attribute this stage's
     compute to the next timed section; the message is a plain dataclass, opaque
-    to ``block_until_ready``, so block on its array leaves by hand."""
+    to ``block_until_ready``, so block on its array leaves by hand.
 
-    def __init__(self, inner: Round) -> None:
+    When a ``record`` dict is passed, each call also stores ``label -> seconds``
+    so the caller can sum the per-stage warm runtime for the ``--baseline``
+    comparison."""
+
+    def __init__(self, inner: Round, record: dict | None = None) -> None:
         self._inner = inner
+        self._record = record
 
     def __call__(self, carry, transcript):
         t0 = time.monotonic()
         out = self._inner(carry, transcript)
         jax.block_until_ready(_array_leaves(out))
+        dt = time.monotonic() - t0
         label = _STAGE_LABELS.get(
             type(self._inner).__name__, type(self._inner).__name__
         )
-        print(f"[stage {label}] {time.monotonic() - t0:.1f}s", flush=True)
+        if self._record is not None:
+            self._record[label] = dt
+        print(f"[stage {label}] {dt:.1f}s", flush=True)
         return out
 
 
@@ -287,6 +304,59 @@ def _byte_match(proof: Proof, out: Path) -> bool:
     return ok
 
 
+def _compare_baseline(baseline_path: str, params, stage_times: dict) -> None:
+    """Print the zorch per-stage warm sum against the native e2e baseline.
+
+    ``stage_times`` is the warm-run ``label -> seconds`` map captured by the
+    second (compiled) chain pass. The baseline JSON is the native source of
+    truth from ``docs/native-baseline.md``; its params must match the fixture's
+    or the comparison is meaningless, so a mismatch is loud (the run still
+    prints, but flagged)."""
+    # Resolve a relative path against the workspace root so the documented
+    # ``--baseline openvm_zorch/testdata/baseline/...`` works under ``bazel run``
+    # (whose cwd is the runfiles tree, not the workspace) -- bazel sets
+    # BUILD_WORKSPACE_DIRECTORY. An absolute path or a plain ``python`` run is
+    # used as given.
+    p = Path(baseline_path)
+    if not p.is_absolute() and not p.exists():
+        ws = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+        if ws and (Path(ws) / p).exists():
+            p = Path(ws) / p
+    baseline = json.loads(p.read_text())
+    bp = baseline["params"]
+    fixture = {
+        "l_skip": params.l_skip,
+        "n_stack": params.n_stack,
+        "k_whir": params.whir.k,
+    }
+    mismatched = {k: (v, bp.get(k)) for k, v in fixture.items() if bp.get(k) != v}
+
+    native = baseline["prove_e2e_s"]["warm_min"]
+    zorch_sum = sum(stage_times.values())
+    breakdown = " + ".join(f"{k} {t:.2f}" for k, t in stage_times.items())
+
+    print("\n=== baseline comparison ===", flush=True)
+    print(f"baseline:     {p}", flush=True)
+    print(
+        f"  reference:  {baseline['reference']}  platform={baseline['platform']}",
+        flush=True,
+    )
+    if mismatched:
+        print(
+            "  WARNING: param mismatch (fixture vs baseline): "
+            + ", ".join(f"{k}={v[0]}!={v[1]}" for k, v in mismatched.items())
+            + " -- comparison is not apples-to-apples",
+            flush=True,
+        )
+    print(f"native e2e prove (warm min): {native:.3f}s", flush=True)
+    print(f"zorch per-stage warm sum:    {zorch_sum:.3f}s  ({breakdown})", flush=True)
+    if zorch_sum > 0 and native > 0:
+        if zorch_sum <= native:
+            print(f"  zorch is {native / zorch_sum:.2f}x FASTER than native", flush=True)
+        else:
+            print(f"  zorch is {zorch_sum / native:.2f}x SLOWER than native", flush=True)
+
+
 def main(argv) -> None:
     del argv
     prove_dir = Path(_FIXTURE_DIR.value) if _FIXTURE_DIR.value else _PROVE
@@ -322,6 +392,19 @@ def main(argv) -> None:
     if not _byte_match(proof, prove_dir / "outputs"):
         sys.exit(1)
     print("prove chain byte-match: ALL OK")
+
+    # The first chain run above pays the XLA/zkx compile; for the baseline
+    # comparison we want warm per-stage runtime, so run the (now-compiled)
+    # chain a second time and capture each stage's wall-clock.
+    if _BASELINE.value:
+        stage_times: dict = {}
+        warm_chain, warm_carry = prove_chain(sponge, comp, params, vk_pre_hash, airs)
+        warm_chain.rounds = [
+            _TimedRound(rnd, record=stage_times) for rnd in warm_chain.rounds
+        ]
+        print("\n[warm pass for baseline comparison]", flush=True)
+        warm_chain(warm_carry, new_transcript())
+        _compare_baseline(_BASELINE.value, params, stage_times)
 
 
 if __name__ == "__main__":
