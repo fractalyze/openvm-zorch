@@ -23,7 +23,11 @@ checkout to run it.
 # 1. Drop the bin into a local openvm checkout:
 cp dump_fixture.rs <openvm>/benchmarks/prove/src/bin/dump_fixture.rs
 # add a [[bin]] entry (name = "dump_fixture") to benchmarks/prove/Cargo.toml,
-# and `serde_json.workspace = true` to its [dependencies].
+# `serde_json.workspace = true` to its [dependencies]; and
+# `features = ["test-utils"]` on the `openvm-stark-backend` dependency (the
+# only public path to a recording prove + transcript log is
+# `TestFixture::prove_from_transcript`, gated behind test-utils; the
+# recursion crate already deps it the same way).
 
 # 2. Build + run (SDK build is large the first time):
 cd <openvm>
@@ -31,6 +35,33 @@ cargo run --profile fast -p openvm-benchmarks-prove --bin dump_fixture -- --out 
 ```
 
 Output `/tmp/real_fib/`: `meta.json` + `inputs/{trace_<air>.npy, constraints_<air>.json}`.
+
+## Outputs (`--ref-prove`): the byte-match golden
+
+The `inputs/` above drive zorch's `prove()`; to also produce the reference
+`outputs/` it byte-matches against, pass `--ref-prove`. It re-proves the same
+tapped real ProvingContext with the reference *recording* engine
+(`BabyBearPoseidon2RefEngine<DuplexSpongeRecorder>`, reusing the app proving key
+directly), then walks the recorded transcript (the `walk_gkr/zerocheck/stacking/
+whir_log` functions, vendored from fixture-gen) to extract the sampled
+challenges, and dumps `outputs/` byte-for-byte as `gen_prove_fixture` does.
+
+```sh
+cargo run --profile fast -p openvm-benchmarks-prove --bin dump_fixture -- \
+  --out /tmp/real_fib --ref-prove
+```
+
+Two real-block subtleties the bin handles (vs the synthetic fixture):
+
+- **Presence-gated prelude.** A real block has *absent* AIRs (unexercised chips);
+  the Coordinator observes only a 1-entry present-flag for them, so the
+  transcript `prelude_len` must gate the preprocessed/log_height/cached/pv terms
+  on whether each AIR is present in the ProvingContext — not on its mere
+  declaration in `vm_pk.per_air`.
+- **Cached mains.** AIRs like `ProgramAir` keep their real columns in a *cached*
+  main partition; the tapped cached `CommittedTraceData` can't cross backends
+  (`CpuBackend` ≠ `CpuColMajorBackend` PcsData), so each cached main is
+  re-committed via `stacked_commit` before the reference prove.
 
 ## Fixture format
 
