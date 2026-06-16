@@ -24,7 +24,6 @@ from absl.testing import absltest
 from jax import lax
 from zk_dtypes import babybear_mont as F
 
-from openvm_zorch.logup_gkr.input_layer import InteractionSpec
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_params
 from openvm_zorch.prove import AirInstance, Proof, SystemParams, prove
@@ -82,15 +81,6 @@ class ProveEndToEndTest(absltest.TestCase):
                 AirInstance(
                     trace=trace,
                     dag=dag,
-                    interactions=tuple(
-                        InteractionSpec(
-                            bus=spec["bus"],
-                            count_col=spec["count_col"],
-                            count_neg=spec["count_neg"],
-                            message_cols=tuple(spec["message_cols"]),
-                        )
-                        for spec in g_air["interactions"]
-                    ),
                     public_values=tuple(g_air["public_values"]),
                     constraint_degree=z_air["constraint_degree"],
                     needs_next=z_air["needs_next"],
@@ -238,15 +228,6 @@ class ProveEndToEndTest(absltest.TestCase):
                 AirInstance(
                     trace=trace,
                     dag=dag,
-                    interactions=tuple(
-                        InteractionSpec(
-                            bus=spec["bus"],
-                            count_col=spec["count_col"],
-                            count_neg=spec["count_neg"],
-                            message_cols=tuple(spec["message_cols"]),
-                        )
-                        for spec in air["interactions"]
-                    ),
                     public_values=tuple(air["public_values"]),
                     constraint_degree=air["constraint_degree"],
                     needs_next=air["needs_next"],

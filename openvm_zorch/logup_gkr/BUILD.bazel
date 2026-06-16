@@ -19,6 +19,7 @@ py_library(
     deps = [
         "//openvm_zorch:fields",
         "//openvm_zorch/commit:stacking",
+        "//openvm_zorch/logup_zerocheck:constraints",
         "@zorch//zorch/utils:bits",
         requirement("jax"),
         requirement("zk_dtypes"),
@@ -48,11 +49,15 @@ py_test(
     name = "logup_gkr_test",
     size = "medium",
     srcs = ["logup_gkr_test.py"],
-    data = [":testdata"],
+    data = [
+        ":testdata",
+        "//openvm_zorch/logup_zerocheck:testdata",
+    ],
     deps = [
         ":input_layer",
         ":prover",
         "//openvm_zorch:transcript",
+        "//openvm_zorch/logup_zerocheck:constraints",
         requirement("absl_py"),
         requirement("jax"),
         requirement("numpy"),
