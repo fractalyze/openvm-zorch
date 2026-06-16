@@ -59,3 +59,22 @@ FIB_LOG_HEIGHT=20 N_STACK=16 cargo run --release -- --prove-out /tmp/prove_large
 To confirm byte-match on a scaled fixture, generate over `testdata/prove`,
 run `bazel test //openvm_zorch:prove_test`, then `git checkout` the directory
 to restore the committed micro fixture.
+
+## Native prover baseline
+
+`--baseline-out <file>` times the reference SWIRL prover itself (the same
+`prover.prove` the byte-match fixtures come from) and writes the wall-clock to a
+JSON keyed by platform + params — the milestone-#4 "beat native" bar. It uses
+the same `FIB_LOG_HEIGHT` / `L_SKIP` / `N_STACK` / `K_WHIR` scaling knobs, plus
+`BENCH_RUNS` (warm-run count, default 3) and `BENCH_PLATFORM_LABEL` (machine
+tag, default `cpu`). It writes only the JSON — no fixture directory.
+
+```sh
+# Production-scale baseline (stacked 2^20):
+FIB_LOG_HEIGHT=20 N_STACK=16 BENCH_RUNS=3 cargo run --release -- \
+  --baseline-out ../../openvm_zorch/testdata/baseline/native_prod_cpu.json
+```
+
+See [`docs/native-baseline.md`](../../docs/native-baseline.md) for what is timed
+(the prove step alone, matching `prove_chain`'s scope), the CPU-only caveat, and
+the recorded numbers.

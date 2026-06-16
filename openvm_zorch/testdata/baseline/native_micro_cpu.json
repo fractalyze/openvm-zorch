@@ -1,0 +1,44 @@
+{
+  "available_parallelism": 32,
+  "num_queries": [
+    10,
+    3,
+    2
+  ],
+  "params": {
+    "folding_pow_bits": 2,
+    "k_whir": 4,
+    "l_skip": 4,
+    "log_blowup": 1,
+    "logup_pow_bits": 2,
+    "max_constraint_degree": 3,
+    "mu_pow_bits": 3,
+    "n_stack": 8,
+    "query_phase_pow_bits": 1
+  },
+  "platform": "cpu-x86_64-32t",
+  "prove_e2e_s": {
+    "runs": [
+      0.021702512,
+      0.021658082,
+      0.020916562,
+      0.021108013,
+      0.020982603
+    ],
+    "warm_mean": 0.0212735544,
+    "warm_min": 0.020916562
+  },
+  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "runs": 5,
+  "setup_s": {
+    "keygen": 0.000092889,
+    "tracegen": 3.49e-6
+  },
+  "trace_heights": [
+    64,
+    4,
+    8,
+    2,
+    2
+  ]
+}
