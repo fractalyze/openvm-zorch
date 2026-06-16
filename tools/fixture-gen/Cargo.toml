@@ -16,6 +16,14 @@ publish = false
 # `.cu` kernels at build time -- it needs a CUDA toolchain + GPU, so build and
 # run this on a GPU box (a41). Fixture generation (the other --*-out flags) is
 # unaffected and stays CPU-only.
+# Multi-threaded CPU baseline. The production native prover runs rayon-parallel
+# (openvm-stark-backend's default = ["parallel", "metrics"]); the `default-
+# features = false` above keeps fixture GENERATION single-threaded so the LogUp
+# PoW grind picks a deterministic witness (byte-identical fixtures). Enable
+# `parallel` ONLY for `--baseline-out`, so the CPU bar reflects the real
+# multi-core prover -- NEVER for the `--*-out` generators (it would break
+# fixture determinism).
+parallel = ["openvm-stark-backend/parallel", "openvm-stark-sdk/parallel"]
 cuda = ["dep:openvm-cuda-backend", "dep:openvm-cuda-common"]
 
 [dependencies]

@@ -544,6 +544,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "openvm-cpu-backend"
+version = "2.0.0-alpha"
+source = "git+https://github.com/openvm-org/stark-backend.git?tag=v2.0.0-beta.2#f6a84921e46a7df9796d41dfdfe69f0658ad74b5"
+dependencies = [
+ "cfg-if",
+ "derive-new",
+ "getset",
+ "itertools",
+ "openvm-stark-backend",
+ "p3-air",
+ "p3-baby-bear",
+ "p3-dft",
+ "p3-field",
+ "p3-interpolation",
+ "p3-matrix",
+ "p3-maybe-rayon",
+ "p3-util",
+ "rayon",
+ "rustc-hash",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "openvm-cuda-backend"
 version = "2.0.0-alpha"
 source = "git+https://github.com/openvm-org/stark-backend.git?tag=v2.0.0-beta.2#f6a84921e46a7df9796d41dfdfe69f0658ad74b5"
@@ -635,6 +660,7 @@ dependencies = [
  "metrics-tracing-context",
  "metrics-util",
  "nvtx",
+ "openvm-cpu-backend",
  "openvm-stark-backend",
  "p3-baby-bear",
  "p3-field",
@@ -759,6 +785,9 @@ name = "p3-maybe-rayon"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0db6a290f867061aed54593d48f0dfd7ff2d0f706a603d03209fd0eac79518f3"
+dependencies = [
+ "rayon",
+]
 
 [[package]]
 name = "p3-mds"
