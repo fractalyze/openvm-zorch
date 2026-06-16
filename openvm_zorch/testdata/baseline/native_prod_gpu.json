@@ -18,23 +18,23 @@
     "n_stack": 16,
     "query_phase_pow_bits": 1
   },
-  "platform": "a41-cpu-24t",
+  "platform": "a41-rtx5090",
   "prove_e2e_s": {
     "runs": [
-      1.291281178,
-      1.284325868,
-      1.331873158,
-      1.792998063,
-      1.975669136
+      0.016042932,
+      0.011044133,
+      0.010854731,
+      0.01080561,
+      0.01082352
     ],
-    "warm_mean": 1.5352294806,
-    "warm_min": 1.284325868
+    "warm_mean": 0.0119141852,
+    "warm_min": 0.01080561
   },
   "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
   "runs": 5,
   "setup_s": {
-    "keygen": 0.000086912,
-    "tracegen": 0.04738772
+    "keygen": 0.000096281,
+    "tracegen": 0.051827485
   },
   "trace_heights": [
     1048576,

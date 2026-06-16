@@ -70,17 +70,24 @@ the same `FIB_LOG_HEIGHT` / `L_SKIP` / `N_STACK` / `K_WHIR` scaling knobs, plus
 tag). It writes only the JSON — no fixture directory.
 
 ```sh
-# CPU baseline (production-scale, stacked 2^20):
-FIB_LOG_HEIGHT=20 N_STACK=16 BENCH_RUNS=3 cargo run --release -- \
+# CPU baseline (production-scale, stacked 2^20). --features parallel matches the
+# real multi-core native prover; the single-threaded default would be a ~6x
+# slower, unrepresentative bar.
+FIB_LOG_HEIGHT=20 N_STACK=16 BENCH_RUNS=5 cargo run --release --features parallel -- \
   --baseline-out ../../openvm_zorch/testdata/baseline/native_prod_cpu.json
 
 # GPU baseline (a41 with CUDA toolchain + GPU): --features cuda swaps in the
 # CUDA BabyBearPoseidon2GpuEngine. openvm-cuda-backend compiles .cu kernels, so
 # this only builds/runs on a GPU box.
-FIB_LOG_HEIGHT=20 N_STACK=16 BENCH_RUNS=3 cargo run --release --features cuda -- \
+FIB_LOG_HEIGHT=20 N_STACK=16 BENCH_RUNS=5 CUDA_VISIBLE_DEVICES=0 \
+  cargo run --release --features cuda -- \
   --baseline-out ../../openvm_zorch/testdata/baseline/native_prod_gpu.json
 ```
 
+Do **not** pass `--features parallel` to the `--*-out` fixture generators — it
+makes the LogUp PoW grind non-deterministic and breaks fixture reproducibility.
+It is for `--baseline-out` only.
+
 See [`docs/native-baseline.md`](../../docs/native-baseline.md) for what is timed
-(the prove step alone, matching `prove_chain`'s scope), the CPU/GPU split, and
-the recorded numbers.
+(the prove step alone, matching `prove_chain`'s scope), the CPU/GPU split, the
+narrow-block caveat, and the recorded numbers.
