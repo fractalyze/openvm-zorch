@@ -15,7 +15,6 @@ import numpy as np
 from absl.testing import absltest, parameterized
 from zk_dtypes import babybear_mont as F
 
-from openvm_zorch.logup_gkr.input_layer import InteractionSpec
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_params
 from openvm_zorch.prove import AirInstance, SystemParams, prove
@@ -48,20 +47,10 @@ def _load_instance():
         dag = ConstraintsDag.from_json(
             json.loads((_PROVE / "inputs" / f"constraints_{air_idx}.json").read_text())
         )
-        interactions = tuple(
-            InteractionSpec(
-                bus=s["bus"],
-                count_col=s["count_col"],
-                count_neg=s["count_neg"],
-                message_cols=tuple(s["message_cols"]),
-            )
-            for s in air["interactions"]
-        )
         airs.append(
             AirInstance(
                 trace=trace,
                 dag=dag,
-                interactions=interactions,
                 public_values=tuple(air["public_values"]),
                 constraint_degree=air["constraint_degree"],
                 needs_next=air["needs_next"],

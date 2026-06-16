@@ -30,7 +30,7 @@ from jax import Array
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.commit.trace_commit import stacked_commit
-from openvm_zorch.logup_gkr.input_layer import InteractionSpec, gkr_input_evals
+from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import (
     FracSumcheckProof,
     fractional_sumcheck,
@@ -62,7 +62,6 @@ class AirInstance:
 
     trace: Array  # (height, width) base field
     dag: ConstraintsDag
-    interactions: tuple[InteractionSpec, ...]
     public_values: tuple[int, ...]
     constraint_degree: int
     needs_next: bool
@@ -213,7 +212,9 @@ class GkrRound(Round):
             self._l_skip,
             self._n_logup,
             [a.trace for a in carry.sorted_airs],
-            [list(a.interactions) for a in carry.sorted_airs],
+            [a.dag for a in carry.sorted_airs],
+            [a.public_values for a in carry.sorted_airs],
+            [a.needs_next for a in carry.sorted_airs],
             alpha,
             beta,
         )
@@ -360,7 +361,7 @@ def prove_chain(
     # --- Protocol-derived sizes (Coordinator::prove / calculate_n_logup) ---
     log_heights = [log2_strict_usize(a.trace.shape[0]) for a in sorted_airs]
     total_interactions = sum(
-        len(a.interactions) << max(lh, l_skip)
+        len(a.dag.interactions) << max(lh, l_skip)
         for a, lh in zip(sorted_airs, log_heights)
     )
     n_logup = total_interactions.bit_length() - l_skip if total_interactions else 0

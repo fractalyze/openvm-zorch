@@ -18,11 +18,22 @@ from absl.testing import absltest
 from jax import lax
 from zk_dtypes import babybear_mont as F
 
-from openvm_zorch.logup_gkr.input_layer import InteractionSpec, gkr_input_evals
+from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import fractional_sumcheck, pad_xi
+from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.transcript import check_witness, ef_from_limbs, new_transcript, sample_ext
 
 _FIXTURE = Path(__file__).parent / "testdata" / "logup_gkr"
+# Interactions are expression-valued (DAG node indices); the constraint DAGs of
+# the same deterministic instance live with the ZeroCheck fixture (the GKR
+# fixture predates the DAG path and only dumped column-positional interactions).
+_DAGS = (
+    Path(__file__).parent.parent
+    / "logup_zerocheck"
+    / "testdata"
+    / "zerocheck"
+    / "inputs"
+)
 
 
 def _ef_limbs(x) -> np.ndarray:
@@ -55,6 +66,12 @@ class LogupGkrByteMatchTest(absltest.TestCase):
         cls.is_sample = np.load(_FIXTURE / "outputs" / "transcript_is_sample.npy")
         cls.traces = [
             jnp.array(np.load(_FIXTURE / "inputs" / f"trace_{i}.npy"), dtype=F)
+            for i in range(len(cls.meta["airs"]))
+        ]
+        cls.dags = [
+            ConstraintsDag.from_json(
+                json.loads((_DAGS / f"constraints_{i}.json").read_text())
+            )
             for i in range(len(cls.meta["airs"]))
         ]
 
@@ -103,20 +120,20 @@ class LogupGkrByteMatchTest(absltest.TestCase):
         # --- Input layer ---
         sorted_airs = meta["sorted_airs"]
         sorted_traces = [self.traces[i] for i in sorted_airs]
-        sorted_specs = [
-            [
-                InteractionSpec(
-                    bus=spec["bus"],
-                    count_col=spec["count_col"],
-                    count_neg=spec["count_neg"],
-                    message_cols=tuple(spec["message_cols"]),
-                )
-                for spec in meta["airs"][i]["interactions"]
-            ]
-            for i in sorted_airs
-        ]
+        sorted_dags = [self.dags[i] for i in sorted_airs]
+        sorted_pubs = [meta["airs"][i]["public_values"] for i in sorted_airs]
+        # No interaction in this instance references a next-row (offset=1) node,
+        # so the rotation matrix is never read; pass needs_next=False.
+        needs_next = [False] * len(sorted_airs)
         num, den = gkr_input_evals(
-            l_skip, n_logup, sorted_traces, sorted_specs, alpha, beta
+            l_skip,
+            n_logup,
+            sorted_traces,
+            sorted_dags,
+            sorted_pubs,
+            needs_next,
+            alpha,
+            beta,
         )
         want_evals = np.load(_FIXTURE / "outputs" / "gkr_input_evals.npy")
         np.testing.assert_array_equal(_ef_limbs(num), want_evals[:, 0])
