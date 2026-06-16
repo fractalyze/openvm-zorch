@@ -170,9 +170,9 @@ fn write_npy_u32(path: &Path, shape: &[usize], data: &[u32]) {
     fs::write(path, out).unwrap();
 }
 
-/// Dump a `RowMajorMatrix` (the CPU backend's `common_main` type) as a
-/// `(height, width)` `<u4` array of canonical u32 cells. Its `values` are
-/// already row-major, so write them directly — matching fixture-gen's
+/// Dump a `RowMajorMatrix` (the CPU backend's `common_main` and cached-main
+/// `.trace` type) as a `(height, width)` `<u4` array of canonical u32 cells. Its
+/// `values` are already row-major, so write them directly — matching fixture-gen's
 /// `write_matrix` output shape (which converts col-major → row-major).
 fn write_matrix(path: &Path, m: &RowMajorMatrix<F>) {
     let (h, w) = (m.height(), m.width());
@@ -954,6 +954,18 @@ fn main() -> eyre::Result<()> {
                     &inputs.join(format!("trace_{air_id}.npy")),
                     &air_ctx.common_main,
                 );
+                // Cached-main partitions: each `cached_mains[k].trace` is a
+                // `RowMajorMatrix` here (the app `CpuBackend`'s `Matrix`), so it
+                // dumps in the same `(height, width)` layout as `trace_<air>.npy`
+                // and zorch loads `cached_<air>_<k>.npy` exactly like the common
+                // main. The partitioned main the DAG indexes is `cached_mains ++
+                // [common_main]`.
+                for (k, cd) in air_ctx.cached_mains.iter().enumerate() {
+                    write_matrix(
+                        &inputs.join(format!("cached_{air_id}_{k}.npy")),
+                        &cd.trace,
+                    );
+                }
                 let dag_json = constraints_dag_json(dag);
                 fs::write(
                     inputs.join(format!("constraints_{air_id}.json")),
@@ -984,6 +996,7 @@ fn main() -> eyre::Result<()> {
                         "is_required": pk.vk.is_required,
                         "needs_next": pk.vk.params.need_rot,
                         "constraint_degree": pk.vk.max_constraint_degree,
+                        "num_cached_mains": air_ctx.cached_mains.len(),
                         "public_values": air_ctx
                             .public_values
                             .iter()

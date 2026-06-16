@@ -158,6 +158,12 @@ def _load_instance(prove_dir):
                 (prove_dir / "inputs" / f"constraints_{air_idx}.json").read_text()
             )
         )
+        cached_mains = tuple(
+            jnp.array(
+                np.load(prove_dir / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F
+            )
+            for k in range(air.get("num_cached_mains", 0))
+        )
         airs.append(
             AirInstance(
                 trace=trace,
@@ -166,6 +172,7 @@ def _load_instance(prove_dir):
                 constraint_degree=air["constraint_degree"],
                 needs_next=air["needs_next"],
                 is_required=air["is_required"],
+                cached_mains=cached_mains,
             )
         )
     params = SystemParams(

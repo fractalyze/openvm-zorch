@@ -60,12 +60,19 @@ from zorch.utils.bits import log2_strict_usize
 class AirInstance:
     """One AIR with its trace, in input (verifying-key) order."""
 
-    trace: Array  # (height, width) base field
+    trace: Array  # (height, width) base field — the common main
     dag: ConstraintsDag
     public_values: tuple[int, ...]
     constraint_degree: int
     needs_next: bool
     is_required: bool
+    # Cached-main partitions (base-field ``(height, width)`` matrices, in
+    # partition order, same height as ``trace``). The prover's partitioned main
+    # is ``cached_mains ++ [common_main]``, so a DAG ``main`` node with
+    # ``part_index`` k < len(cached_mains) reads a cached part and the last index
+    # reads ``trace``. The synthetic fixture has none (``()``), so this only
+    # fires on a real openvm block (e.g. ProgramAir's cached columns).
+    cached_mains: tuple[Array, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -215,6 +222,7 @@ class GkrRound(Round):
             [a.dag for a in carry.sorted_airs],
             [a.public_values for a in carry.sorted_airs],
             [a.needs_next for a in carry.sorted_airs],
+            [a.cached_mains for a in carry.sorted_airs],
             alpha,
             beta,
         )
@@ -250,6 +258,7 @@ class ZeroCheckRound(Round):
                     public_values=a.public_values,
                     constraint_degree=a.constraint_degree,
                     needs_next=a.needs_next,
+                    cached_mains=a.cached_mains,
                 )
                 for a in carry.sorted_airs
             ],

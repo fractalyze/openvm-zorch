@@ -125,6 +125,8 @@ class LogupGkrByteMatchTest(absltest.TestCase):
         # No interaction in this instance references a next-row (offset=1) node,
         # so the rotation matrix is never read; pass needs_next=False.
         needs_next = [False] * len(sorted_airs)
+        # This synthetic instance has no cached-main partitions.
+        cached_mains = [() for _ in sorted_airs]
         num, den = gkr_input_evals(
             l_skip,
             n_logup,
@@ -132,6 +134,7 @@ class LogupGkrByteMatchTest(absltest.TestCase):
             sorted_dags,
             sorted_pubs,
             needs_next,
+            cached_mains,
             alpha,
             beta,
         )

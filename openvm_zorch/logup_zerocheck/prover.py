@@ -64,11 +64,16 @@ from zorch.utils.bits import log2_strict_usize
 class AirData:
     """One present AIR, in sorted (stacking) order."""
 
-    trace: Array  # (height, width) base field
+    trace: Array  # (height, width) base field — the common main
     dag: ConstraintsDag
     public_values: tuple[int, ...]
     constraint_degree: int  # this AIR's vk.max_constraint_degree
     needs_next: bool
+    # Cached-main partitions (base-field ``(height, width)``, partition order,
+    # same height as ``trace``); the partitioned main is ``cached_mains ++
+    # [trace]`` so a ``main`` DAG node's ``part_index`` selects among them.
+    # Empty for the synthetic fixture.
+    cached_mains: tuple[Array, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -163,13 +168,19 @@ def _sels(height: int, l_skip: int) -> Array:
 
 
 def _view_mats(air: AirData, l_skip: int) -> list[Array]:
-    """The (local, rot) matrix list of single.rs ``view_mats`` — common main
-    only (no preprocessed/cached traces in scope), lifted."""
-    local = _lift(air.trace, l_skip)
-    if air.needs_next:
-        rot = jnp.concatenate([air.trace[1:], air.trace[:1]], axis=0)
-        return [local, _lift(rot, l_skip)]
-    return [local]
+    """The (local, rot) matrix list of single.rs ``view_mats``, lifted — one
+    entry per partitioned-main part in order ``cached_mains ++ [common_main]``,
+    with a rotation entry interleaved after each when the AIR rotates. The flat
+    ``(local, rot, local, rot, …)`` layout ``_dag_parts`` regroups; the common
+    main lands last so the column-opening reads (which take ``trace_mats[-1]`` /
+    ``trace_mats[-2]``) still pick it out."""
+    out: list[Array] = []
+    for m in (*air.cached_mains, air.trace):
+        out.append(_lift(m, l_skip))
+        if air.needs_next:
+            rot = jnp.concatenate([m[1:], m[:1]], axis=0)
+            out.append(_lift(rot, l_skip))
+    return out
 
 
 def _dag_parts(mats: list[Array], needs_next: bool) -> list[tuple[Array, Array | None]]:

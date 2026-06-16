@@ -47,6 +47,10 @@ def _load_instance():
         dag = ConstraintsDag.from_json(
             json.loads((_PROVE / "inputs" / f"constraints_{air_idx}.json").read_text())
         )
+        cached_mains = tuple(
+            jnp.array(np.load(_PROVE / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F)
+            for k in range(air.get("num_cached_mains", 0))
+        )
         airs.append(
             AirInstance(
                 trace=trace,
@@ -55,6 +59,7 @@ def _load_instance():
                 constraint_degree=air["constraint_degree"],
                 needs_next=air["needs_next"],
                 is_required=air["is_required"],
+                cached_mains=cached_mains,
             )
         )
         log_height = int(trace.shape[0]).bit_length() - 1
