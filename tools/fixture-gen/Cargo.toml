@@ -16,13 +16,15 @@ publish = false
 # `.cu` kernels at build time -- it needs a CUDA toolchain + GPU, so build and
 # run this on a GPU box (a41). Fixture generation (the other --*-out flags) is
 # unaffected and stays CPU-only.
-cuda = ["dep:openvm-cuda-backend"]
+cuda = ["dep:openvm-cuda-backend", "dep:openvm-cuda-common"]
 
 [dependencies]
 openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false, features = ["test-utils"] }
 openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false }
 # Optional GPU prover for the GPU baseline; pulled in only by `--features cuda`.
+# openvm-cuda-common provides the CUDA stream sync the GPU prove timing needs.
 openvm-cuda-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", optional = true }
+openvm-cuda-common = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", optional = true }
 p3-baby-bear = "=0.4.1"
 p3-field = "=0.4.1"
 serde_json = "1"

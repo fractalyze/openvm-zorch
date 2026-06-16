@@ -1888,6 +1888,21 @@ fn gen_prove_fixture(out: &Path) {
     );
 }
 
+/// Block until the device's current stream drains. The CUDA prover dispatches
+/// kernels on the current stream and returns *before* they finish, so a timer
+/// around `prove` alone would catch only the launch overhead (~ms), not the
+/// compute. Sync after `prove` to time real completion, and before `t0` to
+/// drain the prior run + the async H2D ctx transport so neither bleeds into the
+/// timed region — exactly what openvm-cuda-backend's own bench does
+/// (`crates/cuda-backend/src/bin/bench.rs`). A no-op for the CPU engine, whose
+/// `prove` is synchronous.
+#[cfg(feature = "cuda")]
+fn sync_stream() {
+    openvm_cuda_common::stream::current_stream_sync().expect("cuda stream sync");
+}
+#[cfg(not(feature = "cuda"))]
+fn sync_stream() {}
+
 /// Per-engine prove timing: keygen + tracegen (one-time setup) then a warm loop
 /// timing `prover.prove(&d_pk, d_ctx)` ALONE — the trace-in → proof-out step,
 /// exactly openvm-zorch `prove_chain`'s scope. Returns
@@ -1916,13 +1931,17 @@ fn measure<E: StarkEngine<SC = SC>>(
     let d_pk = device.transport_pk_to_device(&pk);
 
     // Warm loop: a fresh transcript + freshly transported ctx each run (both are
-    // consumed by `prove`), but only the `prove` call itself is timed.
+    // consumed by `prove`), but only the `prove` call itself is timed. On GPU,
+    // `prove` is async on the current stream, so bracket the timer with stream
+    // syncs (see `sync_stream`); on CPU both syncs are no-ops.
     let mut prove_runs = Vec::with_capacity(runs);
     for i in 0..runs {
         let d_ctx = device.transport_proving_ctx_to_device(&ctx);
         let mut prover = engine.prover_from_transcript(engine.initial_transcript());
+        sync_stream();
         let t = Instant::now();
         let proof = prover.prove(&d_pk, d_ctx).unwrap();
+        sync_stream();
         let dt = t.elapsed().as_secs_f64();
         std::hint::black_box(&proof);
         prove_runs.push(dt);

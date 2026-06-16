@@ -226,6 +226,7 @@ name = "fixture-gen"
 version = "0.1.0"
 dependencies = [
  "openvm-cuda-backend",
+ "openvm-cuda-common",
  "openvm-stark-backend",
  "openvm-stark-sdk",
  "p3-baby-bear",
