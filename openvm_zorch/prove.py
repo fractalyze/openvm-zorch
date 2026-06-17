@@ -73,6 +73,11 @@ class AirInstance:
     # reads ``trace``. The synthetic fixture has none (``()``), so this only
     # fires on a real openvm block (e.g. ProgramAir's cached columns).
     cached_mains: tuple[Array, ...] = ()
+    # Verifying-key position. On a real block the present AIRs are a sparse
+    # subset of the pk's AIRs; the gaps (unexercised chips) are absent AIRs the
+    # prelude still observes a present=0 flag for. ``None`` ⇒ contiguous
+    # all-present (the synthetic fixture), so the prelude sees no gaps.
+    air_idx: int | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,10 @@ class ProveCarry:
     # Stage 1 (commit) outputs; ``pcs_data`` read by Stage 4 + Stage 5.
     root: Array | None = None
     pcs_data: StackedPcsData | None = None
+    # The preprocessed/cached commitments — each its own stacked commit — in
+    # stacking order, read by Stage 4 + Stage 5 alongside ``pcs_data`` (common
+    # main first). Empty unless a real block carries cached mains (issue #59).
+    pre_cached_pcs_data: Sequence[StackedPcsData] = ()
     # Stage 2 (GKR) outputs; ``beta`` + ``xi`` read by Stage 3.
     beta: Array | None = None
     xi: list[Array] | None = None
@@ -183,16 +192,69 @@ class CommitRound(Round):
             [a.trace for a in carry.sorted_airs],
         )
 
-        # --- Prelude (per AIR in input order) ---
+        # Commit each cached main as its own stacked commitment (reference
+        # cpu_backend.rs ``pre_cached_pcs_data_per_commit`` — one PcsData per
+        # cached/preprocessed trace). Keyed by AIR for the input-order prelude;
+        # flattened in stacking order for Stage 4/5.
+        cached_by_air: dict[int, list[StackedPcsData]] = {}
+        for a in carry.sorted_airs:
+            cds = [
+                stacked_commit(
+                    self._sponge,
+                    self._compressor,
+                    self._l_skip,
+                    self._n_stack,
+                    self._log_blowup,
+                    self._k,
+                    [cm],
+                )[1]
+                for cm in a.cached_mains
+            ]
+            if cds:
+                cached_by_air[id(a)] = cds
+        pre_cached = [
+            cd for a in carry.sorted_airs for cd in cached_by_air.get(id(a), [])
+        ]
+
+        # --- Prelude (per AIR in verifying-key order) ---
+        # Reference prover/mod.rs:155-175: the common-main commit, then iterate
+        # ALL vk AIRs in order. Each non-required AIR observes a present flag
+        # (1 present / 0 absent); each PRESENT AIR then observes the log height
+        # (or a preprocessed commit — none here), each cached-main commit root,
+        # and its public values. On a real block the present AIRs are a sparse
+        # subset of the pk (unexercised chips are absent) — those gaps still
+        # contribute a present=0 flag. The synthetic fixture is contiguous +
+        # all-present (``air_idx`` ``None``), so it sees no gaps and no cached
+        # roots — its stream stays byte-identical (#59).
         transcript = transcript.observe(jnp.array(list(self._vk_pre_hash), dtype=F))
         transcript = transcript.observe(root)
+        prev = -1
         for air in carry.airs:
-            meta: list[int] = [] if air.is_required else [1]
-            meta.append(log2_strict_usize(air.trace.shape[0]))
-            meta.extend(air.public_values)
-            transcript = transcript.observe(jnp.array(meta, dtype=F))
+            idx = air.air_idx if air.air_idx is not None else prev + 1
+            # Absent (unexercised) AIRs between the last present AIR and this one
+            # are non-required (a required AIR is always present), so each
+            # observes a present=0 flag and nothing else.
+            for _absent in range(prev + 1, idx):
+                transcript = transcript.observe(jnp.array([0], dtype=F))
+            prev = idx
+            head: list[int] = [] if air.is_required else [1]
+            head.append(log2_strict_usize(air.trace.shape[0]))
+            cached = cached_by_air.get(id(air), [])
+            if not cached:
+                head.extend(air.public_values)
+                transcript = transcript.observe(jnp.array(head, dtype=F))
+                continue
+            transcript = transcript.observe(jnp.array(head, dtype=F))
+            for cd in cached:
+                transcript = transcript.observe(cd.commit)
+            if air.public_values:
+                transcript = transcript.observe(
+                    jnp.array(list(air.public_values), dtype=F)
+                )
 
-        carry = replace(carry, root=root, pcs_data=pcs_data)
+        carry = replace(
+            carry, root=root, pcs_data=pcs_data, pre_cached_pcs_data=pre_cached
+        )
         return carry, transcript, root
 
 

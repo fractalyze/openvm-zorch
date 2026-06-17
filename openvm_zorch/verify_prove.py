@@ -173,6 +173,7 @@ def _load_instance(prove_dir):
                 needs_next=air["needs_next"],
                 is_required=air["is_required"],
                 cached_mains=cached_mains,
+                air_idx=air_idx,
             )
         )
     params = SystemParams(
