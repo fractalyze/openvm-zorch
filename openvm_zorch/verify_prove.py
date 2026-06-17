@@ -190,7 +190,7 @@ def _load_instance(prove_dir):
             query_phase_pow_bits=pm["query_phase_pow_bits"],
         ),
     )
-    return params, meta["vk_pre_hash"], airs
+    return params, meta["vk_pre_hash"], airs, meta.get("obs_log")
 
 
 def _ef_limbs(x) -> np.ndarray:
@@ -350,15 +350,19 @@ def _compare_baseline(baseline_path: str, params, stage_times: dict) -> None:
     print(f"zorch per-stage warm sum:    {zorch_sum:.3f}s  ({breakdown})", flush=True)
     if zorch_sum > 0 and native > 0:
         if zorch_sum <= native:
-            print(f"  zorch is {native / zorch_sum:.2f}x FASTER than native", flush=True)
+            print(
+                f"  zorch is {native / zorch_sum:.2f}x FASTER than native", flush=True
+            )
         else:
-            print(f"  zorch is {zorch_sum / native:.2f}x SLOWER than native", flush=True)
+            print(
+                f"  zorch is {zorch_sum / native:.2f}x SLOWER than native", flush=True
+            )
 
 
 def main(argv) -> None:
     del argv
     prove_dir = Path(_FIXTURE_DIR.value) if _FIXTURE_DIR.value else _PROVE
-    params, vk_pre_hash, airs = _load_instance(prove_dir)
+    params, vk_pre_hash, airs, obs_log = _load_instance(prove_dir)
     sponge, comp = _poseidon2()
 
     heights = [int(a.trace.shape[0]) for a in airs]
@@ -368,8 +372,10 @@ def main(argv) -> None:
         f"whir_rounds={len(params.whir.num_queries)}"
     )
 
-    # Per-stage timings print as the chain runs (see _TimedRound).
-    chain, carry = prove_chain(sponge, comp, params, vk_pre_hash, airs)
+    # Per-stage timings print as the chain runs (see _TimedRound). The first
+    # (cold) pass carries the reference observation-log so CommitRound diffs the
+    # prelude element-by-element (issue #59); the warm pass below omits it.
+    chain, carry = prove_chain(sponge, comp, params, vk_pre_hash, airs, obs_log=obs_log)
     chain.rounds = [_TimedRound(rnd) for rnd in chain.rounds]
 
     t0 = time.monotonic()

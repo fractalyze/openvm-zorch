@@ -151,6 +151,47 @@ class ProveCarry:
     stacking_u: list[Array] | None = None
 
 
+def _log_prelude_obs_diff(obs: Sequence[Array], obs_log: dict) -> None:
+    """Diagnostic (issue #59): flatten zorch's prelude observation sequence to
+    canonical u32 and diff it element-by-element against the reference
+    observation-log prefix the fixture carries. Prints the first divergence (or
+    confirms a full match up to the grind boundary), so a prelude mismatch is
+    pinned exactly instead of inferred from the cascade of MISMATCH labels
+    downstream of the grind (the first real-block divergence,
+    ``logup_pow_witness``, is observed right after this prelude)."""
+    got: list[int] = []
+    for a in obs:
+        got.extend(int(v) for v in jnp.atleast_1d(a).astype(jnp.uint32))
+    want = [int(v) for v in obs_log["values"]]
+    plen = int(obs_log["prelude_len_faithful"])
+    n = min(len(got), plen, len(want))
+    first = next((i for i in range(n) if got[i] != want[i]), None)
+    if first is None and len(got) == plen:
+        print(
+            f"[prelude obs-diff] MATCH: all {plen} prelude observations agree "
+            "with the reference -- the grind input state is byte-identical",
+            flush=True,
+        )
+        return
+    if first is None:
+        print(
+            f"[prelude obs-diff] LENGTH MISMATCH: zorch observed {len(got)} "
+            f"prelude elements, reference prelude_len={plen} "
+            "(the shared prefix agrees)",
+            flush=True,
+        )
+        return
+    lo, hi = max(0, first - 2), min(n, first + 3)
+    print(
+        f"[prelude obs-diff] FIRST DIVERGENCE at index {first} "
+        f"(reference prelude_len={plen}, zorch len={len(got)}):",
+        flush=True,
+    )
+    for i in range(lo, hi):
+        mark = "  <-- first diff" if i == first else ""
+        print(f"    [{i}] got={got[i]} want={want[i]}{mark}", flush=True)
+
+
 class CommitRound(Round):
     """Stage 1 + prelude: commit the stacked PCS, then absorb the prelude
     stream (vk pre-hash, the commitment, then per AIR in *input* order an
@@ -170,6 +211,7 @@ class CommitRound(Round):
         log_blowup: int,
         k: int,
         vk_pre_hash: Sequence[int],
+        obs_log: dict | None = None,
     ) -> None:
         self._sponge = sponge
         self._compressor = compressor
@@ -178,6 +220,10 @@ class CommitRound(Round):
         self._log_blowup = log_blowup
         self._k = k
         self._vk_pre_hash = vk_pre_hash
+        # Reference observation-log prefix (only the verify_prove debug runner
+        # supplies it). When set, the prelude is diffed element-by-element
+        # against it; prove()/the benchmark leave it ``None`` (issue #59).
+        self._obs_log = obs_log
 
     def __call__(
         self, carry: ProveCarry, transcript: DuplexTranscript
@@ -226,8 +272,14 @@ class CommitRound(Round):
         # contribute a present=0 flag. The synthetic fixture is contiguous +
         # all-present (``air_idx`` ``None``), so it sees no gaps and no cached
         # roots — its stream stays byte-identical (#59).
-        transcript = transcript.observe(jnp.array(list(self._vk_pre_hash), dtype=F))
-        transcript = transcript.observe(root)
+        # Build the ordered observation list first, then absorb it. Keeping the
+        # sequence explicit lets the verify_prove debug runner diff it against
+        # the reference observation-log element-by-element (issue #59); the
+        # absorb order is unchanged, so the Fiat-Shamir stream is byte-identical.
+        obs: list[Array] = [
+            jnp.array(list(self._vk_pre_hash), dtype=F),
+            root,
+        ]
         prev = -1
         for air in carry.airs:
             idx = air.air_idx if air.air_idx is not None else prev + 1
@@ -235,22 +287,25 @@ class CommitRound(Round):
             # are non-required (a required AIR is always present), so each
             # observes a present=0 flag and nothing else.
             for _absent in range(prev + 1, idx):
-                transcript = transcript.observe(jnp.array([0], dtype=F))
+                obs.append(jnp.array([0], dtype=F))
             prev = idx
             head: list[int] = [] if air.is_required else [1]
             head.append(log2_strict_usize(air.trace.shape[0]))
             cached = cached_by_air.get(id(air), [])
             if not cached:
                 head.extend(air.public_values)
-                transcript = transcript.observe(jnp.array(head, dtype=F))
+                obs.append(jnp.array(head, dtype=F))
                 continue
-            transcript = transcript.observe(jnp.array(head, dtype=F))
+            obs.append(jnp.array(head, dtype=F))
             for cd in cached:
-                transcript = transcript.observe(cd.commit)
+                obs.append(cd.commit)
             if air.public_values:
-                transcript = transcript.observe(
-                    jnp.array(list(air.public_values), dtype=F)
-                )
+                obs.append(jnp.array(list(air.public_values), dtype=F))
+
+        if self._obs_log is not None:
+            _log_prelude_obs_diff(obs, self._obs_log)
+        for o in obs:
+            transcript = transcript.observe(o)
 
         carry = replace(
             carry, root=root, pcs_data=pcs_data, pre_cached_pcs_data=pre_cached
@@ -345,12 +400,24 @@ class StackingRound(Round):
         self, carry: ProveCarry, transcript: DuplexTranscript
     ) -> tuple[ProveCarry, DuplexTranscript, StackingProof]:
         needs_next = [a.needs_next for a in carry.sorted_airs]
+        # Stage 1 committed the common main plus each cached main as its own
+        # stacked commitment; the opening reduction runs over all of them, common
+        # main first (reference ``device.rs`` prove_openings:154-167). need_rot for
+        # a cached commit is the owning AIR's need_rot -- its cached columns share
+        # the AIR's rotation claim. An empty cached prefix (the synthetic fixture)
+        # leaves this exactly the single-commit call (issue #59).
+        stacked_per_commit = [(carry.pcs_data.matrix, carry.pcs_data.layout)] + [
+            (d.matrix, d.layout) for d in carry.pre_cached_pcs_data
+        ]
+        need_rot_per_commit = [needs_next] + [
+            [a.needs_next] for a in carry.sorted_airs for _ in a.cached_mains
+        ]
         transcript, stacking_proof = prove_stacked_opening_reduction(
             transcript,
             self._l_skip,
             self._n_stack,
-            [(carry.pcs_data.matrix, carry.pcs_data.layout)],
-            [needs_next],
+            stacked_per_commit,
+            need_rot_per_commit,
             carry.bcp_r,
         )
         carry = replace(carry, stacking_u=stacking_proof.u)
@@ -414,6 +481,7 @@ def prove_chain(
     airs: Sequence[AirInstance],
     *,
     jit: bool = True,
+    obs_log: dict | None = None,
 ) -> tuple[ProveChain, ProveCarry]:
     """Build the SWIRL prover as one ``ProveChain`` of stage Rounds plus its
     initial carry. One definition of the stage wiring so ``prove`` and the
@@ -449,6 +517,7 @@ def prove_chain(
                 log_blowup=params.log_blowup,
                 k=params.whir.k,
                 vk_pre_hash=vk_pre_hash,
+                obs_log=obs_log,
             ),
             GkrRound(
                 l_skip=l_skip,
