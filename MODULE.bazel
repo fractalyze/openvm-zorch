@@ -24,6 +24,13 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "zorch", version = "0.0.0")
 git_override(
     module_name = "zorch",
+    # main @ #284 — the homogeneous `zorch.sumcheck.prove` scan gains a truncated
+    # round-poly domain (eval_start → the {s(1), s(2)} wire form) and an
+    # extension-field fold challenge (sampled via the shared
+    # `transcript.reinterpret_challenge`), which Stage-4 stacking now drives
+    # (openvm-zorch #43; Stage-3 zerocheck #45 reuses it). Also advances the
+    # routine #277→#284 zorch pin (the jax/zk-dtypes wheels here already match —
+    # no requirements change; byte-match re-validated). Prior lineage retained:
     # main @ #277 — generic multi-commitment WHIR: WhirProver.open takes a
     # list of WhirProverData and μ-combines columns across all commitments
     # (common first, matching the reference committed_mats.flat_map(columns)),
@@ -38,7 +45,7 @@ git_override(
     # `zorch.poseidon2` composite.attributes form the pinned zkx wheel
     # requires; the older b2a15826 pin emitted the legacy
     # `poseidon2:16:4:13:7` string the wheel rejects — CI red).
-    commit = "95195304aff567af853b5455b591c49cd2ecfc51",
+    commit = "d8a9bd6dc99384f5e9f23908a86a978e4e98b656",
     remote = "https://github.com/fractalyze/zorch.git",
 )
 
