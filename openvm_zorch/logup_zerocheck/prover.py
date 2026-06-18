@@ -196,6 +196,53 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     return [[f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)]
 
 
+def _round0_constraint_fns(dag, needs_next, public_values, l_skip, num_cosets_zc):
+    """jitted per-trace round-0 constraint evaluators (#45).
+
+    Round 0's constraint accumulation (``eval_nodes`` DAG walk + ``acc_*`` + the
+    ``eq_D`` weight/row-sum) is 54% of warm zerocheck on the real block and runs
+    as an eager array-op dispatch storm (hundreds of nodes × 19 AIRs), with no
+    compilation — catastrophic on GPU. Fuse it into compiled kernels. The DAG
+    structure / rotation flag / public values are static (closed over, so the
+    Python node walk unrolls into the graph); the coset cells, λ/β powers and
+    eq tables are traced args. It is the same DAG walk the MLE ``lax.scan``
+    already jits, over pure EF arithmetic (no host-int), so it is byte-exact and
+    fault-free. The eq-weight reductions keep the contracted (row) axis LAST,
+    per CLAUDE.md. Built per trace (distinct DAGs ⇒ distinct graphs either way);
+    the cold pass pays one compile per AIR, the warm/GPU run reaps the fusion.
+    """
+    if num_cosets_zc > 0:
+        inv_zerofiers = jnp.stack(
+            [
+                f_to_ef(
+                    f_inv_const(
+                        pow(prism.GENERATOR, (c + 1) << l_skip, prism.MODULUS) - 1
+                    )
+                )
+                for c in range(num_cosets_zc)
+            ]
+        )
+
+        @jax.jit
+        def zc_eval(sels_cells, parts, lambda_pows, eq_xi):
+            node_vals = eval_nodes(dag, sels_cells, parts, public_values)
+            acc = acc_constraints(dag, node_vals, lambda_pows)
+            weighted = acc * eq_xi[None, None, :]
+            return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
+    else:
+        zc_eval = None
+
+    @jax.jit
+    def lu_eval(sels_cells, parts, beta_pows, eq_3bs_t, eq_xi):
+        node_vals = eval_nodes(dag, sels_cells, parts, public_values)
+        numer, denom = acc_interactions(dag, node_vals, beta_pows, eq_3bs_t)
+        p = (numer * eq_xi[None, None, :]).sum(axis=2)
+        q = (denom * eq_xi[None, None, :]).sum(axis=2)
+        return p, q  # each (num_cosets, size)
+
+    return zc_eval, lu_eval
+
+
 _ZC_PROFILE = os.environ.get("OPENVM_ZC_PROFILE") == "1"
 
 
@@ -292,19 +339,17 @@ def prove_batch_constraints(
 
         # Zerocheck: q = s'_0 / (Z^N - 1) from constraint_degree - 1 cosets.
         num_cosets = air.constraint_degree - 1
+        zc_eval, lu_eval = _round0_constraint_fns(
+            air.dag, air.needs_next, air.public_values, l_skip, num_cosets
+        )
         if num_cosets == 0:
             sp_zc.append([])
         else:
             sels_cells, parts = cells_for(num_cosets)
-            node_vals = eval_nodes(air.dag, sels_cells, parts, air.public_values)
-            acc = acc_constraints(air.dag, node_vals, lambda_pows)
-            weighted = acc * eq_xi[None, None, :]
-            q_evals = []
-            for c in range(num_cosets):
-                zerofier = pow(prism.GENERATOR, (c + 1) << l_skip, prism.MODULUS) - 1
-                inv_zerofier = f_to_ef(f_inv_const(zerofier))
-                q_evals.append(weighted[c].sum(axis=1) * inv_zerofier)
-            q = prism.geometric_cosets_to_coeffs(l_skip, jnp.stack(q_evals), num_cosets)
+            q_evals = zc_eval(
+                sels_cells, parts, lambda_pows, eq_xi
+            )  # (num_cosets, size)
+            q = prism.geometric_cosets_to_coeffs(l_skip, q_evals, num_cosets)
             air_sp_0_deg = air.constraint_degree * ((1 << l_skip) - 1)
             q_padded = _pad(q, air_sp_0_deg + 1)
             coeffs = []
@@ -320,10 +365,7 @@ def prove_batch_constraints(
             sp_logup.append(([], []))
             continue
         sels_cells, parts = cells_for(air.constraint_degree)
-        node_vals = eval_nodes(air.dag, sels_cells, parts, air.public_values)
-        numer, denom = acc_interactions(air.dag, node_vals, beta_pows, eq_3bs[t])
-        p_evals = (numer * eq_xi[None, None, :]).sum(axis=2)
-        q_evals = (denom * eq_xi[None, None, :]).sum(axis=2)
+        p_evals, q_evals = lu_eval(sels_cells, parts, beta_pows, eq_3bs[t], eq_xi)
         p_coeffs = prism.geometric_cosets_to_coeffs(
             l_skip, p_evals, air.constraint_degree
         )
