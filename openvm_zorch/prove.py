@@ -462,7 +462,11 @@ class WhirRound(Round):
             self._l_skip,
             self._log_blowup,
             self._whir,
-            [(carry.pcs_data.matrix, carry.pcs_data.tree)],
+            # Common main first, then each cached/preprocessed commitment (the
+            # WHIR μ-batch spans all their columns; round 0 opens each tree). An
+            # empty cached prefix (synthetic) leaves the single-commitment path.
+            [(carry.pcs_data.matrix, carry.pcs_data.tree)]
+            + [(d.matrix, d.tree) for d in carry.pre_cached_pcs_data],
             u_cube,
             # Lower each Stage-5 device island to one fused kernel (byte-identical
             # — whir_test gates both paths). The strided merkle_commit marker

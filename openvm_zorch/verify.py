@@ -161,7 +161,9 @@ def _interp_at_nodes(evals: Sequence[Array], x: Array, s_deg: int) -> Array:
         suf.append(suf[-1] * (f_to_ef(f_const(s_deg - i)) - x))
     acc = _ZERO
     for i in range(s_deg + 1):
-        acc = acc + evals[i] * pref[i] * suf[s_deg - i] * invfact[i] * invfact[s_deg - i]
+        acc = (
+            acc + evals[i] * pref[i] * suf[s_deg - i] * invfact[i] * invfact[s_deg - i]
+        )
     return acc
 
 
@@ -264,9 +266,7 @@ def _verify_gkr_stage(
     l_skip = params.l_skip
     n_per_trace = [vk.log_height - l_skip for vk in sorted_vks]
 
-    transcript, ok = check_witness(
-        transcript, params.logup_pow_bits, logup_pow_witness
-    )
+    transcript, ok = check_witness(transcript, params.logup_pow_bits, logup_pow_witness)
     if not bool(ok):
         raise VerificationError("invalid LogUp PoW witness")
     transcript, alpha = sample_ext(transcript)
@@ -405,8 +405,9 @@ def _verify_zerocheck_stage(
 
     # 9. Re-evaluate the claim from the column openings.
     beta_pows = [_ONE]
-    max_msg = max((len(i.message) for vk in sorted_vks for i in vk.dag.interactions),
-                  default=0)
+    max_msg = max(
+        (len(i.message) for vk in sorted_vks for i in vk.dag.interactions), default=0
+    )
     for _ in range(max_msg + 1):
         beta_pows.append(beta_pows[-1] * beta)
     lambda_pows = [_ONE]
@@ -527,8 +528,10 @@ def _verify_stacked_reduction(
         col_need_rot = need_rot[_mat_idx]
         n = s.log_height - l_skip
         n_lift = max(n, 0)
-        b = [f_to_ef(f_const((s.row_idx >> j) & 1))
-             for j in range(l_skip + n_lift, l_skip + n_stack)]
+        b = [
+            f_to_ef(f_const((s.row_idx >> j) & 1))
+            for j in range(l_skip + n_lift, l_skip + n_stack)
+        ]
         eq_mle = prism.eval_eq_mle(u[n_lift + 1 :], b)
         ind = prism.eval_in_uni(l_skip, n, u[0])
         if n < 0:
@@ -575,9 +578,7 @@ def _opening_from_rows(rows: Sequence[Array], paths: Sequence[Array]) -> Opening
     return Opening(row=jnp.stack(list(rows)), path=_stack_paths(paths))
 
 
-def _opening_from_ef_values(
-    values: Sequence[Array], paths: Sequence[Array]
-) -> Opening:
+def _opening_from_ef_values(values: Sequence[Array], paths: Sequence[Array]) -> Opening:
     """Later-round strided opening. The reference stores the opened coset as ``Q``
     EF values (``(2^k,)`` each); the generic ``Opening.row`` is their base-field
     limbs (``(Q, 2^k, limbs)``), so bitcast back — the inverse of the prover's
@@ -644,10 +645,12 @@ def _verify_whir(
         ood_values=proof.ood_values,
         folding_pow_witnesses=proof.folding_pow_witnesses,
         query_pow_witnesses=proof.query_phase_pow_witnesses,
-        initial_opening=_opening_from_rows(
-            proof.initial_round_opened_rows[0],
-            proof.initial_round_merkle_proofs[0],
-        ),
+        initial_openings=[
+            _opening_from_rows(rows, paths)
+            for rows, paths in zip(
+                proof.initial_round_opened_rows, proof.initial_round_merkle_proofs
+            )
+        ],
         codeword_openings=[
             _opening_from_ef_values(
                 proof.codeword_opened_values[r], proof.codeword_merkle_proofs[r]
