@@ -120,6 +120,14 @@ def _round0_group_contrib(
     ind = prism.eval_in_uni(l_skip, n, z_grid)  # (C, S) or scalar 1
     eq_uni_r0 = prism.eval_eq_uni(l_eff, z_grid, r_uni)  # (C, S)
     eq_uni_r0_rot = prism.eval_eq_uni(l_eff, z_grid, r_uni * omega_eff_ef)
+    if l_eff == 0:
+        # A single-row trace (log_height 0 ⇒ l_eff 0) makes eval_eq_uni loop
+        # zero times and return a scalar (eq_D over the trivial size-1
+        # subgroup is the constant 1). Restore the (coset, z) grid shape the
+        # window broadcast below needs — the value is already correct. l_eff
+        # is static, so this never enters the synthetic l_eff>0 kernels.
+        eq_uni_r0 = jnp.broadcast_to(eq_uni_r0, z_grid.shape)
+        eq_uni_r0_rot = jnp.broadcast_to(eq_uni_r0_rot, z_grid.shape)
     # eq / κ_rot cube vectors over the windows axis, transposed so the window
     # contraction reduces the *trailing* axis (the EF reduce shape the zkx
     # backend lowers cleanly — a strided mid-axis EF reduce crashes codegen).
