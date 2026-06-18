@@ -53,9 +53,7 @@ def omega_int(l_skip: int) -> int:
 def omega_pows_f(l_skip: int) -> Array:
     """``[1, ω, ..., ω^{2^l_skip - 1}]`` as base-field constants."""
     w = omega_int(l_skip)
-    return jnp.array(
-        [pow(w, k, MODULUS) for k in range(1 << l_skip)], F
-    )
+    return jnp.array([pow(w, k, MODULUS) for k in range(1 << l_skip)], F)
 
 
 @lru_cache(maxsize=None)
@@ -179,9 +177,7 @@ def eq_cube_table(point: list[Array]) -> Array:
     i ↔ point[i]) — the reference's ``evals_eq_hypercube_serial`` layout."""
     if not point:
         return jnp.ones((1,), EF)
-    return expand_eq_to_hypercube(
-        jnp.stack(point[::-1]), jnp.ones((), point[0].dtype)
-    )
+    return expand_eq_to_hypercube(jnp.stack(point[::-1]), jnp.ones((), point[0].dtype))
 
 
 def eval_eq_sharp_uni(l_skip: int, xi_1: list[Array], z: Array) -> Array:
@@ -251,9 +247,9 @@ def coset_evals(l_skip: int, mat: Array, num_cosets: int) -> Array:
     if coeffs.dtype != F:
         weight = f_to_ef(weight)
     coeffs_t_last = jnp.moveaxis(coeffs, 0, -1)  # (rows, width, size_t)
-    return (
-        weight[:, :, None, None, :] * coeffs_t_last[None, None, :, :, :]
-    ).sum(axis=-1)  # (num_cosets, size_k, rows, width)
+    return (weight[:, :, None, None, :] * coeffs_t_last[None, None, :, :, :]).sum(
+        axis=-1
+    )  # (num_cosets, size_k, rows, width)
 
 
 @lru_cache(maxsize=None)
@@ -267,7 +263,10 @@ def _coset_weight(l_skip: int, num_cosets: int) -> Array:
         [
             [
                 [
-                    (pow(GENERATOR, (c + 1) * t, MODULUS) * pow(w, (t * k) % size, MODULUS))
+                    (
+                        pow(GENERATOR, (c + 1) * t, MODULUS)
+                        * pow(w, (t * k) % size, MODULUS)
+                    )
                     % MODULUS
                     for t in range(size)
                 ]
@@ -277,6 +276,17 @@ def _coset_weight(l_skip: int, num_cosets: int) -> Array:
         ],
         F,
     )
+
+
+def prewarm_coset_weights(l_skip: int, num_cosets: int) -> None:
+    """Eagerly build (and lru-cache) the host-int prism weight matrices so a
+    later JITTED ``coset_evals`` HITS the cache instead of running the
+    construction under trace. ``omega_int`` extracts ω via ``lax.fft`` + an
+    ``int(...)`` concretization that FAULTS under a jit trace
+    (``ConcretizationTypeError``); pre-warming forces it eager once, so the
+    cached ω / weight arrays constant-fold into the traced graph (#45)."""
+    _idft_weight(l_skip)  # transitively warms omega_int
+    _coset_weight(l_skip, num_cosets)
 
 
 def geometric_cosets_to_coeffs(
