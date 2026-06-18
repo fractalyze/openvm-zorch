@@ -121,6 +121,15 @@ cascades), instrument the value or dump the reference observation-log
 prefix and diff element-by-element — inferring from `MISMATCH` labels alone
 can't tell "fix had no effect" from "value changed but still wrong".
 
+The first `MISMATCH` typically surfaces one *sample* AFTER the actual bug:
+per-column / per-commitment **openings are observed into the transcript but
+not individually byte-checked**, so a missing or wrong opening at stage N's
+tail only shows up at the first `sample_ext` of stage N+1, while every
+checked value of stage N stays green. When a divergence lands on a stage's
+first sampled value (`st.lambda`, `whir.mu`/`whir.sumcheck[0]`, …) with the
+prior stage fully green, suspect an unchecked observe at the prior stage's
+tail (a cached/partition opening), not the stage that reports the mismatch.
+
 Per-stage fixture pattern (established for Stage 2, reuse for 3–5):
 
 - Run the real prover end-to-end with `DuplexSpongeRecorder` and dump the
