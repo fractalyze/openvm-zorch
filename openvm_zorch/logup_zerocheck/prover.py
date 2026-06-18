@@ -38,8 +38,11 @@ https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/s
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
@@ -193,6 +196,31 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     return [[f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)]
 
 
+_ZC_PROFILE = os.environ.get("OPENVM_ZC_PROFILE") == "1"
+
+
+class _ZcProfiler:
+    """Coarse, env-guarded region timer for Stage-3 localization (#45).
+
+    No-op unless ``OPENVM_ZC_PROFILE=1``. Each ``mark`` blocks on the region's
+    output arrays and prints the wall-clock since the previous mark, so a cold
+    pass shows compile+run and a warm pass run-only, per region. Off by default
+    so ``verify_prove``'s whole-stage ``_TimedRound`` number stays
+    block-distortion-free: coarse region blocks sum coherently, but per-element
+    blocks inflate badly (the #3 41.1s artifact)."""
+
+    def __init__(self) -> None:
+        self._t = time.monotonic()
+
+    def mark(self, label: str, *outputs: object) -> None:
+        if not _ZC_PROFILE:
+            return
+        jax.block_until_ready(outputs)
+        now = time.monotonic()
+        print(f"  [zc {label}] {now - self._t:.3f}s", flush=True)
+        self._t = now
+
+
 def prove_batch_constraints(
     transcript: DuplexTranscript,
     l_skip: int,
@@ -204,6 +232,7 @@ def prove_batch_constraints(
 ) -> tuple[DuplexTranscript, BatchConstraintProof]:
     """Drive Stage 3 from the post-ξ transcript state; byte-matches
     ``prove_zerocheck_and_logup`` after the ξ padding."""
+    _zc = _ZcProfiler()
     num_traces = len(airs)
     n_per_trace = [log2_strict_usize(air.trace.shape[0]) - l_skip for air in airs]
     n_max = max(max(n_per_trace), 0)
@@ -242,6 +271,7 @@ def prove_batch_constraints(
     transcript, lam = sample_ext(transcript)
     max_num_constraints = max((len(air.dag.constraint_idx) for air in airs), default=0)
     lambda_pows = _powers(lam, max(max_num_constraints, 1))
+    _zc.mark("setup", mats, sels, eq_3bs, beta_pows, lambda_pows)
 
     # --- Round 0: per-trace s'_0 polynomials on geometric cosets ---
     sp_zc: list[list[Array]] = []
@@ -301,6 +331,7 @@ def prove_batch_constraints(
             l_skip, q_evals, air.constraint_degree
         )
         sp_logup.append(([c * norm for c in p_coeffs], q_coeffs))
+    _zc.mark("round0", sp_zc, sp_logup)
 
     # --- eq♯/eq univariate factors, μ batching, sum claims, s_0 ---
     # The per-trace s'_p/s'_q · eq♯ products and the μ-batched s_0 are degree
@@ -350,6 +381,7 @@ def prove_batch_constraints(
     )
     transcript = transcript.observe(s_0_arr)
     s_0 = list(s_0_arr)  # the proof field wants list[Array]
+    _zc.mark("s0_assembly", s_0_arr, p_prods, q_prods)
 
     transcript, r_0 = sample_ext(transcript)
     r = [r_0]
@@ -363,6 +395,7 @@ def prove_batch_constraints(
     sels = [prism.fold_ple_evals(l_skip, s, r_0) for s in sels]
     eq_ns = [prism.eval_eq_uni(l_skip, xi[0], r_0)]
     eq_sharp_ns = [prism.eval_eq_sharp_uni(l_skip, xi[:l_skip], r_0)]
+    _zc.mark("r0_fold", mats, sels, eq_ns, eq_sharp_ns, prev_s_eval)
 
     # --- MLE rounds 1..=n_max, as one lax.scan (issue #33) -------------------
     # Eager, the round loop folds the hypercube to half its size each round, so
@@ -408,6 +441,7 @@ def prove_batch_constraints(
         if n_max >= 1
         else jnp.zeros((0,), EF)
     )
+    _zc.mark("scan_setup", eq_xi_xs, xi_cur_xs, domain_pts)
 
     def step(carry, xs):
         (
@@ -598,6 +632,7 @@ def prove_batch_constraints(
     transcript = final_carry[8]
     sumcheck_round_polys = list(round_polys)
     r = [r_0] + list(r_rounds)
+    _zc.mark("mle_scan", round_polys, mats, sumcheck_round_polys)
 
     # --- Column openings: per AIR ``[common, *cached]`` ---
     # Reference ``into_column_openings`` pops the common main to the front; the
@@ -639,6 +674,7 @@ def prove_batch_constraints(
     for air, openings in zip(airs, column_openings):
         for part in openings[1:]:
             transcript = _observe_opening(transcript, part, air.needs_next)
+    _zc.mark("openings", column_openings)
 
     proof = BatchConstraintProof(
         numerator_term_per_air=numerator_term_per_air,
