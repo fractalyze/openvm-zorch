@@ -34,7 +34,7 @@ use std::{
 };
 
 use openvm_sdk::{
-    config::AppConfig, keygen::AppProvingKey, prover::vm::new_local_prover, CpuSdk, Sdk, StdIn,
+    config::AppConfig, keygen::AppProvingKey, prover::vm::new_local_prover, CpuSdk, StdIn,
 };
 use openvm_sdk_config::SdkVmConfig;
 use openvm_stark_backend::{
@@ -52,8 +52,8 @@ use openvm_stark_backend::{
     AirRef, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory, TranscriptLog,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::{
-    default_duplex_sponge_recorder, BabyBearPoseidon2RefEngine, DuplexSponge, DuplexSpongeRecorder,
-    EF,
+    default_duplex_sponge_recorder, BabyBearPoseidon2CpuEngine, BabyBearPoseidon2RefEngine,
+    DuplexSponge, DuplexSpongeRecorder, EF,
 };
 use openvm_transpiler::{elf::Elf, openvm_platform::memory::MEM_SIZE};
 use p3_field::{BasedVectorSpace, PrimeField32};
@@ -1023,7 +1023,12 @@ fn main() -> eyre::Result<()> {
         vm_config,
         openvm_benchmarks_prove::default_bench_app_params(),
     );
-    let sdk: CpuSdk = Sdk::new(app_config, Default::default())?;
+    // Pin the guest-execution + tap to the CPU SDK/engine even under
+    // `--features cuda` (where `Sdk`/`DefaultStarkEngine` would resolve to GPU):
+    // the tap captures host-side `ProvingContext<CpuColMajorBackend>` traces, and
+    // only the `--baseline-out` prove loop (gen_baseline) transports that CPU ctx
+    // to the GPU engine for timing.
+    let sdk: CpuSdk = CpuSdk::new(app_config, Default::default())?;
     let (app_pk, _app_vk): (AppProvingKey<SdkVmConfig>, _) = sdk.app_keygen();
 
     let exe = sdk.convert_to_exe(elf)?;
@@ -1031,7 +1036,7 @@ fn main() -> eyre::Result<()> {
     // Build a mutable VmInstance so we can tap the ProvingContext. The SDK's
     // `AppProver` only exposes the instance immutably, so build the local prover
     // directly (no lib change needed).
-    let mut instance = new_local_prover::<openvm_sdk::DefaultStarkEngine, _>(
+    let mut instance = new_local_prover::<BabyBearPoseidon2CpuEngine, _>(
         *sdk.app_vm_builder(),
         &app_pk.app_vm_pk,
         exe,

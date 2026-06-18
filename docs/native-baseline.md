@@ -79,7 +79,12 @@ real-block analog of fixture-gen's, timing the same `prove` scope on the tapped
 | Platform | File | Native prove (warm min) |
 |----------|------|-------------------------|
 | `a41-cpu` (parallel, 24t) | `native_realfib_cpu.json` | 2.17 s |
-| `a41-rtx5090` | `native_realfib_gpu.json` | _pending_ |
+| `a41-rtx5090` | `native_realfib_gpu.json` | 0.035 s |
+
+Native **GPU is ~62× faster than native CPU** on this block (0.035 s vs 2.17 s).
+Unlike the synthetic block (where the 5090 was starved at 0.011 s), the real
+block's 19 wide AIRs give the GPU real work, so this 0.035 s is a representative
+GPU bar, not a starved one.
 
 **Apples-to-apples (CPU):** zorch `prove_chain` warm sum is **~279 s** on this
 block (`verify_prove --fixture_dir /tmp/real_fib --baseline native_realfib_cpu.json`),
@@ -93,9 +98,10 @@ the warm pass is single-shot, so the absolute seconds are noisy — `warm_min`
 filters most of it (the 5 native runs cluster tightly, 2.17–2.78 s), and the
 ~130× gap is order-of-magnitude solid, but re-measure on a quiet box for a tight
 number. The CPU comparison is also **cross-box** (native on a41, zorch on the
-workstation); the clean **same-box** comparison is the GPU pair on a41
-(`native_realfib_gpu.json` + `verify_prove` on CUDA), still pending — that run
-is attended (the zorch 2²¹ XLA compile is the long pole; see issue #49).
+workstation). The native GPU bar (`native_realfib_gpu.json`, 0.035 s) is now
+recorded; the **zorch** GPU side of the same-box comparison (`verify_prove` on
+CUDA) is still pending — that run is attended (the zorch 2²¹ XLA compile is the
+long pole; see issue #49).
 
 ## Reproducing
 
