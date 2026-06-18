@@ -30,10 +30,11 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use openvm_sdk::{
-    config::AppConfig, keygen::AppProvingKey, prover::vm::new_local_prover, CpuSdk, Sdk, StdIn,
+    config::AppConfig, keygen::AppProvingKey, prover::vm::new_local_prover, CpuSdk, StdIn,
 };
 use openvm_sdk_config::SdkVmConfig;
 use openvm_stark_backend::{
@@ -51,7 +52,8 @@ use openvm_stark_backend::{
     AirRef, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory, TranscriptLog,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::{
-    default_duplex_sponge_recorder, BabyBearPoseidon2RefEngine, DuplexSpongeRecorder, EF,
+    default_duplex_sponge_recorder, BabyBearPoseidon2CpuEngine, BabyBearPoseidon2RefEngine,
+    DuplexSponge, DuplexSpongeRecorder, EF,
 };
 use openvm_transpiler::{elf::Elf, openvm_platform::memory::MEM_SIZE};
 use p3_field::{BasedVectorSpace, PrimeField32};
@@ -635,6 +637,208 @@ impl TestFixture<SC> for RealCtxFixture {
     }
 }
 
+/// The captured real per-AIR raw traces of one segment, in the CPU backend's
+/// `RowMajorMatrix` layout: `(air_id, common_main, cached_main_traces,
+/// public_values)`. Re-committed into the reference col-major ctx by
+/// [`build_ref_ctx`].
+type RawAir = (usize, RowMajorMatrix<F>, Vec<RowMajorMatrix<F>>, Vec<F>);
+
+/// Block until the device's current stream drains. The CUDA prover dispatches
+/// kernels on the current stream and returns *before* they finish, so a timer
+/// around `prove` alone would catch only the launch overhead (~ms), not the
+/// compute. Sync after `prove` to time real completion, and before `t0` to
+/// drain the prior run + the async H2D ctx transport so neither bleeds into the
+/// timed region. A no-op for the CPU engine, whose `prove` is synchronous.
+#[cfg(feature = "cuda")]
+fn sync_stream() {
+    openvm_cuda_common::stream::current_stream_sync().expect("cuda stream sync");
+}
+#[cfg(not(feature = "cuda"))]
+fn sync_stream() {}
+
+/// Build the col-major reference [`ProvingContext`] from the captured real
+/// traces, mirroring the `--ref-prove` ctx-build: convert each AIR's
+/// `common_main` RowMajor -> ColMajor and RE-COMMIT each cached main with the
+/// reference backend's `stacked_commit` (its `PcsData` type differs from the
+/// CpuBackend's, so the tapped cached commitment cannot be reused verbatim — it
+/// must be recomputed in the reference layout).
+///
+/// Factored out so the `--ref-prove` recording path and the `--baseline-out`
+/// timing path build the ctx identically. The hasher is derived from a
+/// reference engine over the same `SystemParams` (the engine carries the SAME
+/// `SystemParams` as the app pk, so its config / hasher match the app's vk);
+/// building the engine here is cheap and avoids naming the hasher type at call
+/// sites.
+fn build_ref_ctx(
+    ref_raw: Vec<RawAir>,
+    params: &SystemParams,
+) -> ProvingContext<CpuColMajorBackend<SC>> {
+    let hasher_engine = BabyBearPoseidon2RefEngine::<DuplexSpongeRecorder>::new(params.clone());
+    let hasher = hasher_engine.config().hasher();
+    let whir = &params.whir;
+
+    let mut ref_per_trace: Vec<(usize, AirProvingContext<CpuColMajorBackend<SC>>)> = Vec::new();
+    for (air_id, common_main, cached, pvs) in ref_raw {
+        let common_main_col = ColMajorMatrix::<F>::from_row_major(&common_main);
+        let cached_mains: Vec<CommittedTraceData<CpuColMajorBackend<SC>>> = cached
+            .iter()
+            .map(|cm| {
+                let trace = ColMajorMatrix::<F>::from_row_major(cm);
+                let (commitment, data) = stacked_commit(
+                    hasher,
+                    params.l_skip,
+                    params.n_stack,
+                    params.log_blowup,
+                    whir.k,
+                    &[&trace],
+                )
+                .expect("stacked_commit for cached main");
+                CommittedTraceData {
+                    commitment,
+                    trace,
+                    data: std::sync::Arc::new(data),
+                }
+            })
+            .collect();
+        ref_per_trace.push((
+            air_id,
+            AirProvingContext::new(cached_mains, common_main_col, pvs),
+        ));
+    }
+    ProvingContext::new(ref_per_trace)
+}
+
+/// Native-prover baseline: time the native SWIRL prover on the tapped real ctx
+/// and write a timing JSON keyed by platform + params. The number that matters
+/// is `prove_e2e_s` (the `prover.prove` step alone — the apples-to-apples scope
+/// vs openvm-zorch's `prove_chain`); setup (the SDK app keygen / tracegen that
+/// ran upstream in `prove_continuations`) is not separately timed here.
+///
+/// The default build times the CPU reference engine
+/// (`BabyBearPoseidon2RefEngine` / `CpuColMajorBackend`), using the
+/// non-recording `DuplexSponge` (not the `DuplexSpongeRecorder` the fixture path
+/// uses — the recorder's per-step log append is pure overhead; the proof is
+/// byte-identical either way). `--features cuda` swaps in the CUDA
+/// `BabyBearPoseidon2GpuEngine` for the GPU baseline.
+///
+/// `BENCH_RUNS` (default 3, min 1) sets the warm-run count; `BENCH_PLATFORM_LABEL`
+/// overrides the machine tag (default "cpu", or "gpu" under `--features cuda`).
+fn gen_baseline(
+    out_file: &Path,
+    ref_raw: Vec<RawAir>,
+    params: &SystemParams,
+    vm_pk: &openvm_stark_backend::keygen::types::MultiStarkProvingKey<SC>,
+) {
+    let runs = std::env::var("BENCH_RUNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(1);
+
+    // Common-main heights of the captured present AIRs, recorded before
+    // `ref_raw` is consumed by `build_ref_ctx`.
+    let trace_heights: Vec<usize> = ref_raw.iter().map(|(_, cm, _, _)| cm.height()).collect();
+
+    let ctx = build_ref_ctx(ref_raw, params);
+
+    #[cfg(not(feature = "cuda"))]
+    let (default_platform, prove_runs) = {
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
+        let runs_v = measure_baseline(&engine, &ctx, vm_pk, runs);
+        ("cpu", runs_v)
+    };
+    #[cfg(feature = "cuda")]
+    let (default_platform, prove_runs) = {
+        use openvm_cuda_backend::BabyBearPoseidon2GpuEngine;
+        let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
+        let runs_v = measure_baseline(&engine, &ctx, vm_pk, runs);
+        ("gpu", runs_v)
+    };
+
+    let platform =
+        std::env::var("BENCH_PLATFORM_LABEL").unwrap_or_else(|_| default_platform.to_string());
+    let prove_min = prove_runs.iter().copied().fold(f64::INFINITY, f64::min);
+    let prove_mean = prove_runs.iter().sum::<f64>() / prove_runs.len() as f64;
+
+    let whir = &params.whir;
+    let baseline = serde_json::json!({
+        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921), real fibonacci guest (n=100)",
+        "platform": platform,
+        "available_parallelism": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        "runs": runs,
+        "trace_heights": trace_heights,
+        "params": {
+            "l_skip": params.l_skip,
+            "n_stack": params.n_stack,
+            "log_blowup": params.log_blowup,
+            "k_whir": whir.k,
+            "logup_pow_bits": params.logup.pow_bits,
+            "max_constraint_degree": params.max_constraint_degree,
+            "mu_pow_bits": whir.mu_pow_bits,
+            "folding_pow_bits": whir.folding_pow_bits,
+            "query_phase_pow_bits": whir.query_phase_pow_bits,
+        },
+        "num_queries": whir.rounds.iter().map(|r| r.num_queries).collect::<Vec<_>>(),
+        // The e2e prove number every per-stage issue compares against. Excludes
+        // setup (keygen/tracegen/transport); matches `prove_chain`'s scope.
+        "prove_e2e_s": {
+            "warm_min": prove_min,
+            "warm_mean": prove_mean,
+            "runs": prove_runs,
+        },
+        // Real-block setup (the SDK `app_keygen` + the `prove_continuations`
+        // tracegen) runs upstream and is not separately timed here; the
+        // apples-to-apples scope vs `prove_chain` is `prove_e2e_s`.
+        "setup_s": {
+            "keygen": 0.0,
+            "tracegen": 0.0,
+        },
+    });
+    if let Some(parent) = out_file.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(out_file, serde_json::to_string_pretty(&baseline).unwrap()).unwrap();
+    println!(
+        "baseline written to {} (prove warm_min={prove_min:.3}s over {runs} runs, platform={platform})",
+        out_file.display()
+    );
+}
+
+/// Warm prove-timing loop: time `prover.prove(&d_pk, d_ctx)` ALONE — the
+/// trace-in -> proof-out step, exactly openvm-zorch `prove_chain`'s scope. A
+/// fresh transcript + freshly transported ctx each run (both are consumed by
+/// `prove`), but only the `prove` call itself is timed. On GPU `prove` is async
+/// on the current stream, so bracket the timer with stream syncs (see
+/// [`sync_stream`]); on CPU both syncs are no-ops. Generic over the engine so
+/// the CPU reference engine and the CUDA `BabyBearPoseidon2GpuEngine` share one
+/// timing path.
+fn measure_baseline<E: StarkEngine<SC = SC>>(
+    engine: &E,
+    ctx: &ProvingContext<CpuColMajorBackend<SC>>,
+    vm_pk: &openvm_stark_backend::keygen::types::MultiStarkProvingKey<SC>,
+    runs: usize,
+) -> Vec<f64> {
+    use openvm_stark_backend::prover::{DeviceDataTransporter, Prover};
+
+    let device = engine.device();
+    let d_pk = device.transport_pk_to_device(vm_pk);
+
+    let mut prove_runs = Vec::with_capacity(runs);
+    for i in 0..runs {
+        let d_ctx = device.transport_proving_ctx_to_device(ctx);
+        let mut prover = engine.prover_from_transcript(engine.initial_transcript());
+        sync_stream();
+        let t = Instant::now();
+        let proof = prover.prove(&d_pk, d_ctx).unwrap();
+        sync_stream();
+        let dt = t.elapsed().as_secs_f64();
+        std::hint::black_box(&proof);
+        prove_runs.push(dt);
+        println!("[baseline] prove run {}/{}: {dt:.3}s", i + 1, runs);
+    }
+    prove_runs
+}
+
 /// Dump the per-stage end-of-chain `outputs/` (canonical-u32 `.npy`), mirroring
 /// openvm-zorch fixture-gen's `gen_prove_fixture` byte-for-byte: the same file
 /// names, shapes, and value sources, so the epic-integration consumer
@@ -766,9 +970,10 @@ fn dump_ref_prove_outputs(
 }
 
 fn main() -> eyre::Result<()> {
-    // --- arg parse: optional `--out <dir>` and `--ref-prove` ---
+    // --- arg parse: optional `--out <dir>`, `--ref-prove`, `--baseline-out <file>` ---
     let mut out_dir: Option<PathBuf> = None;
     let mut ref_prove = false;
+    let mut baseline_out: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -785,7 +990,18 @@ fn main() -> eyre::Result<()> {
             // per-AIR traces, re-prove the SAME ctx+pk with the reference
             // RECORDING engine to confirm the recording-prove path is viable.
             "--ref-prove" => ref_prove = true,
-            other => eyre::bail!("unknown arg {other}; usage: [--out <dir>] [--ref-prove]"),
+            // Native-prover baseline: time the native SWIRL prover on the tapped
+            // real ctx and write a timing JSON (`gen_baseline`). Same fail-fast
+            // rule as `--out`: a bare `--baseline-out` (no path) must error.
+            "--baseline-out" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| eyre::eyre!("--baseline-out requires a file path"))?;
+                baseline_out = Some(PathBuf::from(path));
+            }
+            other => eyre::bail!(
+                "unknown arg {other}; usage: [--out <dir>] [--ref-prove] [--baseline-out <file>]"
+            ),
         }
     }
 
@@ -807,7 +1023,12 @@ fn main() -> eyre::Result<()> {
         vm_config,
         openvm_benchmarks_prove::default_bench_app_params(),
     );
-    let sdk: CpuSdk = Sdk::new(app_config, Default::default())?;
+    // Pin the guest-execution + tap to the CPU SDK/engine even under
+    // `--features cuda` (where `Sdk`/`DefaultStarkEngine` would resolve to GPU):
+    // the tap captures host-side `ProvingContext<CpuColMajorBackend>` traces, and
+    // only the `--baseline-out` prove loop (gen_baseline) transports that CPU ctx
+    // to the GPU engine for timing.
+    let sdk: CpuSdk = CpuSdk::new(app_config, Default::default())?;
     let (app_pk, _app_vk): (AppProvingKey<SdkVmConfig>, _) = sdk.app_keygen();
 
     let exe = sdk.convert_to_exe(elf)?;
@@ -815,7 +1036,7 @@ fn main() -> eyre::Result<()> {
     // Build a mutable VmInstance so we can tap the ProvingContext. The SDK's
     // `AppProver` only exposes the instance immutably, so build the local prover
     // directly (no lib change needed).
-    let mut instance = new_local_prover::<openvm_sdk::DefaultStarkEngine, _>(
+    let mut instance = new_local_prover::<BabyBearPoseidon2CpuEngine, _>(
         *sdk.app_vm_builder(),
         &app_pk.app_vm_pk,
         exe,
@@ -845,12 +1066,11 @@ fn main() -> eyre::Result<()> {
     let mut air_meta: Vec<(usize, usize, serde_json::Value)> = Vec::new();
     let mut dumped_segment: Option<usize> = None;
 
-    // `--ref-prove`: the real per-AIR raw traces of the first segment. We keep
-    // them as `RowMajorMatrix` (the CpuBackend layout) and rebuild the col-major
-    // reference ctx AFTER the tap, where the reference config/hasher is
-    // available to re-commit cached mains. Each entry:
-    // `(air_id, common_main, cached_main_traces, public_values)`.
-    type RawAir = (usize, RowMajorMatrix<F>, Vec<RowMajorMatrix<F>>, Vec<F>);
+    // `--ref-prove` / `--baseline-out`: the real per-AIR raw traces of the first
+    // segment. We keep them as `RowMajorMatrix` (the CpuBackend layout) and
+    // rebuild the col-major reference ctx AFTER the tap (see `build_ref_ctx`),
+    // where the reference config/hasher is available to re-commit cached mains.
+    // Each entry is a `RawAir` (`(air_id, common_main, cached_mains, pvs)`).
     let mut ref_raw: Vec<RawAir> = Vec::new();
     let mut ref_captured_segment: Option<usize> = None;
 
@@ -861,13 +1081,15 @@ fn main() -> eyre::Result<()> {
         // segment would overwrite the same files, so guard against it.
         let dump_this = inputs_dir.is_some() && dumped_segment.is_none();
 
-        // `--ref-prove`: capture only the first segment's real per-AIR traces.
-        // We MUST preserve `cached_mains` (the partitioned-main structure): some
-        // AIRs (e.g. ProgramAir) put their real columns in a cached partition and
-        // a width-1 frequency matrix in `common_main`. Collapsing to common-main
-        // only mis-indexes the partitioned-main constraints. Same first-segment
-        // guard as the dump path (a second segment would clobber).
-        let ref_capture_this = ref_prove && ref_captured_segment.is_none();
+        // `--ref-prove` / `--baseline-out`: capture only the first segment's real
+        // per-AIR traces. We MUST preserve `cached_mains` (the partitioned-main
+        // structure): some AIRs (e.g. ProgramAir) put their real columns in a
+        // cached partition and a width-1 frequency matrix in `common_main`.
+        // Collapsing to common-main only mis-indexes the partitioned-main
+        // constraints. Same first-segment guard as the dump path (a second
+        // segment would clobber).
+        let ref_capture_this =
+            (ref_prove || baseline_out.is_some()) && ref_captured_segment.is_none();
         if ref_capture_this {
             for (air_id, air_ctx) in ctx.per_trace.iter() {
                 let cached: Vec<RowMajorMatrix<F>> = air_ctx
@@ -1013,6 +1235,27 @@ fn main() -> eyre::Result<()> {
         }
     })?;
 
+    // --- Native-prover baseline (`--baseline-out <file>`) ---
+    //
+    // Time the native SWIRL prover on the tapped real ctx and write a timing
+    // JSON. Builds its own ctx (via `build_ref_ctx`), so it works WITHOUT
+    // `--ref-prove`. When both flags are given, `build_ref_ctx` consumes
+    // `ref_raw`, so hand the baseline a clone here and leave the original for the
+    // `--ref-prove` block below.
+    if let Some(out_file) = &baseline_out {
+        if ref_captured_segment.is_none() {
+            eyre::bail!("--baseline-out given but no segment was produced");
+        }
+        println!();
+        println!("================ NATIVE BASELINE (--baseline-out) ================");
+        let raw_for_baseline = if ref_prove {
+            ref_raw.clone()
+        } else {
+            std::mem::take(&mut ref_raw)
+        };
+        gen_baseline(out_file, raw_for_baseline, &params, &vm_pk);
+    }
+
     // --- A3 prototype slice (issue #52): reference RECORDING prove ---
     //
     // Re-prove the SAME real ctx + the SAME app proving key with the reference
@@ -1054,49 +1297,15 @@ fn main() -> eyre::Result<()> {
         // The reference engine carries the SAME `SystemParams` as the app pk
         // (`vm_pk.params`), so its derived config matches the app's vk.
         let ref_engine = BabyBearPoseidon2RefEngine::<DuplexSpongeRecorder>::new(params.clone());
-        let config = ref_engine.config();
-        let hasher = config.hasher();
-        let whir = &params.whir;
 
-        // Build the col-major reference ctx from the captured real traces. For
-        // each AIR: convert `common_main` RowMajor -> ColMajor, and RE-COMMIT each
-        // cached main with the reference backend's `stacked_commit` (its `PcsData`
-        // type differs from CpuBackend's, so the tapped cached commitment cannot
-        // be reused verbatim — it must be recomputed in the reference layout).
-        let mut ref_per_trace: Vec<(usize, AirProvingContext<CpuColMajorBackend<SC>>)> = Vec::new();
-        for (air_id, common_main, cached, pvs) in ref_raw {
-            let common_main_col = ColMajorMatrix::<F>::from_row_major(&common_main);
-            let cached_mains: Vec<CommittedTraceData<CpuColMajorBackend<SC>>> = cached
-                .iter()
-                .map(|cm| {
-                    let trace = ColMajorMatrix::<F>::from_row_major(cm);
-                    let (commitment, data) = stacked_commit(
-                        hasher,
-                        params.l_skip,
-                        params.n_stack,
-                        params.log_blowup,
-                        whir.k,
-                        &[&trace],
-                    )
-                    .expect("stacked_commit for cached main");
-                    CommittedTraceData {
-                        commitment,
-                        trace,
-                        data: std::sync::Arc::new(data),
-                    }
-                })
-                .collect();
-            ref_per_trace.push((
-                air_id,
-                AirProvingContext::new(cached_mains, common_main_col, pvs),
-            ));
-        }
+        // Build the col-major reference ctx from the captured real traces (shared
+        // with the `--baseline-out` path; see `build_ref_ctx`).
+        let ctx = build_ref_ctx(ref_raw, &params);
 
         // `prove_from_transcript` transports both the pk and the ctx to the
         // reference device internally; the app proving key is
         // `MultiStarkProvingKey<SC>` over the SAME `SC` the reference engine uses,
         // so it transports directly — no separate keygen needed.
-        let ctx: ProvingContext<CpuColMajorBackend<SC>> = ProvingContext::new(ref_per_trace);
         let fixture = RealCtxFixture {
             ctx: RefCell::new(Some(ctx)),
         };

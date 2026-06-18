@@ -28,6 +28,11 @@ cp dump_fixture.rs <openvm>/benchmarks/prove/src/bin/dump_fixture.rs
 # only public path to a recording prove + transcript log is
 # `TestFixture::prove_from_transcript`, gated behind test-utils; the
 # recursion crate already deps it the same way).
+#
+# For the GPU baseline (`--baseline-out --features cuda`, below) also add
+# `openvm-cuda-backend` + `openvm-cuda-common` as OPTIONAL workspace deps and
+# wire `dep:openvm-cuda-backend` / `dep:openvm-cuda-common` into the existing
+# `cuda` feature (mirroring `crates/recursion`). Not needed for the CPU paths.
 
 # 2. Build + run (SDK build is large the first time):
 cd <openvm>
@@ -89,6 +94,47 @@ Two real-block subtleties the bin handles (vs the synthetic fixture):
   main partition; the tapped cached `CommittedTraceData` can't cross backends
   (`CpuBackend` ≠ `CpuColMajorBackend` PcsData), so each cached main is
   re-committed via `stacked_commit` before the reference prove.
+
+## Baseline (`--baseline-out <file>`): native-prover timing on the real block
+
+`--baseline-out <file>` times the **native** SWIRL prover on the tapped real
+block and writes a JSON in the exact schema as
+[`tools/fixture-gen`](../fixture-gen)'s `--baseline-out` (see
+[`docs/native-baseline.md`](../../docs/native-baseline.md)). It is the
+real-block analog of the synthetic `native_prod_*.json`: the wall-clock bar
+milestone #4's per-stage "beat native" issues (#43/#44/#45/#46) measure against.
+It builds the tapped ctx exactly as `--ref-prove` does (RowMajor→ColMajor +
+`stacked_commit` cached mains, factored into `build_ref_ctx`), then runs a warm
+loop timing `prover.prove(&d_pk, d_ctx)` ALONE — trace-in → proof-out, exactly
+zorch `prove_chain`'s scope — with a non-recording `DuplexSponge` (the recorder
+is pure overhead; the proof is byte-identical). Env knobs: `BENCH_RUNS`
+(default 3), `BENCH_PLATFORM_LABEL`.
+
+**Build flags are the INVERSE of the byte-match dump.** A baseline measures
+*timing*, not bytes, so the grind nondeterminism is irrelevant — build the real
+production config (`--release`, `--features parallel` / default), NOT
+`--no-default-features`. (`--no-default-features` would force a single-core
+grind and report a ~6× too-slow bar.)
+
+```sh
+# CPU baseline (parallel reference engine; runs anywhere — but prefer a QUIET
+# box, the warm pass is single-shot and contention-sensitive):
+BENCH_RUNS=5 BENCH_PLATFORM_LABEL="<machine>" \
+  cargo run --release -p openvm-benchmarks-prove --bin dump_fixture -- \
+  --baseline-out ../../openvm_zorch/testdata/baseline/native_realfib_cpu.json
+
+# GPU baseline (a41, with CUDA toolchain + GPU; `--features cuda` swaps in
+# BabyBearPoseidon2GpuEngine and brackets the timer with CUDA stream syncs):
+BENCH_RUNS=5 BENCH_PLATFORM_LABEL="a41-rtx5090" CUDA_VISIBLE_DEVICES=0 \
+  cargo run --release --features cuda -p openvm-benchmarks-prove --bin dump_fixture -- \
+  --baseline-out ../../openvm_zorch/testdata/baseline/native_realfib_gpu.json
+```
+
+The output JSON is consumed by `verify_prove --fixture_dir /tmp/real_fib
+--baseline <file>` for the apples-to-apples zorch-vs-native comparison. The GPU
+path re-transports the CPU-built cached-main `CommittedTraceData` to the device;
+validate its byte-match (GPU proof == CPU proof, via `verify_prove` on CUDA)
+when first run on a GPU box.
 
 ## Fixture format
 
