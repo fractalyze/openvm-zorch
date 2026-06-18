@@ -142,6 +142,107 @@ def _round0_group_contrib(
     return contrib * ind  # (C, S)
 
 
+def _sumcheck_rounds(
+    transcript: DuplexTranscript,
+    q_evals: Sequence[Array],
+    eq_tables: dict[int, Array],
+    k_rot_tables: dict[int, Array],
+    views: Sequence[_TraceView],
+    groups: Sequence[tuple[int, int]],
+    lam_pows: Sequence[Array],
+    u: Sequence[Array],
+    l_skip: int,
+    n_stack: int,
+) -> tuple[DuplexTranscript, list[Array], list[Array], list[Array]]:
+    """Rounds 1..=n_stack of Stage 4: the quadratic MLE sumcheck (round-poly
+    evals at {1, 2}) that folds every stacked column to a single opening, then
+    observes the openings. Split out of ``prove_stacked_opening_reduction`` so
+    this phase can be benched and optimized in isolation (it is the prover's one
+    runtime-dominated stage; #43). Pure in its inputs — copies the per-round
+    mutated ``q`` / ``eq`` / ``κ_rot`` tables and the ``u`` list — so a bench can
+    replay it warm without corrupting the round-0 state."""
+    q_evals = list(q_evals)
+    eq_tables = dict(eq_tables)
+    k_rot_tables = dict(k_rot_tables)
+    u = list(u)
+    one = jnp.ones((), EF)
+    # eq(u[1+ñ_T..round], b_{T,j}[..round−ñ_T]) accumulator per view: once a
+    # trace's cube variables are exhausted its q values stop folding and the
+    # remaining rounds bind the column's position bits instead.
+    eq_ub = [one] * len(views)
+    round_polys: list[Array] = []
+    for rnd in range(1, n_stack + 1):
+        s_at_1 = jnp.zeros((), EF)
+        s_at_2 = jnp.zeros((), EF)
+        for g_start, g_end in groups:
+            g_views = views[g_start:g_end]
+            lht = g_views[0].slice.log_height
+            n_lift = max(lht - l_skip, 0)
+            hd = max(n_lift - rnd, 0)  # remaining hypercube dim
+            eq_rs = eq_tables[lht]
+            k_rot_rs = k_rot_tables[lht]
+            for gi, v in enumerate(g_views):
+                s = v.slice
+                if rnd <= n_lift:
+                    row_start = (s.row_idx >> lht) << (hd + 1)
+                else:
+                    row_start = (s.row_idx >> (l_skip + rnd)) << 1
+                col = q_evals[v.com_idx][
+                    row_start : row_start + (2 << hd), s.col_idx
+                ]
+                t0, t1 = col[0::2], col[1::2]
+                q1, q2 = t1, t1 + t1 - t0
+                ub = eq_ub[g_start + gi]
+                if rnd > n_lift:
+                    # Bind position bit b: eq(X, b) is b at X=1, 3b−1 at X=2.
+                    b = (s.row_idx >> (l_skip + rnd - 1)) & 1
+                    f1 = ub * (one if b else jnp.zeros((), EF))
+                    f2 = ub * (_ef_const(2) if b else _ef_const(MODULUS - 1))
+                    eq1, eq2 = eq_rs[0] * f1, eq_rs[0] * f2
+                    k1, k2 = k_rot_rs[0] * f1, k_rot_rs[0] * f2
+                else:
+                    e_lo, e_hi = eq_rs[0::2] * ub, eq_rs[1::2] * ub
+                    eq1, eq2 = e_hi, e_hi + e_hi - e_lo
+                    k_lo, k_hi = k_rot_rs[0::2] * ub, k_rot_rs[1::2] * ub
+                    k1, k2 = k_hi, k_hi + k_hi - k_lo
+                s_at_1 = s_at_1 + lam_pows[v.lam_eq] * (q1 * eq1).sum()
+                s_at_2 = s_at_2 + lam_pows[v.lam_eq] * (q2 * eq2).sum()
+                if v.lam_rot is not None:
+                    s_at_1 = s_at_1 + lam_pows[v.lam_rot] * (q1 * k1).sum()
+                    s_at_2 = s_at_2 + lam_pows[v.lam_rot] * (q2 * k2).sum()
+
+        batch = jnp.stack([s_at_1, s_at_2])
+        transcript = transcript.observe(batch)
+        round_polys.append(batch)
+
+        transcript, u_rnd = sample_ext(transcript)
+        u.append(u_rnd)
+
+        q_evals = [
+            fold_pair(q[0::2], q[1::2], u_rnd) if q.shape[0] > 1 else q
+            for q in q_evals
+        ]
+        for lht, tbl in eq_tables.items():
+            if tbl.shape[0] > 1:
+                eq_tables[lht] = fold_pair(tbl[0::2], tbl[1::2], u_rnd)
+        for lht, tbl in k_rot_tables.items():
+            if tbl.shape[0] > 1:
+                k_rot_tables[lht] = fold_pair(tbl[0::2], tbl[1::2], u_rnd)
+        for t, v in enumerate(views):
+            n_lift = max(v.slice.log_height - l_skip, 0)
+            if rnd > n_lift:
+                b = (v.slice.row_idx >> (l_skip + rnd - 1)) & 1
+                eq_ub[t] = eq_ub[t] * (u_rnd if b else one - u_rnd)
+
+    # --- Stacking openings: each stacked column has folded to one value ---
+    openings: list[Array] = []
+    for q in q_evals:
+        assert q.shape[0] == 1
+        openings.append(q[0])
+        transcript = transcript.observe(q[0])
+    return transcript, round_polys, u, openings
+
+
 def prove_stacked_opening_reduction(
     transcript: DuplexTranscript,
     l_skip: int,
@@ -185,7 +286,6 @@ def prove_stacked_opening_reduction(
     for _ in range(lam_count - 1):
         lam_pows.append(lam_pows[-1] * lam)
 
-    one = jnp.ones((), EF)
     omega = prism.omega_int(l_skip)
     r_0 = r[0]
     # eq_D(ω·r_0, 1): the boundary weight of the rotation kernel's cube part.
@@ -296,81 +396,19 @@ def prove_stacked_opening_reduction(
         )
         eq_tables[lht] = eq * (ind * eq_uni)
 
-    # --- Rounds 1..=n_stack: quadratic MLE sumcheck, evals at {1, 2} ---
-    # eq(u[1+ñ_T..round], b_{T,j}[..round−ñ_T]) accumulator per view: once a
-    # trace's cube variables are exhausted its q values stop folding and the
-    # remaining rounds bind the column's position bits instead.
-    eq_ub = [one] * len(views)
-    round_polys: list[Array] = []
-    for rnd in range(1, n_stack + 1):
-        s_at_1 = jnp.zeros((), EF)
-        s_at_2 = jnp.zeros((), EF)
-        for g_start, g_end in groups:
-            g_views = views[g_start:g_end]
-            lht = g_views[0].slice.log_height
-            n_lift = max(lht - l_skip, 0)
-            hd = max(n_lift - rnd, 0)  # remaining hypercube dim
-            eq_rs = eq_tables[lht]
-            k_rot_rs = k_rot_tables[lht]
-            for gi, v in enumerate(g_views):
-                s = v.slice
-                if rnd <= n_lift:
-                    row_start = (s.row_idx >> lht) << (hd + 1)
-                else:
-                    row_start = (s.row_idx >> (l_skip + rnd)) << 1
-                col = q_evals[v.com_idx][
-                    row_start : row_start + (2 << hd), s.col_idx
-                ]
-                t0, t1 = col[0::2], col[1::2]
-                q1, q2 = t1, t1 + t1 - t0
-                ub = eq_ub[g_start + gi]
-                if rnd > n_lift:
-                    # Bind position bit b: eq(X, b) is b at X=1, 3b−1 at X=2.
-                    b = (s.row_idx >> (l_skip + rnd - 1)) & 1
-                    f1 = ub * (one if b else jnp.zeros((), EF))
-                    f2 = ub * (_ef_const(2) if b else _ef_const(MODULUS - 1))
-                    eq1, eq2 = eq_rs[0] * f1, eq_rs[0] * f2
-                    k1, k2 = k_rot_rs[0] * f1, k_rot_rs[0] * f2
-                else:
-                    e_lo, e_hi = eq_rs[0::2] * ub, eq_rs[1::2] * ub
-                    eq1, eq2 = e_hi, e_hi + e_hi - e_lo
-                    k_lo, k_hi = k_rot_rs[0::2] * ub, k_rot_rs[1::2] * ub
-                    k1, k2 = k_hi, k_hi + k_hi - k_lo
-                s_at_1 = s_at_1 + lam_pows[v.lam_eq] * (q1 * eq1).sum()
-                s_at_2 = s_at_2 + lam_pows[v.lam_eq] * (q2 * eq2).sum()
-                if v.lam_rot is not None:
-                    s_at_1 = s_at_1 + lam_pows[v.lam_rot] * (q1 * k1).sum()
-                    s_at_2 = s_at_2 + lam_pows[v.lam_rot] * (q2 * k2).sum()
-
-        batch = jnp.stack([s_at_1, s_at_2])
-        transcript = transcript.observe(batch)
-        round_polys.append(batch)
-
-        transcript, u_rnd = sample_ext(transcript)
-        u.append(u_rnd)
-
-        q_evals = [
-            fold_pair(q[0::2], q[1::2], u_rnd) if q.shape[0] > 1 else q
-            for q in q_evals
-        ]
-        for lht, tbl in eq_tables.items():
-            if tbl.shape[0] > 1:
-                eq_tables[lht] = fold_pair(tbl[0::2], tbl[1::2], u_rnd)
-        for lht, tbl in k_rot_tables.items():
-            if tbl.shape[0] > 1:
-                k_rot_tables[lht] = fold_pair(tbl[0::2], tbl[1::2], u_rnd)
-        for t, v in enumerate(views):
-            n_lift = max(v.slice.log_height - l_skip, 0)
-            if rnd > n_lift:
-                b = (v.slice.row_idx >> (l_skip + rnd - 1)) & 1
-                eq_ub[t] = eq_ub[t] * (u_rnd if b else one - u_rnd)
-
-    # --- Stacking openings: each stacked column has folded to one value ---
-    openings: list[Array] = []
-    for q in q_evals:
-        assert q.shape[0] == 1
-        openings.append(q[0])
-        transcript = transcript.observe(q[0])
+    # --- Rounds 1..=n_stack: the quadratic MLE sumcheck (split out) ---
+    transcript, round_polys, u, openings = _sumcheck_rounds(
+        transcript,
+        q_evals,
+        eq_tables,
+        k_rot_tables,
+        views,
+        groups,
+        lam_pows,
+        u,
+        l_skip,
+        n_stack,
+    )
 
     return transcript, StackingProof(
         lambda_=lam,
