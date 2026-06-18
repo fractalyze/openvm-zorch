@@ -64,11 +64,16 @@ from zorch.utils.bits import log2_strict_usize
 class AirData:
     """One present AIR, in sorted (stacking) order."""
 
-    trace: Array  # (height, width) base field
+    trace: Array  # (height, width) base field — the common main
     dag: ConstraintsDag
     public_values: tuple[int, ...]
     constraint_degree: int  # this AIR's vk.max_constraint_degree
     needs_next: bool
+    # Cached-main partitions (base-field ``(height, width)``, partition order,
+    # same height as ``trace``); the partitioned main is ``cached_mains ++
+    # [trace]`` so a ``main`` DAG node's ``part_index`` selects among them.
+    # Empty for the synthetic fixture.
+    cached_mains: tuple[Array, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,8 +123,7 @@ def _batched_conv(coeffs: Array, kernel: Array) -> Array:
     lo = la + lb - 1
     lead = coeffs.shape[:-1]
     shifts = [
-        jnp.pad(coeffs, ((0, 0),) * len(lead) + ((j, lo - la - j),))
-        for j in range(lb)
+        jnp.pad(coeffs, ((0, 0),) * len(lead) + ((j, lo - la - j),)) for j in range(lb)
     ]
     stacked = jnp.stack(shifts, axis=-1)  # (..., lo, lb)
     return (stacked * kernel).sum(axis=-1)
@@ -156,20 +160,24 @@ def _sels(height: int, l_skip: int) -> Array:
     ``sels_per_trace_base``)."""
     lifted = max(height, 1 << l_skip)
     rows = jnp.arange(lifted) % height
-    table = jnp.stack(
-        [rows == 0, rows != height - 1, rows == height - 1], axis=-1
-    )
+    table = jnp.stack([rows == 0, rows != height - 1, rows == height - 1], axis=-1)
     return table.astype(jnp.uint32).astype(F)
 
 
 def _view_mats(air: AirData, l_skip: int) -> list[Array]:
-    """The (local, rot) matrix list of single.rs ``view_mats`` — common main
-    only (no preprocessed/cached traces in scope), lifted."""
-    local = _lift(air.trace, l_skip)
-    if air.needs_next:
-        rot = jnp.concatenate([air.trace[1:], air.trace[:1]], axis=0)
-        return [local, _lift(rot, l_skip)]
-    return [local]
+    """The (local, rot) matrix list of single.rs ``view_mats``, lifted — one
+    entry per partitioned-main part in order ``cached_mains ++ [common_main]``,
+    with a rotation entry interleaved after each when the AIR rotates. The flat
+    ``(local, rot, local, rot, …)`` layout ``_dag_parts`` regroups; the common
+    main lands last, so the column-opening read pops it to the front of each
+    AIR's ``[common, *cached]`` opening list (reference ``into_column_openings``)."""
+    out: list[Array] = []
+    for m in (*air.cached_mains, air.trace):
+        out.append(_lift(m, l_skip))
+        if air.needs_next:
+            rot = jnp.concatenate([m[1:], m[:1]], axis=0)
+            out.append(_lift(rot, l_skip))
+    return out
 
 
 def _dag_parts(mats: list[Array], needs_next: bool) -> list[tuple[Array, Array | None]]:
@@ -182,9 +190,7 @@ def _dag_parts(mats: list[Array], needs_next: bool) -> list[tuple[Array, Array |
 
 def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     m = compute_inv_vandermonde(degree, F)
-    return [
-        [f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)
-    ]
+    return [[f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)]
 
 
 def prove_batch_constraints(
@@ -199,9 +205,7 @@ def prove_batch_constraints(
     """Drive Stage 3 from the post-ξ transcript state; byte-matches
     ``prove_zerocheck_and_logup`` after the ξ padding."""
     num_traces = len(airs)
-    n_per_trace = [
-        log2_strict_usize(air.trace.shape[0]) - l_skip for air in airs
-    ]
+    n_per_trace = [log2_strict_usize(air.trace.shape[0]) - l_skip for air in airs]
     n_max = max(max(n_per_trace), 0)
     s_deg = max_constraint_degree + 1
     sp_0_deg = max_constraint_degree * ((1 << l_skip) - 1)
@@ -222,9 +226,7 @@ def prove_batch_constraints(
         for air, n in zip(airs, n_per_trace)
     ]
     layout = interactions_layout(l_skip, n_logup, sorted_meta)
-    eq_3bs: list[list[Array]] = [
-        [zero] * len(air.dag.interactions) for air in airs
-    ]
+    eq_3bs: list[list[Array]] = [[zero] * len(air.dag.interactions) for air in airs]
     for trace_idx, int_idx, s in layout.sorted_cols:
         n_lift = max(n_per_trace[trace_idx], 0)
         b_int = s.row_idx >> (l_skip + n_lift)
@@ -232,17 +234,13 @@ def prove_batch_constraints(
         if n_bits == 0:
             eq_3bs[trace_idx][int_idx] = one_ef
             continue
-        bits = f_to_ef(
-            jnp.array([(b_int >> j) & 1 for j in range(n_bits)], F)
-        )
+        bits = f_to_ef(jnp.array([(b_int >> j) & 1 for j in range(n_bits)], F))
         point = jnp.stack(xi[l_skip + n_lift : l_skip + n_logup])
         eq_3bs[trace_idx][int_idx] = eval_eq(point, bits)
 
     # --- Batching randomness λ ---
     transcript, lam = sample_ext(transcript)
-    max_num_constraints = max(
-        (len(air.dag.constraint_idx) for air in airs), default=0
-    )
+    max_num_constraints = max((len(air.dag.constraint_idx) for air in airs), default=0)
     lambda_pows = _powers(lam, max(max_num_constraints, 1))
 
     # --- Round 0: per-trace s'_0 polynomials on geometric cosets ---
@@ -255,7 +253,9 @@ def prove_batch_constraints(
         eq_xi = _eq_table(xi[l_skip : l_skip + n_lift])
         norm = f_inv_const(1 << max(-n, 0))
 
-        def cells_for(num_cosets: int) -> tuple[Array, list[tuple[Array, Array | None]]]:
+        def cells_for(
+            num_cosets: int,
+        ) -> tuple[Array, list[tuple[Array, Array | None]]]:
             sels_cells = prism.coset_evals(l_skip, trace_sels, num_cosets)
             mat_cells = [prism.coset_evals(l_skip, m, num_cosets) for m in trace_mats]
             return sels_cells, _dag_parts(mat_cells, air.needs_next)
@@ -274,9 +274,7 @@ def prove_batch_constraints(
                 zerofier = pow(prism.GENERATOR, (c + 1) << l_skip, prism.MODULUS) - 1
                 inv_zerofier = f_to_ef(f_inv_const(zerofier))
                 q_evals.append(weighted[c].sum(axis=1) * inv_zerofier)
-            q = prism.geometric_cosets_to_coeffs(
-                l_skip, jnp.stack(q_evals), num_cosets
-            )
+            q = prism.geometric_cosets_to_coeffs(l_skip, jnp.stack(q_evals), num_cosets)
             air_sp_0_deg = air.constraint_degree * ((1 << l_skip) - 1)
             q_padded = _pad(q, air_sp_0_deg + 1)
             coeffs = []
@@ -513,22 +511,16 @@ def prove_batch_constraints(
                 is_init, q0t, jnp.where(is_accum, tilde_q[t] * r_prev, tilde_q[t])
             )
             tail_term = (
-                mu_zc * new_tilde_zc[t]
-                + mu_p * new_tilde_p[t]
-                + mu_q * new_tilde_q[t]
+                mu_zc * new_tilde_zc[t] + mu_p * new_tilde_p[t] + mu_q * new_tilde_q[t]
             )
             sp_tail = sp_tail + jnp.where(is_head, zero, tail_term)
 
         # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
         sp_head_evals = [zero] * s_deg
         for i in range(s_deg - 1):
-            sp_head_evals[i + 1] = (
-                eq_n * sp_head_zc[i] + eq_sharp_n * sp_head_logup[i]
-            )
+            sp_head_evals[i + 1] = eq_n * sp_head_zc[i] + eq_sharp_n * sp_head_logup[i]
         eq_xi_0 = one_ef - xi_cur
-        sp_head_evals[0] = (
-            prev_s_eval - xi_cur * sp_head_evals[1] - sp_tail
-        ) / eq_xi_0
+        sp_head_evals[0] = (prev_s_eval - xi_cur * sp_head_evals[1] - sp_tail) / eq_xi_0
 
         sp_head = [
             sum((row[j] * sp_head_evals[j] for j in range(s_deg)), start=zero)
@@ -607,25 +599,46 @@ def prove_batch_constraints(
     sumcheck_round_polys = list(round_polys)
     r = [r_0] + list(r_rounds)
 
-    # --- Column openings: common main first, interleaved with rotations ---
+    # --- Column openings: per AIR ``[common, *cached]`` ---
+    # Reference ``into_column_openings`` pops the common main to the front; the
+    # remaining preprocessed/cached parts follow in view order
+    # (``cached.. ++ [common]``). Each part's bound row is ``trace_mats[i][0]``
+    # (``mats`` is folded to the sumcheck point); under rotation the (local, rot)
+    # pair interleaves per column. The synthetic fixture has no cached parts, so
+    # every AIR yields just ``[common]`` and the stream stays byte-identical
+    # (A4 #57 / #59 — the cached opening is what ``st.lambda`` onward needs).
     column_openings: list[list[Array]] = []
     for air, trace_mats in zip(airs, mats):
         if air.needs_next:
-            local, rot = trace_mats[-2][0], trace_mats[-1][0]
-            part0 = jnp.stack([local, rot], axis=-1).reshape(-1)
+            # ``mats`` is the flat (local, rot, ...) list; regroup per part.
+            parts = [
+                jnp.stack([trace_mats[i][0], trace_mats[i + 1][0]], axis=-1).reshape(-1)
+                for i in range(0, len(trace_mats), 2)
+            ]
         else:
-            part0 = trace_mats[-1][0]
-        column_openings.append([part0])
+            parts = [m[0] for m in trace_mats]
+        *cached, common = parts
+        column_openings.append([common, *cached])
 
+    # Observe in two passes (reference ``prove_zerocheck``): every AIR's common
+    # opening, then every AIR's remaining (cached/preprocessed) parts.
+    # ``column_openings_by_rot``: rotated → (local, rot) already interleaved;
+    # un-rotated → each column paired with a zero.
     zero_arr = jnp.zeros((1,), EF)
+
+    def _observe_opening(t, part, needs_next):
+        if needs_next:
+            return t.observe(part)
+        for j in range(part.shape[0]):
+            t = t.observe(part[j : j + 1])
+            t = t.observe(zero_arr)
+        return t
+
     for air, openings in zip(airs, column_openings):
-        part0 = openings[0]
-        if air.needs_next:
-            transcript = transcript.observe(part0)
-        else:
-            for j in range(part0.shape[0]):
-                transcript = transcript.observe(part0[j : j + 1])
-                transcript = transcript.observe(zero_arr)
+        transcript = _observe_opening(transcript, openings[0], air.needs_next)
+    for air, openings in zip(airs, column_openings):
+        for part in openings[1:]:
+            transcript = _observe_opening(transcript, part, air.needs_next)
 
     proof = BatchConstraintProof(
         numerator_term_per_air=numerator_term_per_air,

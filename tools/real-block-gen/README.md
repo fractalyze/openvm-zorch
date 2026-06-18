@@ -31,8 +31,20 @@ cp dump_fixture.rs <openvm>/benchmarks/prove/src/bin/dump_fixture.rs
 
 # 2. Build + run (SDK build is large the first time):
 cd <openvm>
-cargo run --profile fast -p openvm-benchmarks-prove --bin dump_fixture -- --out /tmp/real_fib
+cargo run --profile fast --no-default-features -p openvm-benchmarks-prove --bin dump_fixture -- --out /tmp/real_fib
 ```
+
+`--no-default-features` is **mandatory** for any run that dumps the byte-match
+golden (`--ref-prove`, below). `openvm-benchmarks-prove`'s `default` enables
+`parallel`, which unifies up to `openvm-stark-backend/parallel`, making the
+LogUp PoW grind use rayon `find_any` — a *nondeterministic* witness. zorch's
+grind is serial (smallest nonce), so a parallel reference `logup_pow_witness`
+can never byte-match it, and the whole Fiat-Shamir cascade downstream
+diverges. Serial (`parallel` off) the grind degrades to `Iterator::find` → the
+smallest nonce, deterministic and matching zorch. This is the same reason
+[`tools/fixture-gen`](../fixture-gen) builds `default-features = false`.
+(`RAYON_NUM_THREADS=1` is **not** a safe substitute — rayon `find_any` doesn't
+guarantee ascending search order even single-threaded.)
 
 Output `/tmp/real_fib/`: `meta.json` + `inputs/{trace_<air>.npy, constraints_<air>.json}`.
 
@@ -47,9 +59,24 @@ whir_log` functions, vendored from fixture-gen) to extract the sampled
 challenges, and dumps `outputs/` byte-for-byte as `gen_prove_fixture` does.
 
 ```sh
-cargo run --profile fast -p openvm-benchmarks-prove --bin dump_fixture -- \
+cargo run --profile fast --no-default-features -p openvm-benchmarks-prove --bin dump_fixture -- \
   --out /tmp/real_fib --ref-prove
 ```
+
+`--no-default-features` is required here (see the note above) — without it the
+reference grind is nondeterministic and `outputs/logup_pow_witness` (plus its
+whole downstream cascade) is unreproducible. The serial witness is small (the
+smallest valid nonce); zorch reproduces it exactly. The `--ref-prove` outputs
+land in `<out>/ref-prove/outputs/`; `verify_prove` reads `<out>/outputs/`, so
+symlink or copy them into place (`ln -sfn ref-prove/outputs <out>/outputs`).
+
+The dumped `meta.json` also carries (under `--ref-prove`) the full vk-prelude
+structure (`vk_prelude`: per vk position `present` / `is_required` /
+`has_preprocessed` / `num_cached_mains` / `n_public_values`) and the raw
+reference observation-log prefix (`obs_log`: canonical-u32 `values` + `samples`
+through the grind boundary), so zorch's `CommitRound` can diff its prelude
+transcript element-by-element instead of inferring divergence from cascaded
+`MISMATCH` labels.
 
 Two real-block subtleties the bin handles (vs the synthetic fixture):
 

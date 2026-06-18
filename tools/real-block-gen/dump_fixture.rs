@@ -170,9 +170,9 @@ fn write_npy_u32(path: &Path, shape: &[usize], data: &[u32]) {
     fs::write(path, out).unwrap();
 }
 
-/// Dump a `RowMajorMatrix` (the CPU backend's `common_main` type) as a
-/// `(height, width)` `<u4` array of canonical u32 cells. Its `values` are
-/// already row-major, so write them directly — matching fixture-gen's
+/// Dump a `RowMajorMatrix` (the CPU backend's `common_main` and cached-main
+/// `.trace` type) as a `(height, width)` `<u4` array of canonical u32 cells. Its
+/// `values` are already row-major, so write them directly — matching fixture-gen's
 /// `write_matrix` output shape (which converts col-major → row-major).
 fn write_matrix(path: &Path, m: &RowMajorMatrix<F>) {
     let (h, w) = (m.height(), m.width());
@@ -954,6 +954,18 @@ fn main() -> eyre::Result<()> {
                     &inputs.join(format!("trace_{air_id}.npy")),
                     &air_ctx.common_main,
                 );
+                // Cached-main partitions: each `cached_mains[k].trace` is a
+                // `RowMajorMatrix` here (the app `CpuBackend`'s `Matrix`), so it
+                // dumps in the same `(height, width)` layout as `trace_<air>.npy`
+                // and zorch loads `cached_<air>_<k>.npy` exactly like the common
+                // main. The partitioned main the DAG indexes is `cached_mains ++
+                // [common_main]`.
+                for (k, cd) in air_ctx.cached_mains.iter().enumerate() {
+                    write_matrix(
+                        &inputs.join(format!("cached_{air_id}_{k}.npy")),
+                        &cd.trace,
+                    );
+                }
                 let dag_json = constraints_dag_json(dag);
                 fs::write(
                     inputs.join(format!("constraints_{air_id}.json")),
@@ -984,6 +996,7 @@ fn main() -> eyre::Result<()> {
                         "is_required": pk.vk.is_required,
                         "needs_next": pk.vk.params.need_rot,
                         "constraint_degree": pk.vk.max_constraint_degree,
+                        "num_cached_mains": air_ctx.cached_mains.len(),
                         "public_values": air_ctx
                             .public_values
                             .iter()
@@ -1007,6 +1020,13 @@ fn main() -> eyre::Result<()> {
     // recording prover run on the tapped real traces, and what is the
     // proof/transcript-log shape? (The full log-walk + outputs/ dump is NOT
     // wired here — this only proves the path is viable.)
+    //
+    // Holders for two meta.json fields populated inside this block (they need
+    // the present-set + the recorded transcript). Emitted in meta.json so
+    // zorch's CommitRound can iterate the real vk prelude and diff its
+    // transcript element-by-element against ground truth (issue #59).
+    let mut vk_prelude_json: Option<serde_json::Value> = None;
+    let mut obs_log_json: Option<serde_json::Value> = None;
     if ref_prove {
         if ref_captured_segment.is_none() {
             eyre::bail!("--ref-prove given but no segment was produced");
@@ -1185,6 +1205,14 @@ fn main() -> eyre::Result<()> {
             present.len()
         );
         let mut printed = 0usize;
+        // Accumulate the FULL vk-prelude structure (one entry per vk position,
+        // present AND absent) for meta.json: the array length is the total vk
+        // AIR count and `has_preprocessed` disambiguates the 1-elt log_height
+        // vs 8-elt preprocessed-commit observe — the two facts the fixture
+        // could not previously express (issue #59).
+        let mut vk_prelude_entries: Vec<serde_json::Value> =
+            Vec::with_capacity(vm_pk.per_air.len());
+        let mut any_present_preproc = false;
         for (air_idx, pk_air) in vm_pk.per_air.iter().enumerate() {
             let is_present = present.contains_key(&air_idx);
             let n_cached_vk = pk_air.vk.num_cached_mains();
@@ -1195,6 +1223,17 @@ fn main() -> eyre::Result<()> {
             // counts where available (absent AIRs have no captured pvs → 0,
             // which already diverges from fixture-gen's always-present specs).
             let n_pvs = present.get(&air_idx).map(|(_, _, p)| *p).unwrap_or(0);
+
+            vk_prelude_entries.push(serde_json::json!({
+                "air_idx": air_idx,
+                "present": is_present,
+                "is_required": is_required,
+                "has_preprocessed": has_pre,
+                "num_cached_mains": n_cached_vk,
+                "n_public_values": n_pvs,
+            }));
+            any_present_preproc |= is_present && has_pre;
+
             let mut naive_delta = 0usize;
             if !is_required {
                 naive_delta += 1;
@@ -1226,6 +1265,15 @@ fn main() -> eyre::Result<()> {
                 );
                 printed += 1;
             }
+        }
+        vk_prelude_json = Some(serde_json::Value::Array(vk_prelude_entries));
+        if any_present_preproc {
+            eprintln!(
+                "  WARNING: a present AIR carries a preprocessed trace; its \
+                 8-elt preprocessed-commit root is in obs_log but NOT a \
+                 structured field — zorch's generation of preprocessed observes \
+                 is unverified on this fixture (today's /tmp/real_fib has none)."
+            );
         }
         println!(
             "  prelude_len: naive(fixture-gen formula)={prelude_len_naive}, faithful(real-coordinator)={prelude_len_faithful}"
@@ -1259,6 +1307,23 @@ fn main() -> eyre::Result<()> {
             probe(prelude_len_faithful),
             gkr.logup_pow_witness.as_canonical_u32()
         );
+
+        // Capture the raw reference prelude observation-log prefix (the whole
+        // prelude plus a 32-entry margin into the GKR section, for
+        // re-convergence context) so zorch can diff its transcript
+        // element-by-element against ground truth instead of inferring
+        // divergence from MISMATCH labels (issue #59). Values are canonical
+        // (non-Montgomery) u32, matching the rest of the fixture.
+        let obs_end = (prelude_len_faithful + 32).min(log.len());
+        obs_log_json = Some(serde_json::json!({
+            "prelude_len_faithful": prelude_len_faithful,
+            "len": obs_end,
+            "values": log.values()[..obs_end]
+                .iter()
+                .map(|v| v.as_canonical_u32())
+                .collect::<Vec<u32>>(),
+            "samples": log.samples()[..obs_end].to_vec(),
+        }));
 
         // --- Run the vendored walk, catching any assert-failure ---
         println!();
@@ -1493,7 +1558,7 @@ fn main() -> eyre::Result<()> {
         let sorted_airs: Vec<usize> = sorted.iter().map(|(air_id, _)| *air_id).collect();
 
         let whir = &params.whir;
-        let meta = serde_json::json!({
+        let mut meta = serde_json::json!({
             "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921), real fibonacci guest (n=100)",
             "params": {
                 "l_skip": params.l_skip,
@@ -1512,6 +1577,14 @@ fn main() -> eyre::Result<()> {
             "sorted_airs": sorted_airs,
             "airs": airs,
         });
+        // Full vk-prelude structure + raw reference observation-log prefix
+        // (populated only under --ref-prove; absent otherwise). Issue #59.
+        if let Some(v) = vk_prelude_json {
+            meta["vk_prelude"] = v;
+        }
+        if let Some(v) = obs_log_json {
+            meta["obs_log"] = v;
+        }
         let mut f = fs::File::create(out.join("meta.json"))?;
         writeln!(f, "{}", serde_json::to_string_pretty(&meta).unwrap())?;
         println!();

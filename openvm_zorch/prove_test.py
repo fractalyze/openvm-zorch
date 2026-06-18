@@ -77,6 +77,12 @@ class ProveEndToEndTest(absltest.TestCase):
                     (_ZEROCHECK / "inputs" / f"constraints_{air_idx}.json").read_text()
                 )
             )
+            cached_mains = tuple(
+                jnp.array(
+                    np.load(_GKR / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F
+                )
+                for k in range(g_air.get("num_cached_mains", 0))
+            )
             airs.append(
                 AirInstance(
                     trace=trace,
@@ -85,6 +91,7 @@ class ProveEndToEndTest(absltest.TestCase):
                     constraint_degree=z_air["constraint_degree"],
                     needs_next=z_air["needs_next"],
                     is_required=g_air["is_required"],
+                    cached_mains=cached_mains,
                 )
             )
 
@@ -224,6 +231,12 @@ class ProveEndToEndTest(absltest.TestCase):
                     (_PROVE / "inputs" / f"constraints_{air_idx}.json").read_text()
                 )
             )
+            cached_mains = tuple(
+                jnp.array(
+                    np.load(_PROVE / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F
+                )
+                for k in range(air.get("num_cached_mains", 0))
+            )
             airs.append(
                 AirInstance(
                     trace=trace,
@@ -232,6 +245,7 @@ class ProveEndToEndTest(absltest.TestCase):
                     constraint_degree=air["constraint_degree"],
                     needs_next=air["needs_next"],
                     is_required=air["is_required"],
+                    cached_mains=cached_mains,
                 )
             )
 

@@ -66,14 +66,19 @@ def _sels(height: int) -> Array:
     return table.astype(jnp.uint32).astype(F)
 
 
-def _parts(trace: Array, needs_next: bool) -> list[tuple[Array, Array | None]]:
-    """The DAG evaluator's (local, next) pairs for the common main matrix —
-    no preprocessed/cached traces in scope, so one part. ``next`` is the
-    cyclic row rotation only when the AIR rotates."""
-    if needs_next:
-        nxt = jnp.concatenate([trace[1:], trace[:1]], axis=0)
-        return [(trace, nxt)]
-    return [(trace, None)]
+def _parts(
+    trace: Array, cached_mains: Sequence[Array], needs_next: bool
+) -> list[tuple[Array, Array | None]]:
+    """The DAG evaluator's (local, next) pairs for the partitioned main, in
+    order ``cached_mains ++ [common_main]`` — one pair per part, so a ``main``
+    DAG node's ``part_index`` selects the right matrix. The GKR input layer
+    reads the unfolded trace (no l_skip lift here). ``next`` is the cyclic row
+    rotation only when the AIR rotates."""
+    parts: list[tuple[Array, Array | None]] = []
+    for m in (*cached_mains, trace):
+        nxt = jnp.concatenate([m[1:], m[:1]], axis=0) if needs_next else None
+        parts.append((m, nxt))
+    return parts
 
 
 def gkr_input_evals(
@@ -83,17 +88,20 @@ def gkr_input_evals(
     dags: Sequence[ConstraintsDag],
     public_values: Sequence[Sequence[int]],
     needs_next: Sequence[bool],
+    cached_mains: Sequence[Sequence[Array]],
     alpha: Array,
     beta: Array,
 ) -> tuple[Array, Array]:
     """Evaluations of ``(p̂, q̂)`` on ``H_{l_skip + n_logup}``.
 
-    ``traces`` are ``(height, width)`` base-field matrices pre-sorted by
-    descending height; ``dags[t]`` / ``public_values[t]`` / ``needs_next[t]``
-    are trace ``t``'s constraint DAG (its interactions reference DAG nodes by
-    index), public values, and rotation flag. Returns ``(num, den)`` BabyBear⁴
-    vectors of length ``2^{l_skip + n_logup}``, with the ``q += α`` guard
-    already applied.
+    ``traces`` are ``(height, width)`` base-field common-main matrices pre-sorted
+    by descending height; ``dags[t]`` / ``public_values[t]`` / ``needs_next[t]``
+    / ``cached_mains[t]`` are trace ``t``'s constraint DAG (its interactions
+    reference DAG nodes by index), public values, rotation flag, and cached-main
+    partitions (``()`` for the synthetic fixture). The partitioned main a ``main``
+    node indexes is ``cached_mains[t] ++ [traces[t]]``. Returns ``(num, den)``
+    BabyBear⁴ vectors of length ``2^{l_skip + n_logup}``, with the ``q += α``
+    guard already applied.
     """
     sorted_meta = [
         (len(dag.interactions), max(log2_strict_usize(t.shape[0]), l_skip))
@@ -113,12 +121,14 @@ def gkr_input_evals(
     # shared DAG evaluator over base-field selectors/parts — the same pairs the
     # ZeroCheck stage builds (single.rs ``eval_interactions``).
     pairs: list[list[tuple[Array, Array]]] = []
-    for trace, dag, pubs, nxt in zip(traces, dags, public_values, needs_next):
+    for trace, dag, pubs, nxt, cached in zip(
+        traces, dags, public_values, needs_next, cached_mains
+    ):
         if not dag.interactions:
             pairs.append([])
             continue
         sels = _sels(trace.shape[0])
-        node_vals = eval_nodes(dag, sels, _parts(trace, nxt), pubs)
+        node_vals = eval_nodes(dag, sels, _parts(trace, cached, nxt), pubs)
         pairs.append(eval_interactions(dag, node_vals, beta_pows))
 
     modulus = pfinfo(F).modulus
@@ -135,6 +145,15 @@ def gkr_input_evals(
         # fixture is; extension once a challenge enters); promote to EF up front
         # so num is uniformly EF and the lift norm stays in one field.
         count = f_to_ef(count) if count.dtype == F else count
+        # A count/denom whose expression is a pure constant (no trace column)
+        # evaluates to a scalar — a real-block case the synthetic fixture, whose
+        # interaction fields were always columns, never hit. The field is the
+        # same on every row, so broadcast it to the row axis before the cyclic
+        # lift/tile below (which assumes a per-row ``(height,)`` vector).
+        if count.ndim == 0:
+            count = jnp.broadcast_to(count, (height,))
+        if denom.ndim == 0:
+            denom = jnp.broadcast_to(denom, (height,))
         reps = length // height
         if length != height:
             # Lifting repeats the rows cyclically; the numerator carries the

@@ -110,11 +110,12 @@ def prove_whir_opening(
 ) -> tuple[DuplexTranscript, WhirProof]:
     """Drive Stage 5 over the generic ``WhirProver``.
 
-    ``committed`` holds, per commitment (common main first), the stacked
-    evaluation matrix (base field, ``(2^m, W)``) and its Stage-1 tree (whose
-    backing matrix is the RS codeword the round-0 queries open). The
-    single-commitment fixture is the supported shape; SWIRL multi-commitment
-    μ-batching is out of scope.
+    ``committed`` holds, per commitment (common main first, then each cached/
+    preprocessed main), the stacked evaluation matrix (base field, ``(2^m, Wᵢ)``)
+    and its Stage-1 tree (whose backing matrix is the RS codeword the round-0
+    queries open). The generic driver μ-combines the columns across all
+    commitments and opens each commitment's tree at round 0; a single-commitment
+    fixture is the length-1 case.
 
     ``jit`` is accepted for call-site compatibility but no longer changes
     behaviour: the generic driver always lowers its device compute to jitted
@@ -122,13 +123,11 @@ def prove_whir_opening(
     of their arrays), so both ``whir_test`` paths exercise the same code.
     """
     del jit  # generic driver is always island-jitted; both paths are identical.
-    if len(committed) != 1:
-        raise ValueError(
-            f"the generic WHIR consumer opens a single commitment, got "
-            f"{len(committed)} (SWIRL multi-commitment μ-batch is out of scope)"
-        )
-    matrix, tree = committed[0]
-    m = log2_strict_usize(matrix.shape[0])
+    if not committed:
+        raise ValueError("WHIR opens at least one commitment, got none")
+    # Every committed matrix shares the stacked height (2^m); the μ-combine spans
+    # all their columns (common main first) and round 0 opens each commit's tree.
+    m = log2_strict_usize(committed[0][0].shape[0])
     k = config.k
 
     # The codeword domain follows the rate-increasing schedule (``log_rs -= 1``
@@ -146,12 +145,16 @@ def prove_whir_opening(
         rate_increase=True,
     )
     prover = WhirProver(code, strided, params, SwirlWhirScheme(l_skip))
-    # Reuse the Stage-1 commitment directly — its tree already delegates to the
+    # Reuse the Stage-1 commitments directly — each tree already delegates to the
     # generic StridedMerkleTree, so its codeword rows and digest layers feed the
-    # round-0 query openings natively (no re-commit, no adapter).
-    prover_data = WhirProverData(
-        mle=matrix, codeword=tree.backing_matrix, digest_layers=tree.digest_layers
-    )
+    # round-0 query openings natively (no re-commit, no adapter). One
+    # WhirProverData per commitment, common main first.
+    prover_datas = [
+        WhirProverData(
+            mle=matrix, codeword=tree.backing_matrix, digest_layers=tree.digest_layers
+        )
+        for matrix, tree in committed
+    ]
 
     z = jnp.stack(list(u_cube))  # the opening point (m,) — == u_cube on the cube
     # The reference proof also carries μ (its verifier re-derives it). The scheme
@@ -160,7 +163,7 @@ def prove_whir_opening(
     # (functional, so the discarded copy does not perturb the real threading).
     _, mu = sample_ext(grind(transcript, config.mu_pow_bits)[0])
 
-    _, gproof, transcript = prover.open(prover_data, [z], transcript)
+    _, gproof, transcript = prover.open_batch(prover_datas, [z], transcript)
 
     return transcript, WhirProof(
         mu_pow_witness=gproof.mu_pow_witness,
@@ -169,8 +172,12 @@ def prove_whir_opening(
         ood_values=gproof.ood_values,
         folding_pow_witnesses=gproof.folding_pow_witnesses,
         query_phase_pow_witnesses=gproof.query_pow_witnesses,
-        initial_round_opened_rows=[_per_query_rows(gproof.initial_opening)],
-        initial_round_merkle_proofs=[_per_query_paths(gproof.initial_opening)],
+        initial_round_opened_rows=[
+            _per_query_rows(op) for op in gproof.initial_openings
+        ],
+        initial_round_merkle_proofs=[
+            _per_query_paths(op) for op in gproof.initial_openings
+        ],
         codeword_opened_values=[
             list(ef_from_limbs(op.row)) for op in gproof.codeword_openings
         ],
