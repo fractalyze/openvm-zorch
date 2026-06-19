@@ -22,7 +22,7 @@ Reference: `Coordinator::prove` (prover/coordinator.rs) and
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Sequence
 
 import jax.numpy as jnp
@@ -142,6 +142,13 @@ class ProveCarry:
     # stacking order, read by Stage 4 + Stage 5 alongside ``pcs_data`` (common
     # main first). Empty unless a real block carries cached mains (issue #59).
     pre_cached_pcs_data: Sequence[StackedPcsData] = ()
+    # Per-AIR cached commitments (keyed by ``id(air)``), precomputed in
+    # ``prove_chain`` so CommitRound only *observes* them in the prelude — native
+    # commits cached mains in tracegen, outside the timed prove (#46). Empty
+    # unless a real block carries cached mains.
+    cached_pcs_data_by_air: dict[int, list[StackedPcsData]] = field(
+        default_factory=dict
+    )
     # Stage 2 (GKR) outputs; ``beta`` + ``xi`` read by Stage 3.
     beta: Array | None = None
     xi: list[Array] | None = None
@@ -192,6 +199,40 @@ def _log_prelude_obs_diff(obs: Sequence[Array], obs_log: dict) -> None:
         print(f"    [{i}] got={got[i]} want={want[i]}{mark}", flush=True)
 
 
+def _commit_cached_mains(
+    sponge: Sponge,
+    compressor: Compression,
+    *,
+    l_skip: int,
+    n_stack: int,
+    log_blowup: int,
+    k: int,
+    sorted_airs: Sequence[AirInstance],
+) -> tuple[dict[int, list[StackedPcsData]], list[StackedPcsData]]:
+    """Commit each cached main as its own stacked commitment (reference
+    cpu_backend.rs ``pre_cached_pcs_data_per_commit`` — one PcsData per
+    cached/preprocessed trace). Returns the per-AIR map (keyed ``id(air)``, for
+    the input-order prelude observe) and the flat list in stacking order (read by
+    Stage 4/5).
+
+    Hoisted out of ``CommitRound`` into ``prove_chain`` so it lands in
+    build/setup scope, not the timed prove: the native prover commits cached
+    mains during tracegen and the prove span only *observes* the precomputed
+    ``cd.commit`` (#46). ``stacked_commit`` is a pure hash of the trace — it never
+    touches the Fiat-Shamir transcript — so hoisting it is byte-identical."""
+    cached_by_air: dict[int, list[StackedPcsData]] = {}
+    pre_cached: list[StackedPcsData] = []
+    for a in sorted_airs:
+        if a.cached_mains:
+            cds = [
+                stacked_commit(sponge, compressor, l_skip, n_stack, log_blowup, k, [cm])[1]
+                for cm in a.cached_mains
+            ]
+            cached_by_air[id(a)] = cds
+            pre_cached.extend(cds)
+    return cached_by_air, pre_cached
+
+
 class CommitRound(Round):
     """Stage 1 + prelude: commit the stacked PCS, then absorb the prelude
     stream (vk pre-hash, the commitment, then per AIR in *input* order an
@@ -238,29 +279,10 @@ class CommitRound(Round):
             [a.trace for a in carry.sorted_airs],
         )
 
-        # Commit each cached main as its own stacked commitment (reference
-        # cpu_backend.rs ``pre_cached_pcs_data_per_commit`` — one PcsData per
-        # cached/preprocessed trace). Keyed by AIR for the input-order prelude;
-        # flattened in stacking order for Stage 4/5.
-        cached_by_air: dict[int, list[StackedPcsData]] = {}
-        for a in carry.sorted_airs:
-            cds = [
-                stacked_commit(
-                    self._sponge,
-                    self._compressor,
-                    self._l_skip,
-                    self._n_stack,
-                    self._log_blowup,
-                    self._k,
-                    [cm],
-                )[1]
-                for cm in a.cached_mains
-            ]
-            if cds:
-                cached_by_air[id(a)] = cds
-        pre_cached = [
-            cd for a in carry.sorted_airs for cd in cached_by_air.get(id(a), [])
-        ]
+        # Cached-main commitments are precomputed in ``prove_chain`` (build
+        # scope, like native's tracegen) and ride the carry; the prelude below
+        # only observes them. See ``_commit_cached_mains`` (#46).
+        cached_by_air = carry.cached_pcs_data_by_air
 
         # --- Prelude (per AIR in verifying-key order) ---
         # Reference prover/mod.rs:155-175: the common-main commit, then iterate
@@ -307,9 +329,7 @@ class CommitRound(Round):
         for o in obs:
             transcript = transcript.observe(o)
 
-        carry = replace(
-            carry, root=root, pcs_data=pcs_data, pre_cached_pcs_data=pre_cached
-        )
+        carry = replace(carry, root=root, pcs_data=pcs_data)
         return carry, transcript, root
 
 
@@ -501,6 +521,20 @@ def prove_chain(
     order = sorted(range(len(airs)), key=lambda i: (-airs[i].trace.shape[0], i))
     sorted_airs = [airs[i] for i in order]
 
+    # Commit cached mains here (build scope) rather than inside CommitRound,
+    # matching native's tracegen-time cached commit — the timed prove's commit
+    # stage then covers only the common main (#46). Byte-identical: a pure hash,
+    # observed in the prelude exactly as before.
+    cached_pcs_data_by_air, pre_cached_pcs_data = _commit_cached_mains(
+        sponge,
+        compressor,
+        l_skip=l_skip,
+        n_stack=params.n_stack,
+        log_blowup=params.log_blowup,
+        k=params.whir.k,
+        sorted_airs=sorted_airs,
+    )
+
     # --- Protocol-derived sizes (Coordinator::prove / calculate_n_logup) ---
     log_heights = [log2_strict_usize(a.trace.shape[0]) for a in sorted_airs]
     total_interactions = sum(
@@ -545,7 +579,12 @@ def prove_chain(
             ),
         ]
     )
-    return chain, ProveCarry(airs=airs, sorted_airs=sorted_airs)
+    return chain, ProveCarry(
+        airs=airs,
+        sorted_airs=sorted_airs,
+        pre_cached_pcs_data=pre_cached_pcs_data,
+        cached_pcs_data_by_air=cached_pcs_data_by_air,
+    )
 
 
 def prove(
