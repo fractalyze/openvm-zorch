@@ -38,8 +38,11 @@ https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/s
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
@@ -193,6 +196,96 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     return [[f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)]
 
 
+def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_degree):
+    """jitted per-trace round-0 constraint evaluators (#45).
+
+    The whole round-0 per-trace compute — the prism coset evaluation, the
+    ``eval_nodes`` DAG walk, the ``acc_*`` accumulation and the ``eq_D``
+    weight/row-sum — is 62% of warm zerocheck on the real block and ran as an
+    eager array-op dispatch storm (hundreds of nodes × 19 AIRs). On CPU that is
+    FLOP-bound, but on GPU the unfused HBM traffic of the materialized coset
+    cells + node values makes it intrinsically ~115s. Fuse each trace's whole
+    compute into one kernel: the DAG / rotation flag / public values are static
+    (closed over, so the node walk unrolls into the graph), and ``coset_evals``
+    runs INSIDE the kernel so the big ``(num_cosets, size, rows, width)`` cells
+    never round-trip to HBM. The raw lifted mats/sels, λ/β powers and eq tables
+    are traced args. ``prewarm_coset_weights`` must have been called for these
+    coset counts so the host-int ω / weight builders are already cached and
+    constant-fold (a cold cache faults under trace — ``omega_int``'s
+    ``lax.fft`` + ``int(...)`` concretization). Same DAG walk the MLE
+    ``lax.scan`` jits, pure EF arithmetic, contracted (row) axis kept LAST per
+    CLAUDE.md ⇒ byte-exact. One compile per AIR (distinct DAGs); warm/GPU reaps
+    the fusion.
+    """
+    num_cosets_zc = constraint_degree - 1
+
+    if num_cosets_zc > 0:
+        inv_zerofiers = jnp.stack(
+            [
+                f_to_ef(
+                    f_inv_const(
+                        pow(prism.GENERATOR, (c + 1) << l_skip, prism.MODULUS) - 1
+                    )
+                )
+                for c in range(num_cosets_zc)
+            ]
+        )
+
+        @jax.jit
+        def zc_eval(trace_sels, trace_mats, lambda_pows, eq_xi):
+            sels_cells = prism.coset_evals(l_skip, trace_sels, num_cosets_zc)
+            mat_cells = [
+                prism.coset_evals(l_skip, m, num_cosets_zc) for m in trace_mats
+            ]
+            parts = _dag_parts(mat_cells, needs_next)
+            node_vals = eval_nodes(dag, sels_cells, parts, public_values)
+            acc = acc_constraints(dag, node_vals, lambda_pows)
+            weighted = acc * eq_xi[None, None, :]
+            return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
+    else:
+        zc_eval = None
+
+    @jax.jit
+    def lu_eval(trace_sels, trace_mats, beta_pows, eq_3bs_t, eq_xi):
+        sels_cells = prism.coset_evals(l_skip, trace_sels, constraint_degree)
+        mat_cells = [
+            prism.coset_evals(l_skip, m, constraint_degree) for m in trace_mats
+        ]
+        parts = _dag_parts(mat_cells, needs_next)
+        node_vals = eval_nodes(dag, sels_cells, parts, public_values)
+        numer, denom = acc_interactions(dag, node_vals, beta_pows, eq_3bs_t)
+        p = (numer * eq_xi[None, None, :]).sum(axis=2)
+        q = (denom * eq_xi[None, None, :]).sum(axis=2)
+        return p, q  # each (num_cosets, size)
+
+    return zc_eval, lu_eval
+
+
+_ZC_PROFILE = os.environ.get("OPENVM_ZC_PROFILE") == "1"
+
+
+class _ZcProfiler:
+    """Coarse, env-guarded region timer for Stage-3 localization (#45).
+
+    No-op unless ``OPENVM_ZC_PROFILE=1``. Each ``mark`` blocks on the region's
+    output arrays and prints the wall-clock since the previous mark, so a cold
+    pass shows compile+run and a warm pass run-only, per region. Off by default
+    so ``verify_prove``'s whole-stage ``_TimedRound`` number stays
+    block-distortion-free: coarse region blocks sum coherently, but per-element
+    blocks inflate badly (the #3 41.1s artifact)."""
+
+    def __init__(self) -> None:
+        self._t = time.monotonic()
+
+    def mark(self, label: str, *outputs: object) -> None:
+        if not _ZC_PROFILE:
+            return
+        jax.block_until_ready(outputs)
+        now = time.monotonic()
+        print(f"  [zc {label}] {now - self._t:.3f}s", flush=True)
+        self._t = now
+
+
 def prove_batch_constraints(
     transcript: DuplexTranscript,
     l_skip: int,
@@ -204,6 +297,7 @@ def prove_batch_constraints(
 ) -> tuple[DuplexTranscript, BatchConstraintProof]:
     """Drive Stage 3 from the post-ξ transcript state; byte-matches
     ``prove_zerocheck_and_logup`` after the ξ padding."""
+    _zc = _ZcProfiler()
     num_traces = len(airs)
     n_per_trace = [log2_strict_usize(air.trace.shape[0]) - l_skip for air in airs]
     n_max = max(max(n_per_trace), 0)
@@ -243,6 +337,16 @@ def prove_batch_constraints(
     max_num_constraints = max((len(air.dag.constraint_idx) for air in airs), default=0)
     lambda_pows = _powers(lam, max(max_num_constraints, 1))
 
+    # Pre-build the host-int prism coset weights eagerly so the jitted round-0
+    # evaluators below hit the lru_cache instead of faulting on the construction
+    # under trace (#45). Coset counts: constraint_degree (logup) and
+    # constraint_degree - 1 (zerocheck).
+    for cd in {air.constraint_degree for air in airs}:
+        for nc in (cd, cd - 1):
+            if nc > 0:
+                prism.prewarm_coset_weights(l_skip, nc)
+    _zc.mark("setup", mats, sels, eq_3bs, beta_pows, lambda_pows)
+
     # --- Round 0: per-trace s'_0 polynomials on geometric cosets ---
     sp_zc: list[list[Array]] = []
     sp_logup: list[tuple[list[Array], list[Array]]] = []
@@ -253,28 +357,18 @@ def prove_batch_constraints(
         eq_xi = _eq_table(xi[l_skip : l_skip + n_lift])
         norm = f_inv_const(1 << max(-n, 0))
 
-        def cells_for(
-            num_cosets: int,
-        ) -> tuple[Array, list[tuple[Array, Array | None]]]:
-            sels_cells = prism.coset_evals(l_skip, trace_sels, num_cosets)
-            mat_cells = [prism.coset_evals(l_skip, m, num_cosets) for m in trace_mats]
-            return sels_cells, _dag_parts(mat_cells, air.needs_next)
-
         # Zerocheck: q = s'_0 / (Z^N - 1) from constraint_degree - 1 cosets.
         num_cosets = air.constraint_degree - 1
+        zc_eval, lu_eval = _round0_constraint_fns(
+            air.dag, air.needs_next, air.public_values, l_skip, air.constraint_degree
+        )
         if num_cosets == 0:
             sp_zc.append([])
         else:
-            sels_cells, parts = cells_for(num_cosets)
-            node_vals = eval_nodes(air.dag, sels_cells, parts, air.public_values)
-            acc = acc_constraints(air.dag, node_vals, lambda_pows)
-            weighted = acc * eq_xi[None, None, :]
-            q_evals = []
-            for c in range(num_cosets):
-                zerofier = pow(prism.GENERATOR, (c + 1) << l_skip, prism.MODULUS) - 1
-                inv_zerofier = f_to_ef(f_inv_const(zerofier))
-                q_evals.append(weighted[c].sum(axis=1) * inv_zerofier)
-            q = prism.geometric_cosets_to_coeffs(l_skip, jnp.stack(q_evals), num_cosets)
+            q_evals = zc_eval(
+                trace_sels, trace_mats, lambda_pows, eq_xi
+            )  # (num_cosets, size)
+            q = prism.geometric_cosets_to_coeffs(l_skip, q_evals, num_cosets)
             air_sp_0_deg = air.constraint_degree * ((1 << l_skip) - 1)
             q_padded = _pad(q, air_sp_0_deg + 1)
             coeffs = []
@@ -289,11 +383,7 @@ def prove_batch_constraints(
         if not air.dag.interactions:
             sp_logup.append(([], []))
             continue
-        sels_cells, parts = cells_for(air.constraint_degree)
-        node_vals = eval_nodes(air.dag, sels_cells, parts, air.public_values)
-        numer, denom = acc_interactions(air.dag, node_vals, beta_pows, eq_3bs[t])
-        p_evals = (numer * eq_xi[None, None, :]).sum(axis=2)
-        q_evals = (denom * eq_xi[None, None, :]).sum(axis=2)
+        p_evals, q_evals = lu_eval(trace_sels, trace_mats, beta_pows, eq_3bs[t], eq_xi)
         p_coeffs = prism.geometric_cosets_to_coeffs(
             l_skip, p_evals, air.constraint_degree
         )
@@ -301,6 +391,7 @@ def prove_batch_constraints(
             l_skip, q_evals, air.constraint_degree
         )
         sp_logup.append(([c * norm for c in p_coeffs], q_coeffs))
+    _zc.mark("round0", sp_zc, sp_logup)
 
     # --- eq♯/eq univariate factors, μ batching, sum claims, s_0 ---
     # The per-trace s'_p/s'_q · eq♯ products and the μ-batched s_0 are degree
@@ -350,6 +441,7 @@ def prove_batch_constraints(
     )
     transcript = transcript.observe(s_0_arr)
     s_0 = list(s_0_arr)  # the proof field wants list[Array]
+    _zc.mark("s0_assembly", s_0_arr, p_prods, q_prods)
 
     transcript, r_0 = sample_ext(transcript)
     r = [r_0]
@@ -363,6 +455,7 @@ def prove_batch_constraints(
     sels = [prism.fold_ple_evals(l_skip, s, r_0) for s in sels]
     eq_ns = [prism.eval_eq_uni(l_skip, xi[0], r_0)]
     eq_sharp_ns = [prism.eval_eq_sharp_uni(l_skip, xi[:l_skip], r_0)]
+    _zc.mark("r0_fold", mats, sels, eq_ns, eq_sharp_ns, prev_s_eval)
 
     # --- MLE rounds 1..=n_max, as one lax.scan (issue #33) -------------------
     # Eager, the round loop folds the hypercube to half its size each round, so
@@ -408,6 +501,7 @@ def prove_batch_constraints(
         if n_max >= 1
         else jnp.zeros((0,), EF)
     )
+    _zc.mark("scan_setup", eq_xi_xs, xi_cur_xs, domain_pts)
 
     def step(carry, xs):
         (
@@ -598,6 +692,7 @@ def prove_batch_constraints(
     transcript = final_carry[8]
     sumcheck_round_polys = list(round_polys)
     r = [r_0] + list(r_rounds)
+    _zc.mark("mle_scan", round_polys, mats, sumcheck_round_polys)
 
     # --- Column openings: per AIR ``[common, *cached]`` ---
     # Reference ``into_column_openings`` pops the common main to the front; the
@@ -639,6 +734,7 @@ def prove_batch_constraints(
     for air, openings in zip(airs, column_openings):
         for part in openings[1:]:
             transcript = _observe_opening(transcript, part, air.needs_next)
+    _zc.mark("openings", column_openings)
 
     proof = BatchConstraintProof(
         numerator_term_per_air=numerator_term_per_air,

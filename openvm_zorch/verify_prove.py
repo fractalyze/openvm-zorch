@@ -69,6 +69,18 @@ _BASELINE = flags.DEFINE_string(
     "sum is printed against the native e2e prove time, with the delta.",
 )
 
+_STOP_AFTER = flags.DEFINE_string(
+    "stop_after",
+    None,
+    "Optional stage label (commit/GKR/zerocheck/stacking/WHIR) to truncate the "
+    "chain after: run only the stages up to and including it, skip the (now "
+    "partial) byte-match, and still time a warm pass. For per-stage profiling "
+    "on a backend where a LATER stage's compile is intractable -- e.g. WHIR's "
+    "2^22 ptxas blow-up on GPU at real-block scale -- so an earlier stage can "
+    "be timed cold+warm in isolation. Pairs with OPENVM_ZC_PROFILE for the "
+    "zerocheck sub-region split.",
+)
+
 _PROVE = Path(__file__).parent / "testdata" / "prove"
 
 # Friendly per-stage labels, keyed by the stage Round's class name.
@@ -79,6 +91,21 @@ _STAGE_LABELS = {
     "StackingRound": "stacking",
     "WhirRound": "WHIR",
 }
+
+
+def _rounds_through(rounds, stop_label):
+    """The chain rounds up to and including the stage named ``stop_label``
+    (``None`` keeps the whole chain). Matched against ``_STAGE_LABELS`` so the
+    flag takes friendly names, not class names."""
+    if stop_label is None:
+        return list(rounds)
+    for i, rnd in enumerate(rounds):
+        if _STAGE_LABELS.get(type(rnd).__name__) == stop_label:
+            return list(rounds[: i + 1])
+    choices = sorted(set(_STAGE_LABELS.values()))
+    raise ValueError(
+        f"--stop_after={stop_label!r} matched no stage; pick from {choices}"
+    )
 
 
 def _array_leaves(obj):
@@ -376,39 +403,48 @@ def main(argv) -> None:
     # (cold) pass carries the reference observation-log so CommitRound diffs the
     # prelude element-by-element (issue #59); the warm pass below omits it.
     chain, carry = prove_chain(sponge, comp, params, vk_pre_hash, airs, obs_log=obs_log)
-    chain.rounds = [_TimedRound(rnd) for rnd in chain.rounds]
+    chain.rounds = [
+        _TimedRound(rnd) for rnd in _rounds_through(chain.rounds, _STOP_AFTER.value)
+    ]
 
     t0 = time.monotonic()
     _, _, msgs = chain(carry, new_transcript())
-    root, gkr, bcp, stacking_proof, whir_proof = msgs
     print(f"chain run: {time.monotonic() - t0:.1f}s")
 
-    # Assemble the Proof exactly as prove() does, then byte-match it.
-    proof = Proof(
-        common_main_commit=root,
-        logup_pow_witness=gkr.logup_pow_witness,
-        gkr_proof=gkr.gkr_proof,
-        xi=gkr.xi,
-        batch_constraint_proof=bcp,
-        stacking_proof=stacking_proof,
-        whir_proof=whir_proof,
-    )
-    if not _byte_match(proof, prove_dir / "outputs"):
-        sys.exit(1)
-    print("prove chain byte-match: ALL OK")
+    if _STOP_AFTER.value is not None:
+        print(f"[stopped after {_STOP_AFTER.value}; byte-match skipped]", flush=True)
+    else:
+        root, gkr, bcp, stacking_proof, whir_proof = msgs
+        # Assemble the Proof exactly as prove() does, then byte-match it.
+        proof = Proof(
+            common_main_commit=root,
+            logup_pow_witness=gkr.logup_pow_witness,
+            gkr_proof=gkr.gkr_proof,
+            xi=gkr.xi,
+            batch_constraint_proof=bcp,
+            stacking_proof=stacking_proof,
+            whir_proof=whir_proof,
+        )
+        if not _byte_match(proof, prove_dir / "outputs"):
+            sys.exit(1)
+        print("prove chain byte-match: ALL OK")
 
     # The first chain run above pays the XLA/zkx compile; for the baseline
     # comparison we want warm per-stage runtime, so run the (now-compiled)
-    # chain a second time and capture each stage's wall-clock.
-    if _BASELINE.value:
+    # chain a second time and capture each stage's wall-clock. --stop_after
+    # alone also triggers it (per-stage profiling needs no baseline).
+    if _BASELINE.value or _STOP_AFTER.value is not None:
         stage_times: dict = {}
         warm_chain, warm_carry = prove_chain(sponge, comp, params, vk_pre_hash, airs)
         warm_chain.rounds = [
-            _TimedRound(rnd, record=stage_times) for rnd in warm_chain.rounds
+            _TimedRound(rnd, record=stage_times)
+            for rnd in _rounds_through(warm_chain.rounds, _STOP_AFTER.value)
         ]
-        print("\n[warm pass for baseline comparison]", flush=True)
+        print("\n[warm pass]", flush=True)
         warm_chain(warm_carry, new_transcript())
-        _compare_baseline(_BASELINE.value, params, stage_times)
+        # The e2e sum-vs-native comparison is only meaningful for the full chain.
+        if _BASELINE.value and _STOP_AFTER.value is None:
+            _compare_baseline(_BASELINE.value, params, stage_times)
 
 
 if __name__ == "__main__":
