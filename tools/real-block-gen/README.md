@@ -23,8 +23,9 @@ checkout to run it.
 # 1. Drop the bin into a local openvm checkout:
 cp dump_fixture.rs <openvm>/benchmarks/prove/src/bin/dump_fixture.rs
 # add a [[bin]] entry (name = "dump_fixture") to benchmarks/prove/Cargo.toml,
-# `serde_json.workspace = true` to its [dependencies]; and
-# `features = ["test-utils"]` on the `openvm-stark-backend` dependency (the
+# `serde_json.workspace = true` and `tracing-subscriber.workspace = true` (the
+# latter for the `--baseline-out` per-stage span timing) to its [dependencies];
+# and `features = ["test-utils"]` on the `openvm-stark-backend` dependency (the
 # only public path to a recording prove + transcript log is
 # `TestFixture::prove_from_transcript`, gated behind test-utils; the
 # recursion crate already deps it the same way).
@@ -135,6 +136,32 @@ The output JSON is consumed by `verify_prove --fixture_dir /tmp/real_fib
 path re-transports the CPU-built cached-main `CommittedTraceData` to the device;
 validate its byte-match (GPU proof == CPU proof, via `verify_prove` on CUDA)
 when first run on a GPU box.
+
+### Per-stage native bars (`per_stage_s`)
+
+`--baseline-out` also runs **one extra armed prove** through a `tracing`
+span-timer (`SpanTimer`) and writes a `per_stage_s` map (span name → busy
+seconds) alongside `prove_e2e_s`, so each milestone-#4 issue has a native bar
+for *its* stage, not just the e2e total. The timer records **only** the
+coordinator phase spans below: each is entered once on the prove thread (rayon
+parallelism lives inside), so its busy-time is the stage wall-clock. The
+prover's per-element inner spans (e.g. `reverse_matrix_index_bits`, millions of
+calls across rayon threads) are deliberately skipped — accumulating them would
+report CPU-sums rather than wall-clock *and* contend the timer's lock hard
+enough to serialize the parallel prover and inflate the phase spans themselves.
+
+| `per_stage_s` span | stage (issue) |
+|---|---|
+| `prover.main_trace_commit` (common-main; `stacked_commit` / `merkle_tree` / `rs_code_matrix` nested) | commit (#46) |
+| `fractional_sumcheck` | LogUp-GKR (#44) |
+| `prove_zerocheck_and_logup` | ZeroCheck (#45) |
+| `prove_stacked_opening_reduction` | stacking (⊂ #43) |
+| `prove_whir` | WHIR (⊂ #43) |
+| `stark_prove_excluding_trace` | e2e (cross-checks `prove_e2e_s`) |
+
+Note `prover.main_trace_commit` times the **common-main** commit only — native
+commits cached mains during *tracegen* (the span just observes the precomputed
+`cd.commitment`), unlike zorch's `CommitRound`, which recomputes them in-stage.
 
 ## Fixture format
 

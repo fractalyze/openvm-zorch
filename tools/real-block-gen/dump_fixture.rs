@@ -30,7 +30,11 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
-    time::Instant,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+    time::{Duration, Instant},
 };
 
 use openvm_sdk::{
@@ -57,6 +61,93 @@ use openvm_stark_sdk::config::baby_bear_poseidon2::{
 };
 use openvm_transpiler::{elf::Elf, openvm_platform::memory::MEM_SIZE};
 use p3_field::{BasedVectorSpace, PrimeField32};
+use tracing_subscriber::{
+    layer::{Context, SubscriberExt as _},
+    registry::LookupSpan,
+    util::SubscriberInitExt as _,
+    Layer,
+};
+
+/// Per-span wall-clock accumulator for the native prover's coordinator phase
+/// spans. The generic `Prover::prove` (`stark_prove_excluding_trace`) is
+/// instrumented top-to-bottom with one `info` span per phase — main-trace
+/// commit, LogUp-GKR, zerocheck, stacked reduction, WHIR — so summing each
+/// span's busy-time gives the native PER-STAGE wall-clock, the per-stage
+/// counterpart to `prove_e2e_s` that lets each openvm-zorch stage (#43–#46) be
+/// compared against its native span and not just e2e.
+///
+/// Only the [`is_phase_span`] set is recorded. The prover also emits *millions*
+/// of high-frequency inner spans (`reverse_matrix_index_bits`, per-round
+/// sumcheck folds, …) across rayon worker threads; accumulating those would
+/// (a) contend this global lock hard enough to serialize the parallel prover
+/// and inflate the very phase wall-clocks we are measuring, and (b) report
+/// rayon CPU-sums, not wall-clock. Filtering to the coordinator phase spans —
+/// each entered once on the prove thread, rayon parallelism living inside them
+/// — keeps busy-time ≈ wall-clock and the lock all but uncontended.
+static SPAN_TIMES: Mutex<Option<BTreeMap<String, (Duration, u64)>>> = Mutex::new(None);
+
+/// Fast-path guard checked lock-free on every span enter/exit. The layer is
+/// installed process-wide, so without this every span (guest execution, the
+/// warm timing loop, the millions of inner prover spans) would take the
+/// [`SPAN_TIMES`] lock. Armed only around the dedicated span-timing prove in
+/// [`measure_spans`].
+static ARMED: AtomicBool = AtomicBool::new(false);
+
+/// The generic coordinator's per-phase `info` spans (see
+/// `openvm-stark-backend` `crates/stark-backend/src/prover`), shared by the CPU
+/// and CUDA backends. `stark_prove_excluding_trace` is the e2e parent (cross-
+/// checks the warm e2e number); the rest are the per-stage bars — `#46` commit,
+/// `#44` GKR, `#45` zerocheck (note `fractional_sumcheck` nests inside
+/// `prove_zerocheck_and_logup`, so the zerocheck-proper bar is their
+/// difference), `#43` stacking + WHIR.
+fn is_phase_span(name: &str) -> bool {
+    matches!(
+        name,
+        "stark_prove_excluding_trace"
+            | "prover.main_trace_commit"
+            | "fractional_sumcheck"
+            | "prove_zerocheck_and_logup"
+            | "prove_stacked_opening_reduction"
+            | "prove_whir"
+    )
+}
+
+/// Records each phase span's busy-time into [`SPAN_TIMES`] when armed. A plain
+/// enter/exit-interval accumulator.
+struct SpanTimer;
+
+impl<S> Layer<S> for SpanTimer
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+        if !ARMED.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(span) = ctx.span(id) else { return };
+        if is_phase_span(span.name()) {
+            span.extensions_mut().insert(Instant::now());
+        }
+    }
+
+    fn on_exit(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+        if !ARMED.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(span) = ctx.span(id) else { return };
+        if !is_phase_span(span.name()) {
+            return;
+        }
+        let started = span.extensions_mut().remove::<Instant>();
+        if let (Some(started), Some(map)) = (started, SPAN_TIMES.lock().unwrap().as_mut()) {
+            let e = map
+                .entry(span.name().to_string())
+                .or_insert((Duration::ZERO, 0));
+            e.0 += started.elapsed();
+            e.1 += 1;
+        }
+    }
+}
 
 type F = openvm_sdk::F;
 /// The shared protocol config: `BabyBearPoseidon2Config`. Both the app prover
@@ -742,23 +833,44 @@ fn gen_baseline(
     let ctx = build_ref_ctx(ref_raw, params);
 
     #[cfg(not(feature = "cuda"))]
-    let (default_platform, prove_runs) = {
+    let (default_platform, prove_runs, span_times) = {
         let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
         let runs_v = measure_baseline(&engine, &ctx, vm_pk, runs);
-        ("cpu", runs_v)
+        let spans = measure_spans(&engine, &ctx, vm_pk);
+        ("cpu", runs_v, spans)
     };
     #[cfg(feature = "cuda")]
-    let (default_platform, prove_runs) = {
+    let (default_platform, prove_runs, span_times) = {
         use openvm_cuda_backend::BabyBearPoseidon2GpuEngine;
         let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
         let runs_v = measure_baseline(&engine, &ctx, vm_pk, runs);
-        ("gpu", runs_v)
+        let spans = measure_spans(&engine, &ctx, vm_pk);
+        ("gpu", runs_v, spans)
     };
 
     let platform =
         std::env::var("BENCH_PLATFORM_LABEL").unwrap_or_else(|_| default_platform.to_string());
     let prove_min = prove_runs.iter().copied().fold(f64::INFINITY, f64::min);
     let prove_mean = prove_runs.iter().sum::<f64>() / prove_runs.len() as f64;
+
+    // Native per-stage spans (one warm prove), sorted longest-first. Printed for
+    // the eyeball read and recorded under `per_stage_s` so the per-stage issues
+    // (#43–#46) have a native bar for each zorch stage, not just the e2e total.
+    let mut spans_sorted: Vec<(&String, &(Duration, u64))> = span_times.iter().collect();
+    spans_sorted.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    println!("[baseline] native per-stage spans (one warm prove):");
+    for (name, (dur, n)) in &spans_sorted {
+        println!("  {:<36} {:8.4}s  (x{n})", name, dur.as_secs_f64());
+    }
+    let per_stage: serde_json::Map<String, serde_json::Value> = span_times
+        .iter()
+        .map(|(k, (d, n))| {
+            (
+                k.clone(),
+                serde_json::json!({"s": d.as_secs_f64(), "count": n}),
+            )
+        })
+        .collect();
 
     let whir = &params.whir;
     let baseline = serde_json::json!({
@@ -786,6 +898,10 @@ fn gen_baseline(
             "warm_mean": prove_mean,
             "runs": prove_runs,
         },
+        // Native per-stage busy-time from the prover's `tracing` spans (one warm
+        // prove). Span name → milestone-issue mapping lives on `is_phase_span`;
+        // the README's "Per-stage native bars" table is the user-facing copy.
+        "per_stage_s": per_stage,
         // Real-block setup (the SDK `app_keygen` + the `prove_continuations`
         // tracegen) runs upstream and is not separately timed here; the
         // apples-to-apples scope vs `prove_chain` is `prove_e2e_s`.
@@ -837,6 +953,36 @@ fn measure_baseline<E: StarkEngine<SC = SC>>(
         println!("[baseline] prove run {}/{}: {dt:.3}s", i + 1, runs);
     }
     prove_runs
+}
+
+/// One armed warm prove whose `tracing` spans are accumulated into
+/// [`SPAN_TIMES`], yielding the native per-stage wall-clock (commit / GKR /
+/// zerocheck / stacking / WHIR). Runs after [`measure_baseline`]'s warm loop so
+/// caches are hot; the e2e `prove` here is the parent `stark_prove_excluding_trace`
+/// span, so its busy-time cross-checks the warm e2e number. Returns
+/// `name -> (busy_time, enter_count)`.
+fn measure_spans<E: StarkEngine<SC = SC>>(
+    engine: &E,
+    ctx: &ProvingContext<CpuColMajorBackend<SC>>,
+    vm_pk: &openvm_stark_backend::keygen::types::MultiStarkProvingKey<SC>,
+) -> BTreeMap<String, (Duration, u64)> {
+    use openvm_stark_backend::prover::{DeviceDataTransporter, Prover};
+
+    let device = engine.device();
+    let d_pk = device.transport_pk_to_device(vm_pk);
+    let d_ctx = device.transport_proving_ctx_to_device(ctx);
+    let mut prover = engine.prover_from_transcript(engine.initial_transcript());
+    // Arm AFTER transport/setup so only the prove's spans are counted. Order
+    // matters: publish the accumulator before flipping ARMED, and clear ARMED
+    // before draining it, so the layer never sees an armed-but-empty state.
+    *SPAN_TIMES.lock().unwrap() = Some(BTreeMap::new());
+    ARMED.store(true, Ordering::SeqCst);
+    sync_stream();
+    let proof = prover.prove(&d_pk, d_ctx).unwrap();
+    sync_stream();
+    std::hint::black_box(&proof);
+    ARMED.store(false, Ordering::SeqCst);
+    SPAN_TIMES.lock().unwrap().take().unwrap_or_default()
 }
 
 /// Dump the per-stage end-of-chain `outputs/` (canonical-u32 `.npy`), mirroring
@@ -970,6 +1116,11 @@ fn dump_ref_prove_outputs(
 }
 
 fn main() -> eyre::Result<()> {
+    // Install the per-stage span timer before any prove runs. It only records
+    // when armed (see `SPAN_TIMES` / `measure_spans`), so it is inert outside the
+    // `--baseline-out` path. `try_init` is a no-op if a subscriber is already set.
+    let _ = tracing_subscriber::registry().with(SpanTimer).try_init();
+
     // --- arg parse: optional `--out <dir>`, `--ref-prove`, `--baseline-out <file>` ---
     let mut out_dir: Option<PathBuf> = None;
     let mut ref_prove = false;
