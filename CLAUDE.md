@@ -108,6 +108,26 @@ Gotchas that recur across stages:
   hundreds of pytree-leaf scalars regress; vectorize into arrays first.
   (PR #14 took round-0 prism 4.26→1.0s, whole prove −29%, this way.)
 
+## Per-stage perf (milestone #4)
+
+- **Profile per stage with `verify_prove --stop_after <stage>`** (truncates the
+  chain so an early stage times in isolation when a later stage's compile is
+  intractable — WHIR's 2²² ptxas on GPU), `OPENVM_ZC_PROFILE=1` for ZeroCheck
+  sub-region timers, and **`JAX_COMPILATION_CACHE_DIR=<dir>` for a TRUE warm
+  pass** — without it the real-block executables evict the in-process cache and
+  the "warm" pass silently recompiles.
+- **Decide GPU perf ON GPU — the backends invert.** An eager hand-rolled stage
+  (e.g. round-0's `eval_nodes` DAG walk) is FLOP-bound on CPU (jit gives ~0 warm
+  win, only +compile) but dispatch/HBM-bound on GPU (jit is a 6–8× win). A toy
+  fixture also misleads (traces too narrow to expose the prism cost). PR #67 jit
+  took ZeroCheck warm GPU 204→19.3s this way.
+- **The deeper lever is `zorch.constraint_eval`** (the no-materialize composite
+  sp1-zorch uses — openvm hand-rolling `eval_nodes`+`acc_constraints` is the
+  anti-pattern). It's byte-exact, but **today it SEGFAULTS zkx GPU codegen** (the
+  custom-fusion emitter is unimplemented; CPU inlines fine). Don't re-attempt the
+  composite on GPU expecting a win until the zkx emitter lands (the repro +
+  zkx root cause are on issue #45).
+
 ## Byte-match
 
 The prover byte-matches the openvm-stark-backend reference prover.
