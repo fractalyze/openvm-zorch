@@ -118,7 +118,7 @@ def _batched_conv(coeffs: Array, kernel: Array) -> Array:
     stack the shifts on a trailing axis, broadcast-multiply by ``kernel`` and
     reduce that last axis. Keeping the contracted axis last avoids the mid-axis
     EF reduce fault, and the shift-and-add avoids ``jnp.dot``/``@`` (both
-    mis-lower on this fork — see CLAUDE.md). Dispatch-free and jit-fusable,
+    mis-lower on this fork — see docs/development.md). Dispatch-free and jit-fusable,
     unlike a per-scalar coefficient loop. (``conv_test`` pins it against the
     reference scalar convolution.)"""
     la = coeffs.shape[-1]
@@ -214,7 +214,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     constant-fold (a cold cache faults under trace — ``omega_int``'s
     ``lax.fft`` + ``int(...)`` concretization). Same DAG walk the MLE
     ``lax.scan`` jits, pure EF arithmetic, contracted (row) axis kept LAST per
-    CLAUDE.md ⇒ byte-exact. One compile per AIR (distinct DAGs); warm/GPU reaps
+    docs/development.md ⇒ byte-exact. One compile per AIR (distinct DAGs); warm/GPU reaps
     the fusion.
     """
     num_cosets_zc = constraint_degree - 1
@@ -425,7 +425,7 @@ def prove_batch_constraints(
 
     # Island B (post-μ): μ-batch the zerocheck rows, multiply in eq_D, then add
     # the μ-weighted logup products to form s_0. Contracted axes kept last so
-    # the EF reduce stays jit-safe (CLAUDE.md).
+    # the EF reduce stays jit-safe (docs/development.md).
     eq_uni = jnp.stack(prism.eq_uni_poly(l_skip, xi[0]))
     sp_zc_rows = jnp.stack(
         [jnp.stack(_pad(coeffs, sp_0_deg + 1)) for coeffs in sp_zc]

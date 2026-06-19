@@ -97,7 +97,7 @@ def stacked_merkle_commit(
 
     Delegates the strided fold to zorch's scheme-agnostic ``StridedMerkleTree``
     (the query-strided layout is not SWIRL-specific, so it belongs upstream — see
-    CLAUDE.md). ``fuse=True`` emits the ``zorch.merkle_commit`` marker so zkx's
+    docs/conventions.md). ``fuse=True`` emits the ``zorch.merkle_commit`` marker so zkx's
     ``ExpandMerkleCommit`` (zkx #648, in the dev20260611070701 wheel) lowers the
     whole commit — including the ``log2(rows_per_query)`` strided levels — through
     the cross-leaf Poseidon2 fusion instead of dispatching one composite per pair.

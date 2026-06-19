@@ -64,6 +64,13 @@ cargo run --release -- \
 ## Reference pin
 
 `openvm-stark-backend` tag `v2.0.0-beta.2`
-(`f6a84921e46a7df9796d41dfdfe69f0658ad74b5`), BabyBear + Poseidon2 width-16
-(plonky3 `=0.4.1`). See [`CLAUDE.md`](CLAUDE.md) and
-[`docs/swirl-pipeline.md`](docs/swirl-pipeline.md).
+(`f6a84921e46a7df9796d41dfdfe69f0658ad74b5`) — the same pin the openvm
+`v2.0.0-beta.2` release consumes. SWIRL lives on stark-backend's `develop-v2`
+lineage, NOT `main` (main is still plonky3/FRI). Config: BabyBear base field,
+BabyBear⁴ challenges, Poseidon2 width-16 (`default_babybear_poseidon2_16`,
+plonky3 `=0.4.1`).
+
+## Documentation
+
+See [`docs/`](docs/README.md) for the full index — pipeline & terminology,
+conventions, development setup, byte-match methodology, and the native baseline.
