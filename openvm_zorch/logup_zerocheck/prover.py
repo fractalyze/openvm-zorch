@@ -51,11 +51,13 @@ from openvm_zorch.logup_gkr.input_layer import interactions_layout
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.logup_zerocheck.constraints import (
     ConstraintsDag,
+    _promote,
     acc_constraints,
     acc_interactions,
     eval_nodes,
 )
 from openvm_zorch.transcript import sample_ext
+from zorch.constraint_eval import constraint_eval
 from zorch.poly.eq import eval_eq, expand_eq_to_hypercube
 from zorch.poly.univariate import compute_inv_vandermonde, eval_coeffs
 from zorch.sumcheck.prover import fold_pair, lift_to_domain
@@ -237,9 +239,31 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
             mat_cells = [
                 prism.coset_evals(l_skip, m, num_cosets_zc) for m in trace_mats
             ]
-            parts = _dag_parts(mat_cells, needs_next)
-            node_vals = eval_nodes(dag, sels_cells, parts, public_values)
-            acc = acc_constraints(dag, node_vals, lambda_pows)
+            # The K constraints folded under λ via zorch's constraint_eval
+            # composite (#45): the marker lets the compiler accumulate Σ λ^k C_k
+            # in one kernel and never materialize the per-node / [..., K] tensors
+            # that the plain eval_nodes + acc_constraints walk spills to HBM.
+            # eval_fn is opaque, so the coset cells ride in as one packed `trace`
+            # (selectors ‖ each part's columns); it slices them back, runs the
+            # DAG, and returns the constraint nodes stacked on the trailing axis.
+            mat_ws = [c.shape[-1] for c in mat_cells]
+            packed = jnp.concatenate([sels_cells, *mat_cells], axis=-1)
+
+            def eval_fn(tr):
+                sels = tr[..., :3]
+                cols, off = [], 3
+                for w in mat_ws:
+                    cols.append(tr[..., off : off + w])
+                    off += w
+                node_vals = eval_nodes(
+                    dag, sels, _dag_parts(cols, needs_next), public_values
+                )
+                return jnp.stack(
+                    [_promote(node_vals[idx]) for idx in dag.constraint_idx], axis=-1
+                )
+
+            alpha = jnp.stack([lambda_pows[k] for k in range(len(dag.constraint_idx))])
+            acc = constraint_eval(eval_fn, packed, alpha)  # (num_cosets, size, rows)
             weighted = acc * eq_xi[None, None, :]
             return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
     else:
