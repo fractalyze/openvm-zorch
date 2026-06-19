@@ -26,13 +26,13 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from jax import Array
+from jax import Array, lax
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, f_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
-from openvm_zorch.transcript import sample_ext
-from zorch.sumcheck.prover import fold_pair
+from openvm_zorch.transcript import EF_LIMBS, sample_ext
+from zorch.sumcheck.prover import prove as sumcheck_prove
 from zorch.transcript import DuplexTranscript
 
 
@@ -142,6 +142,146 @@ def _round0_group_contrib(
     return contrib * ind  # (C, S)
 
 
+@dataclass(frozen=True)
+class _StackingSummand:
+    """Product summand the ``zorch.sumcheck`` scan folds: ``Σ_columns Q·EQW`` per
+    cube point. Degree 2 (``q`` × the eq/κ_rot weight), so each round poly is
+    quadratic; ``combine`` sums the stacked-column batch axis into the scalar
+    round poly while the driver folds the cube variable (the trailing axis). No
+    loop-invariant scalars — the λ powers are baked into ``EQW``."""
+
+    @property
+    def degree(self) -> int:
+        return 2
+
+    def combine_scalars(self) -> tuple[Array, ...]:
+        return ()
+
+    def combine(self, scalars: Sequence[Array], *factors: Array) -> Array:
+        del scalars  # λ rides inside EQW, not as a loop-invariant scalar
+        q, eqw = factors
+        return jnp.sum(q * eqw, axis=-2)  # contract the columns; keep the variable
+
+    def _combine(self, *factors: Array) -> Array:
+        # Required by the SumcheckSummand protocol; the scan path calls `combine`.
+        return self.combine((), *factors)
+
+
+def _eqw_columns(
+    commit_views: Sequence[_TraceView],
+    width: int,
+    height: int,
+    eq_tables: dict[int, Array],
+    k_rot_tables: dict[int, Array],
+    lam_pows: Sequence[Array],
+) -> Array:
+    """The λ-batched eq/κ_rot weight matrix for one commit — the full-cube
+    companion of the stacked matrix ``Q``, shape ``(2^n_stack, width)``.
+
+    Cell ``[row, col]`` holds the view occupying it,
+    ``λ^{lam_eq}·eq + λ^{lam_rot}·κ_rot`` over the view's contiguous cube block
+    and zero elsewhere, so folding it round-by-round binds every view uniformly:
+    a short trace's block is just a short eq vector, so the high cube bits bind
+    its position automatically once the block is exhausted. Built per column by
+    concatenating each view's weight in stacking order (the views in a column are
+    contiguous and ascending in ``row_idx``), mirroring ``stacked_matrix``'s
+    segment assembly so ``EQW`` and ``Q`` share one row layout."""
+    segments: dict[int, list[Array]] = {c: [] for c in range(width)}
+    for v in commit_views:
+        lht = v.slice.log_height
+        weight = lam_pows[v.lam_eq] * eq_tables[lht]
+        if v.lam_rot is not None:
+            weight = weight + lam_pows[v.lam_rot] * k_rot_tables[lht]
+        segments[v.slice.col_idx].append(weight)
+    cols = []
+    for c in range(width):
+        parts = segments[c]
+        used = sum(p.shape[0] for p in parts)
+        if used < height:
+            parts = parts + [jnp.zeros((height - used,), EF)]
+        # `parts` is always non-empty here: an empty column has used == 0 < height
+        # (height = 2^n_stack ≥ 2 past the n_stack == 0 guard), so the pad above
+        # fills it. Mirrors `stacked_matrix`'s `concatenate(parts)` (commit/stacking.py).
+        cols.append(jnp.concatenate(parts))
+    return jnp.stack(cols, axis=1)
+
+
+def _sumcheck_rounds(
+    transcript: DuplexTranscript,
+    q_evals: Sequence[Array],
+    eq_tables: dict[int, Array],
+    k_rot_tables: dict[int, Array],
+    views: Sequence[_TraceView],
+    lam_pows: Sequence[Array],
+    u: Sequence[Array],
+    n_stack: int,
+) -> tuple[DuplexTranscript, list[Array], list[Array], list[Array]]:
+    """Rounds 1..=n_stack of Stage 4: the quadratic MLE sumcheck (round-poly
+    evals at {1, 2}) folding every stacked column to its opening, then observing
+    the openings.
+
+    Driven by the generic ``zorch.sumcheck`` scan (the prover's one
+    runtime-dominated stage; #43): the jagged per-view fold is expressed as two
+    homogeneous full-cube factors — the stacked matrices ``Q`` and their λ-batched
+    eq/κ_rot weights ``EQW`` — with the stacked columns batched and the cube
+    variable trailing. The driver runs with ``eval_start=1`` (the reference's
+    compressed {s(1), s(2)} round polys) and an extension-field fold challenge
+    (``sample_ext``'s four base squeezes). The variable axis is bit-reversed so the
+    driver's MSB-first block fold matches the reference's LSB-first stride fold,
+    byte-identical to the reference prover."""
+    u = list(u)
+    widths = [q.shape[1] for q in q_evals]
+
+    if n_stack == 0:
+        # No cube variables: each stacked column already holds its single opening.
+        openings: list[Array] = []
+        for q in q_evals:
+            openings.append(q[0])
+            transcript = transcript.observe(q[0])
+        return transcript, [], u, openings
+
+    height = 1 << n_stack
+    q_cols = jnp.concatenate([q.T for q in q_evals], axis=0)  # (Σ width, 2^n_stack)
+    eqw_cols = jnp.concatenate(
+        [
+            _eqw_columns(
+                [v for v in views if v.com_idx == c],
+                widths[c],
+                height,
+                eq_tables,
+                k_rot_tables,
+                lam_pows,
+            ).T
+            for c in range(len(q_evals))
+        ],
+        axis=0,
+    )
+    q_cols = lax.bit_reverse(q_cols, dimensions=(1,))
+    eqw_cols = lax.bit_reverse(eqw_cols, dimensions=(1,))
+
+    folded, transcript, msgs = sumcheck_prove(
+        _StackingSummand(),
+        [q_cols, eqw_cols],
+        transcript,
+        eval_start=1,
+        challenge_dtype=EF,
+        challenge_limbs=EF_LIMBS,
+    )
+    round_polys = list(msgs.round_poly)
+    u = u + list(msgs.challenge)
+
+    # Split the folded stacked columns back per commit and observe the openings.
+    folded_q = folded[0][:, 0]  # (Σ width,)
+    openings = []
+    start = 0
+    for w in widths:
+        opening = folded_q[start : start + w]
+        openings.append(opening)
+        transcript = transcript.observe(opening)
+        start += w
+    return transcript, round_polys, u, openings
+
+
 def prove_stacked_opening_reduction(
     transcript: DuplexTranscript,
     l_skip: int,
@@ -185,7 +325,6 @@ def prove_stacked_opening_reduction(
     for _ in range(lam_count - 1):
         lam_pows.append(lam_pows[-1] * lam)
 
-    one = jnp.ones((), EF)
     omega = prism.omega_int(l_skip)
     r_0 = r[0]
     # eq_D(ω·r_0, 1): the boundary weight of the rotation kernel's cube part.
@@ -296,81 +435,17 @@ def prove_stacked_opening_reduction(
         )
         eq_tables[lht] = eq * (ind * eq_uni)
 
-    # --- Rounds 1..=n_stack: quadratic MLE sumcheck, evals at {1, 2} ---
-    # eq(u[1+ñ_T..round], b_{T,j}[..round−ñ_T]) accumulator per view: once a
-    # trace's cube variables are exhausted its q values stop folding and the
-    # remaining rounds bind the column's position bits instead.
-    eq_ub = [one] * len(views)
-    round_polys: list[Array] = []
-    for rnd in range(1, n_stack + 1):
-        s_at_1 = jnp.zeros((), EF)
-        s_at_2 = jnp.zeros((), EF)
-        for g_start, g_end in groups:
-            g_views = views[g_start:g_end]
-            lht = g_views[0].slice.log_height
-            n_lift = max(lht - l_skip, 0)
-            hd = max(n_lift - rnd, 0)  # remaining hypercube dim
-            eq_rs = eq_tables[lht]
-            k_rot_rs = k_rot_tables[lht]
-            for gi, v in enumerate(g_views):
-                s = v.slice
-                if rnd <= n_lift:
-                    row_start = (s.row_idx >> lht) << (hd + 1)
-                else:
-                    row_start = (s.row_idx >> (l_skip + rnd)) << 1
-                col = q_evals[v.com_idx][
-                    row_start : row_start + (2 << hd), s.col_idx
-                ]
-                t0, t1 = col[0::2], col[1::2]
-                q1, q2 = t1, t1 + t1 - t0
-                ub = eq_ub[g_start + gi]
-                if rnd > n_lift:
-                    # Bind position bit b: eq(X, b) is b at X=1, 3b−1 at X=2.
-                    b = (s.row_idx >> (l_skip + rnd - 1)) & 1
-                    f1 = ub * (one if b else jnp.zeros((), EF))
-                    f2 = ub * (_ef_const(2) if b else _ef_const(MODULUS - 1))
-                    eq1, eq2 = eq_rs[0] * f1, eq_rs[0] * f2
-                    k1, k2 = k_rot_rs[0] * f1, k_rot_rs[0] * f2
-                else:
-                    e_lo, e_hi = eq_rs[0::2] * ub, eq_rs[1::2] * ub
-                    eq1, eq2 = e_hi, e_hi + e_hi - e_lo
-                    k_lo, k_hi = k_rot_rs[0::2] * ub, k_rot_rs[1::2] * ub
-                    k1, k2 = k_hi, k_hi + k_hi - k_lo
-                s_at_1 = s_at_1 + lam_pows[v.lam_eq] * (q1 * eq1).sum()
-                s_at_2 = s_at_2 + lam_pows[v.lam_eq] * (q2 * eq2).sum()
-                if v.lam_rot is not None:
-                    s_at_1 = s_at_1 + lam_pows[v.lam_rot] * (q1 * k1).sum()
-                    s_at_2 = s_at_2 + lam_pows[v.lam_rot] * (q2 * k2).sum()
-
-        batch = jnp.stack([s_at_1, s_at_2])
-        transcript = transcript.observe(batch)
-        round_polys.append(batch)
-
-        transcript, u_rnd = sample_ext(transcript)
-        u.append(u_rnd)
-
-        q_evals = [
-            fold_pair(q[0::2], q[1::2], u_rnd) if q.shape[0] > 1 else q
-            for q in q_evals
-        ]
-        for lht, tbl in eq_tables.items():
-            if tbl.shape[0] > 1:
-                eq_tables[lht] = fold_pair(tbl[0::2], tbl[1::2], u_rnd)
-        for lht, tbl in k_rot_tables.items():
-            if tbl.shape[0] > 1:
-                k_rot_tables[lht] = fold_pair(tbl[0::2], tbl[1::2], u_rnd)
-        for t, v in enumerate(views):
-            n_lift = max(v.slice.log_height - l_skip, 0)
-            if rnd > n_lift:
-                b = (v.slice.row_idx >> (l_skip + rnd - 1)) & 1
-                eq_ub[t] = eq_ub[t] * (u_rnd if b else one - u_rnd)
-
-    # --- Stacking openings: each stacked column has folded to one value ---
-    openings: list[Array] = []
-    for q in q_evals:
-        assert q.shape[0] == 1
-        openings.append(q[0])
-        transcript = transcript.observe(q[0])
+    # --- Rounds 1..=n_stack: the quadratic MLE sumcheck (split out) ---
+    transcript, round_polys, u, openings = _sumcheck_rounds(
+        transcript,
+        q_evals,
+        eq_tables,
+        k_rot_tables,
+        views,
+        lam_pows,
+        u,
+        n_stack,
+    )
 
     return transcript, StackingProof(
         lambda_=lam,
