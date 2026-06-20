@@ -22,9 +22,10 @@ boundary but padding cells remain) is preserved here byte-for-byte.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Sequence
 
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 from zorch.utils.bits import log2_strict_usize
@@ -115,26 +116,29 @@ def stacked_matrix(
     total_cells = sum(max(t.shape[0], 1 << l_skip) * t.shape[1] for t in traces)
     width = -(-total_cells // height)
 
-    # Assemble per stacked column: concatenate the (lifted) segments that the
-    # layout assigned to it, zero-filling the tail. Shapes are static, so this
-    # is pure orchestration — no traced control flow.
-    segments: dict[int, list[Array]] = {c: [] for c in range(width)}
-    for mat_idx, j, s in layout.sorted_cols:
-        col = traces[mat_idx][:, j]
-        lifted_len = s.lifted_len(l_skip)
-        if s.log_height < l_skip:
-            lifted = (
-                jnp.zeros((lifted_len,), dtype).at[:: s.stride(l_skip)].set(col)
-            )
-        else:
-            lifted = col
-        segments[s.col_idx].append(lifted)
-
-    cols = []
-    for c in range(width):
-        parts = segments[c]
-        used = sum(p.shape[0] for p in parts)
-        if used < height:
-            parts = parts + [jnp.zeros((height - used,), dtype)]
-        cols.append(jnp.concatenate(parts))
-    return jnp.stack(cols, axis=1), layout
+    # Assemble with one on-device GATHER. Each (lifted) source cell's row-major
+    # offset in the (height, width) matrix is ``(row_idx + i*stride)*width +
+    # col_idx`` — a function of the static layout, computed host-side. We invert
+    # that into a per-output-cell gather index and ``take`` the source once.
+    #
+    # Gather, not scatter: XLA's GPU scatter serializes a large index set into a
+    # pathologically slow kernel (~100x the host-bound eager loop here), whereas
+    # gather is well-parallelized. Both replace an O(total columns) loop of
+    # per-column slice/lift/concatenate dispatches that storms the GPU launch
+    # queue (eager dispatch is host-bound there; #46).
+    dest = [
+        (s.row_idx + np.arange(traces[mat_idx].shape[0]) * s.stride(l_skip)) * width
+        + s.col_idx
+        for mat_idx, _j, s in layout.sorted_cols
+    ]
+    # Source cells in the layout's walk order (per matrix, column-major) behind a
+    # zero sentinel at index 0; ``t.T.reshape(-1)`` lists column 0's rows, then
+    # column 1's, ..., matching the per-column ``sorted_cols`` iteration. Output
+    # cells with no source (lifting gaps, zero tail, trailing column) gather the
+    # sentinel.
+    src = jnp.concatenate([jnp.zeros((1,), dtype)] + [t.T.reshape(-1) for t in traces])
+    gather = np.zeros((height * width,), np.int64)
+    if dest:
+        dest_flat = np.concatenate(dest)
+        gather[dest_flat] = np.arange(dest_flat.size) + 1
+    return jnp.take(src, jnp.asarray(gather)).reshape(height, width), layout
