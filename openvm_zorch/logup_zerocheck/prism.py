@@ -239,15 +239,15 @@ def coset_evals(l_skip: int, mat: Array, num_cosets: int) -> Array:
     """
     size = 1 << l_skip
     height, width = mat.shape
-    chunks = mat.reshape(height >> l_skip, size, width)
-    coeffs = jnp.stack(_idft_rows(l_skip, jnp.moveaxis(chunks, 1, -1)))
-    # coeffs: (size_t, rows, width). Contract against the constant coset-DFT
-    # weights V[c, k, t] = g^{(c+1)t}·ω^{tk}; trailing-axis sum over t.
-    weight = _coset_weight(l_skip, num_cosets)
-    if coeffs.dtype != F:
+    # (rows, size_kin, width) -> (rows, width, size_kin): kin is the D-eval index.
+    chunks = jnp.moveaxis(mat.reshape(height >> l_skip, size, width), 1, -1)
+    # One fused contraction D-evals -> coset evals: M[c, k, kin] folds the iDFT
+    # and the coset-DFT into a single constant matrix per coset, so the
+    # intermediate coefficients never materialize. Trailing-axis sum over kin.
+    weight = _coset_from_evals_weight(l_skip, num_cosets)
+    if chunks.dtype != F:
         weight = f_to_ef(weight)
-    coeffs_t_last = jnp.moveaxis(coeffs, 0, -1)  # (rows, width, size_t)
-    return (weight[:, :, None, None, :] * coeffs_t_last[None, None, :, :, :]).sum(
+    return (weight[:, :, None, None, :] * chunks[None, None, :, :, :]).sum(
         axis=-1
     )  # (num_cosets, size_k, rows, width)
 
@@ -278,15 +278,30 @@ def _coset_weight(l_skip: int, num_cosets: int) -> Array:
     )
 
 
+@lru_cache(maxsize=None)
+def _coset_from_evals_weight(l_skip: int, num_cosets: int) -> Array:
+    """Fused D-evals → coset-evals weights, shape ``(num_cosets, 2^l_skip,
+    2^l_skip)``: composes the inverse-Vandermonde iDFT (``_idft_weight``,
+    ``W[t, kin]``) and the coset-DFT (``_coset_weight``, ``V[c, k, t]``) into one
+    constant matrix per coset, ``M[c, k, kin] = Σ_t V[c, k, t]·W[t, kin]``. Lets
+    ``coset_evals`` contract the skip-window D evaluations straight to the coset
+    evaluations without materializing the intermediate coefficients. Byte-
+    identical to the two-step contraction — field addition is associative, so
+    ``Σ_t V·(Σ_kin W·x) = Σ_kin (Σ_t V·W)·x``."""
+    coset = _coset_weight(l_skip, num_cosets)  # (c, k, t)
+    idft = _idft_weight(l_skip)  # (t, kin)
+    return (coset[:, :, :, None] * idft[None, None, :, :]).sum(axis=2)  # (c, k, kin)
+
+
 def prewarm_coset_weights(l_skip: int, num_cosets: int) -> None:
     """Eagerly build (and lru-cache) the host-int prism weight matrices so a
     later JITTED ``coset_evals`` HITS the cache instead of running the
     construction under trace. ``omega_int`` extracts ω via ``lax.fft`` + an
     ``int(...)`` concretization that FAULTS under a jit trace
     (``ConcretizationTypeError``); pre-warming forces it eager once, so the
-    cached ω / weight arrays constant-fold into the traced graph (#45)."""
-    _idft_weight(l_skip)  # transitively warms omega_int
-    _coset_weight(l_skip, num_cosets)
+    cached ω / weight arrays constant-fold into the traced graph (#45). Warms the
+    fused ``_coset_from_evals_weight`` (transitively ω / iDFT / coset-DFT)."""
+    _coset_from_evals_weight(l_skip, num_cosets)
 
 
 def geometric_cosets_to_coeffs(
