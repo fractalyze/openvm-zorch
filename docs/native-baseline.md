@@ -147,3 +147,35 @@ JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 Running the committed micro fixture (`testdata/prove`) against a production
 baseline warns about the param mismatch — that comparison is not
 apples-to-apples and exists only as a smoke check of the wiring.
+
+## GPU cold-compile (zerocheck `jit_scan`)
+
+zorch's first GPU `prove()` is dominated by XLA→ptxas **compile**, not kernel
+runtime: the zerocheck Stage-3 constraint DAG unrolls into one giant `jit_scan`
+kernel ptxas optimizes for minutes (clean a41 RTX 5090: zerocheck cold ~328s,
+commit→zerocheck ~435s, GPU at 0% util throughout). It is a one-time cost — two
+levers make it tractable (#70):
+
+- **Persistent cache (pay once):** set `JAX_COMPILATION_CACHE_DIR` to a
+  per-toolchain directory. JAX reuses the compiled modules across process runs,
+  so every run after the first skips the compile (zerocheck cold 418→95s
+  reused) — the deployment analog of native compiling its `.cu` kernels at build
+  time. Leave it unset for byte-match gates (a true cold compile is part of the
+  gate).
+- **Parallel ptxas (cut the first compile ~25%):**
+  `XLA_FLAGS=--xla_gpu_force_compilation_parallelism=<cores>` compiles the
+  per-AIR kernels in parallel (zerocheck cold 328→245s, zero runtime cost). The
+  win is modest — the dominant cost is a single serial-ptxas kernel — so it
+  complements, not replaces, the cache.
+
+```sh
+JAX_COMPILATION_CACHE_DIR=/tmp/zorch_xla_cache \
+XLA_FLAGS=--xla_gpu_force_compilation_parallelism=24 \
+JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  bazel run //openvm_zorch:verify_prove -- --fixture_dir /tmp/prove_prod \
+    --baseline openvm_zorch/testdata/baseline/native_prod_gpu.json
+```
+
+Always measure per-stage GPU numbers on a **clean, idle** GPU: shared-GPU
+contention inflates every stage 2–50× and makes the per-stage ranking
+meaningless (the #68 GPU ranking was a contention artifact — #71).
