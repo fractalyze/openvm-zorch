@@ -81,6 +81,18 @@ _STOP_AFTER = flags.DEFINE_string(
     "zerocheck sub-region split.",
 )
 
+_COMPILE_CACHE_DIR = flags.DEFINE_string(
+    "compile_cache_dir",
+    None,
+    "Optional JAX persistent compilation-cache directory. When set, compiled "
+    "XLA modules are written here and reused across process runs, so the heavy "
+    "data-size-driven cold compile (zerocheck's per-AIR DAG-unroll jit_scan -- "
+    "~418s, ~50% of GPU cold -- drops to ~95s reused; #70) is paid once and "
+    "amortized, the deployment analog of native compiling CUDA kernels at build "
+    "time. NOTE: a warm cache makes the 'cold' pass a reuse, not a true first "
+    "compile -- leave unset to measure true cold.",
+)
+
 _PROVE = Path(__file__).parent / "testdata" / "prove"
 
 # Friendly per-stage labels, keyed by the stage Round's class name.
@@ -388,6 +400,17 @@ def _compare_baseline(baseline_path: str, params, stage_times: dict) -> None:
 
 def main(argv) -> None:
     del argv
+    # Enable the persistent XLA compilation cache before any jit compiles, so a
+    # warm cache reuses the heavy data-size cold compile (zerocheck jit_scan; #70).
+    # Fail fast on a bad cache dir: a silently-ignored knob would make the "cold"
+    # numbers misleading (a no-cache run mistaken for a reuse).
+    if _COMPILE_CACHE_DIR.value:
+        cache_path = Path(_COMPILE_CACHE_DIR.value)
+        if cache_path.exists() and not cache_path.is_dir():
+            raise ValueError(f"--compile_cache_dir must be a directory: {cache_path}")
+        cache_path.mkdir(parents=True, exist_ok=True)
+        jax.config.update("jax_compilation_cache_dir", str(cache_path))
+        print(f"[compile cache] {cache_path}", flush=True)
     prove_dir = Path(_FIXTURE_DIR.value) if _FIXTURE_DIR.value else _PROVE
     params, vk_pre_hash, airs, obs_log = _load_instance(prove_dir)
     sponge, comp = _poseidon2()
