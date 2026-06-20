@@ -441,7 +441,18 @@ def main(argv) -> None:
             for rnd in _rounds_through(warm_chain.rounds, _STOP_AFTER.value)
         ]
         print("\n[warm pass]", flush=True)
+        # Profiling hook (#71): set OPENVM_PROFILE_DIR to capture a jax.profiler
+        # trace of the warm pass. Pair with --stop_after to scope it to one
+        # stage (e.g. commit+GKR), avoiding the downstream compile cost. The
+        # trace's per-op GPU durations vs the stage wall-clock answer
+        # dispatch-bound vs compute-bound.
+        prof_dir = os.environ.get("OPENVM_PROFILE_DIR")
+        if prof_dir:
+            jax.profiler.start_trace(prof_dir)
         warm_chain(warm_carry, new_transcript())
+        if prof_dir:
+            jax.profiler.stop_trace()
+            print(f"[profile] trace written under {prof_dir}", flush=True)
         # The e2e sum-vs-native comparison is only meaningful for the full chain.
         if _BASELINE.value and _STOP_AFTER.value is None:
             _compare_baseline(_BASELINE.value, params, stage_times)
