@@ -22,9 +22,12 @@ Reference: `Coordinator::prove` (prover/coordinator.rs) and
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field, replace
 from typing import Sequence
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 from zk_dtypes import babybear_mont as F
@@ -233,6 +236,31 @@ def _commit_cached_mains(
     return cached_by_air, pre_cached
 
 
+_COMMIT_PROFILE = os.environ.get("OPENVM_COMMIT_PROFILE") == "1"
+
+
+class _CommitProfiler:
+    """Coarse, env-guarded region timer for Stage-1 localization (#46).
+
+    No-op unless ``OPENVM_COMMIT_PROFILE=1``. Mirrors ``_ZcProfiler``: each
+    ``mark`` blocks on the region's output arrays and prints the wall-clock
+    since the previous mark, splitting the commit-warm number into the
+    common-main ``stacked_commit`` (NTT + strided Merkle) vs the prelude
+    observe loop (the Poseidon2 absorbs). Off by default so the whole-stage
+    ``_TimedRound`` number stays block-distortion-free."""
+
+    def __init__(self) -> None:
+        self._t = time.monotonic()
+
+    def mark(self, label: str, *outputs: object) -> None:
+        if not _COMMIT_PROFILE:
+            return
+        jax.block_until_ready(outputs)
+        now = time.monotonic()
+        print(f"  [commit {label}] {now - self._t:.3f}s", flush=True)
+        self._t = now
+
+
 class CommitRound(Round):
     """Stage 1 + prelude: commit the stacked PCS, then absorb the prelude
     stream (vk pre-hash, the commitment, then per AIR in *input* order an
@@ -269,6 +297,7 @@ class CommitRound(Round):
     def __call__(
         self, carry: ProveCarry, transcript: DuplexTranscript
     ) -> tuple[ProveCarry, DuplexTranscript, Array]:
+        _p = _CommitProfiler()
         root, pcs_data = stacked_commit(
             self._sponge,
             self._compressor,
@@ -278,6 +307,7 @@ class CommitRound(Round):
             self._k,
             [a.trace for a in carry.sorted_airs],
         )
+        _p.mark("stacked_commit", root, pcs_data.matrix)
 
         # Cached-main commitments are precomputed in ``prove_chain`` (build
         # scope, like native's tracegen) and ride the carry; the prelude below
@@ -328,6 +358,7 @@ class CommitRound(Round):
             _log_prelude_obs_diff(obs, self._obs_log)
         for o in obs:
             transcript = transcript.observe(o)
+        _p.mark("prelude", transcript)
 
         carry = replace(carry, root=root, pcs_data=pcs_data)
         return carry, transcript, root
