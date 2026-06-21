@@ -90,3 +90,14 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   scalar-list polynomial (`_conv` over 0-D coeffs) in `jax.jit` directly —
   hundreds of pytree-leaf scalars regress; vectorize into arrays first.
   (PR #14 took round-0 prism 4.26→1.0s, whole prove −29%, this way.)
+- **Perf: an O(N) Python loop *assembling* an array from per-element device
+  ops (slice / `.at[].set` / `concatenate`) is also a dispatch storm — and
+  the tell is it runs *slower on GPU than CPU* (each op pays host↔device
+  launch latency). Vectorize into one on-device op driven by a
+  host-precomputed static index map. Use a `jnp.take` **gather**, NOT a
+  `.at[idx].set` scatter:** XLA serializes a large GPU scatter into a
+  pathologically slow kernel (a real-block commit assembly went 0.55s→**59s**
+  as a scatter vs 0.55s→**0.037s** as the gather). Invert the scatter into a
+  gather by precomputing, per *output* cell, its source index (a shared
+  sentinel-0 source = a zero for unwritten cells). (PR #78 took commit
+  stacking ~15× on GPU this way.)
