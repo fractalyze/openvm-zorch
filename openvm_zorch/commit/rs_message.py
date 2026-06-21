@@ -24,6 +24,10 @@ op).
 
 from __future__ import annotations
 
+import os
+import time
+
+import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
@@ -40,23 +44,59 @@ __all__ = [
 ]
 
 
-def eval_to_coeff_rs_message(l_skip: int, evals: Array) -> Array:
+_COMMIT_PROFILE = os.environ.get("OPENVM_COMMIT_PROFILE") == "1"
+
+
+class _RsProfiler:
+    """Env-guarded sub-op timer splitting ``rs_code_matrix`` into IFFT /
+    MLE coeff→eval / forward FFT — localizes the #46 commit-GPU pole (RS-NTT,
+    ~0.085s warm) within itself. No-op unless ``OPENVM_COMMIT_PROFILE=1``.
+
+    Mirrors ``trace_commit._StackedProfiler`` one level down. ``rs_code_matrix``
+    runs eagerly (only ``stacked_merkle_commit`` jits), so blocking on each
+    region's output attributes the three ``lax.fft`` / ``lax.scan`` dispatches
+    separately without distorting their fusion."""
+
+    def __init__(self) -> None:
+        self._t = time.monotonic()
+
+    def mark(self, label: str, *outputs: object) -> None:
+        if not _COMMIT_PROFILE:
+            return
+        jax.block_until_ready(outputs)
+        now = time.monotonic()
+        print(f"      [rs {label}] {now - self._t:.3f}s", flush=True)
+        self._t = now
+
+
+def eval_to_coeff_rs_message(
+    l_skip: int, evals: Array, *, _prof: _RsProfiler | None = None
+) -> Array:
     """Per-column RS message of prismalinear evaluations ``(..., 2^(l_skip+n))``."""
     chunk_len = 1 << l_skip
     # The zkx-native fft accepts at most 2-D, so the chunk batch flattens
     # across all leading axes and reshapes back after the transform.
     chunks = evals.reshape(-1, chunk_len)
     coeffs = lax.fft(chunks, "IFFT", chunk_len)
-    return mle_coeffs_to_evals(coeffs).reshape(evals.shape)
+    if _prof is not None:
+        _prof.mark("ifft", coeffs)
+    message = mle_coeffs_to_evals(coeffs).reshape(evals.shape)
+    if _prof is not None:
+        _prof.mark("mle_coeffs_to_evals", message)
+    return message
 
 
 def rs_code_matrix(l_skip: int, log_blowup: int, eval_matrix: Array) -> Array:
     """RS codewords of every column of ``(height, width)``; returns
     ``(height << log_blowup, width)``."""
+    prof = _RsProfiler() if _COMMIT_PROFILE else None
     height = eval_matrix.shape[0]
     rs_height = height << log_blowup
     # Columns are independent; encode them batched on the leading axis.
-    messages = eval_to_coeff_rs_message(l_skip, eval_matrix.T)
+    messages = eval_to_coeff_rs_message(l_skip, eval_matrix.T, _prof=prof)
     pad = jnp.zeros(messages.shape[:-1] + (rs_height - height,), eval_matrix.dtype)
     coeffs = jnp.concatenate([messages, pad], axis=-1)
-    return lax.fft(coeffs, "FFT", rs_height).T
+    codeword = lax.fft(coeffs, "FFT", rs_height).T
+    if prof is not None:
+        prof.mark("forward_fft", codeword)
+    return codeword
