@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+import jax
 from jax import Array
 
 from openvm_zorch.commit.rs_message import rs_code_matrix
@@ -37,6 +38,16 @@ class StackedPcsData:
         return self.tree.root
 
 
+# ``rs_code_matrix`` is pure-eager by definition; jit it here so the whole
+# eval->coeff->zero-pad->forward-NTT pipeline fuses into ONE kernel instead of
+# dispatching each primitive separately. Eager decomposes the composite (the
+# 7 primitives round-trip HBM with no fusion) -- ~63ms vs ~0.5ms jitted at the
+# real common-main dims (2^21, ~2); the forward NTT itself is only ~0.2ms, so
+# the eager dispatch was the whole pole, not NTT FLOP (#46). ``l_skip`` /
+# ``log_blowup`` are static shape params. Mirrors stacked_merkle ``_jitted_commit``.
+_rs_encode = jax.jit(rs_code_matrix, static_argnums=(0, 1))
+
+
 def stacked_commit(
     sponge: Sponge,
     compressor: Compression,
@@ -49,7 +60,7 @@ def stacked_commit(
     """Commit ``traces`` (each ``(height, width)``, pre-sorted by descending
     height). Returns ``(root, data)``."""
     matrix, layout = stacked_matrix(l_skip, n_stack, traces)
-    codeword = rs_code_matrix(l_skip, log_blowup, matrix)
+    codeword = _rs_encode(l_skip, log_blowup, matrix)
     tree = stacked_merkle_commit(
         sponge, compressor, codeword, 1 << k_whir, jit=True
     )
