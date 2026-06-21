@@ -19,7 +19,7 @@ from jax import Array
 
 from openvm_zorch.commit.rs_message import rs_code_matrix
 from openvm_zorch.commit.stacked_merkle import StackedMerkleTree, stacked_merkle_commit
-from openvm_zorch.commit.stacking import StackedLayout, stacked_matrix
+from openvm_zorch.commit.stacking import StackedLayout, stacked_layout, stacked_take
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
 
@@ -38,14 +38,35 @@ class StackedPcsData:
         return self.tree.root
 
 
-# ``rs_code_matrix`` is pure-eager by definition; jit it here so the whole
-# eval->coeff->zero-pad->forward-NTT pipeline fuses into ONE kernel instead of
-# dispatching each primitive separately. Eager decomposes the composite (the
-# 7 primitives round-trip HBM with no fusion) -- ~63ms vs ~0.5ms jitted at the
-# real common-main dims (2^21, ~2); the forward NTT itself is only ~0.2ms, so
-# the eager dispatch was the whole pole, not NTT FLOP (#46). ``l_skip`` /
-# ``log_blowup`` are static shape params. Mirrors stacked_merkle ``_jitted_commit``.
-_rs_encode = jax.jit(rs_code_matrix, static_argnums=(0, 1))
+# Commit as ONE fused kernel: the device gather (stacking), the eval->coeff->
+# zero-pad->forward-NTT RS encode, and the query-strided Poseidon2 Merkle all
+# lower into a single jit. Previously these were three separately-dispatched
+# kernels (eager stacking + a jit per rs_encode + per merkle); fusing removes
+# the inter-op launch/sync boundaries and lets the whole commit pipeline. The
+# host-only pieces -- the layout and the memoized gather *index* (a pure function
+# of trace shapes, native bakes it into tracegen) -- stay outside via
+# ``stacked_layout``; only the data-dependent ``src`` gather + encode + hash
+# trace in. ``sponge`` / ``compressor`` / shape params are static (mirrors
+# stacked_merkle ``_jitted_commit``, which makes its tree static). ``jit=False``
+# on the inner merkle so its fusion marker lowers under THIS jit, not a nested one.
+def _stacked_commit_device(
+    sponge: Sponge,
+    compressor: Compression,
+    l_skip: int,
+    log_blowup: int,
+    k_whir: int,
+    height: int,
+    width: int,
+    gather_dev: Array,
+    traces: Sequence[Array],
+) -> tuple[Array, Array, list[Array]]:
+    matrix = stacked_take(traces, gather_dev, height, width)
+    codeword = rs_code_matrix(l_skip, log_blowup, matrix)
+    tree = stacked_merkle_commit(sponge, compressor, codeword, 1 << k_whir, jit=False)
+    return matrix, tree.backing_matrix, tree.digest_layers
+
+
+_stacked_commit_jit = jax.jit(_stacked_commit_device, static_argnums=(0, 1, 2, 3, 4, 5, 6))
 
 
 def stacked_commit(
@@ -59,9 +80,9 @@ def stacked_commit(
 ) -> tuple[Array, StackedPcsData]:
     """Commit ``traces`` (each ``(height, width)``, pre-sorted by descending
     height). Returns ``(root, data)``."""
-    matrix, layout = stacked_matrix(l_skip, n_stack, traces)
-    codeword = _rs_encode(l_skip, log_blowup, matrix)
-    tree = stacked_merkle_commit(
-        sponge, compressor, codeword, 1 << k_whir, jit=True
+    layout, gather_dev, height, width = stacked_layout(l_skip, n_stack, traces)
+    matrix, codeword, digest_layers = _stacked_commit_jit(
+        sponge, compressor, l_skip, log_blowup, k_whir, height, width, gather_dev, traces
     )
+    tree = StackedMerkleTree(codeword, digest_layers, 1 << k_whir)
     return tree.root, StackedPcsData(layout, matrix, tree)

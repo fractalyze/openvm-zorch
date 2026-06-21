@@ -132,6 +132,45 @@ def _gather_index(l_skip: int, layout: StackedLayout, width: int) -> Array:
     return jnp.asarray(gather)
 
 
+def stacked_layout(
+    l_skip: int, n_stack: int, traces: Sequence[Array]
+) -> tuple[StackedLayout, Array, int, int]:
+    """Host-side ``(layout, gather_index, height, width)`` for the stacked matrix.
+
+    The memoized device gather index + dims are pure functions of the trace
+    *shapes*; the data-dependent gather (``stacked_take``) is left to the caller
+    so it can fuse into the caller's jit (the fused ``stacked_commit``).
+    """
+    sorted_meta = [(t.shape[1], log2_strict_usize(t.shape[0])) for t in traces]
+    layout = StackedLayout.new(l_skip, l_skip + n_stack, sorted_meta)
+    height = layout.height
+    total_cells = sum(max(t.shape[0], 1 << l_skip) * t.shape[1] for t in traces)
+    width = -(-total_cells // height)
+
+    key = (l_skip, n_stack, tuple((t.shape[0], t.shape[1]) for t in traces))
+    gather_dev = _GATHER_INDEX_CACHE.get(key)
+    if gather_dev is None:
+        gather_dev = _gather_index(l_skip, layout, width)
+        _GATHER_INDEX_CACHE[key] = gather_dev
+    return layout, gather_dev, height, width
+
+
+def stacked_take(
+    traces: Sequence[Array], gather_dev: Array, height: int, width: int
+) -> Array:
+    """Data-dependent device gather assembling the ``(height, width)`` stacked
+    matrix from the memoized index. Pure jax — traces into the caller's jit.
+
+    Source cells in the layout's walk order (per matrix, column-major) behind a
+    zero sentinel at index 0; ``t.T.reshape(-1)`` lists column 0's rows, then
+    column 1's, ..., matching the per-column ``sorted_cols`` iteration the index
+    was built from.
+    """
+    dtype = traces[0].dtype
+    src = jnp.concatenate([jnp.zeros((1,), dtype)] + [t.T.reshape(-1) for t in traces])
+    return jnp.take(src, gather_dev).reshape(height, width)
+
+
 def stacked_matrix(
     l_skip: int, n_stack: int, traces: Sequence[Array]
 ) -> tuple[Array, StackedLayout]:
@@ -142,22 +181,5 @@ def stacked_matrix(
     its buffer sizing: width = ceil(total lifted cells / stacked height), which
     can exceed the last occupied column (trailing zero column).
     """
-    dtype = traces[0].dtype
-    sorted_meta = [(t.shape[1], log2_strict_usize(t.shape[0])) for t in traces]
-    layout = StackedLayout.new(l_skip, l_skip + n_stack, sorted_meta)
-    height = layout.height
-    total_cells = sum(max(t.shape[0], 1 << l_skip) * t.shape[1] for t in traces)
-    width = -(-total_cells // height)
-
-    # One on-device GATHER (index memoized). Source cells in the layout's walk
-    # order (per matrix, column-major) behind a zero sentinel at index 0;
-    # ``t.T.reshape(-1)`` lists column 0's rows, then column 1's, ..., matching
-    # the per-column ``sorted_cols`` iteration the index was built from.
-    key = (l_skip, n_stack, tuple((t.shape[0], t.shape[1]) for t in traces))
-    gather_dev = _GATHER_INDEX_CACHE.get(key)
-    if gather_dev is None:
-        gather_dev = _gather_index(l_skip, layout, width)
-        _GATHER_INDEX_CACHE[key] = gather_dev
-
-    src = jnp.concatenate([jnp.zeros((1,), dtype)] + [t.T.reshape(-1) for t in traces])
-    return jnp.take(src, gather_dev).reshape(height, width), layout
+    layout, gather_dev, height, width = stacked_layout(l_skip, n_stack, traces)
+    return stacked_take(traces, gather_dev, height, width), layout
