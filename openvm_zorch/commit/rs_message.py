@@ -69,6 +69,48 @@ class _RsProfiler:
         self._t = now
 
 
+# EXPERIMENT (#46): transpose-free coeff->eval candidates for the small static
+# RS chunk (k = l_skip = 4). zorch's general _butterfly_scan rotates bit labels
+# with a per-level swapaxes (a transpose -- the measured RS-NTT CPU pole); when
+# the bit is processed in its NATURAL middle position the pair recombines with no
+# transpose. Both are byte-identical to mle_coeffs_to_evals (field add commutes).
+# Selected by OPENVM_RS_MLE in {scan (default), unroll, at_add} for A/B timing;
+# only valid for SMALL static k (NOT a zorch general-primitive replacement).
+_RS_MLE = os.environ.get("OPENVM_RS_MLE", "scan")
+
+
+def _coeffs_to_evals_unroll(coeffs: Array) -> Array:
+    from zorch.utils.bits import log2_strict_usize
+
+    n = coeffs.shape[-1]
+    lead = coeffs.shape[:-1]
+    a = coeffs
+    for b in range(log2_strict_usize(n)):
+        x = a.reshape(lead + (n >> (b + 1), 2, 1 << b))
+        lo, hi = x[..., 0, :], x[..., 1, :]
+        a = jnp.stack([lo, lo + hi], axis=-2).reshape(lead + (n,))
+    return a
+
+
+def _coeffs_to_evals_at(coeffs: Array) -> Array:
+    from zorch.utils.bits import log2_strict_usize
+
+    n = coeffs.shape[-1]
+    lead = coeffs.shape[:-1]
+    a = coeffs
+    for b in range(log2_strict_usize(n)):
+        x = a.reshape(lead + (n >> (b + 1), 2, 1 << b))
+        a = x.at[..., 1, :].add(x[..., 0, :]).reshape(lead + (n,))
+    return a
+
+
+_RS_MLE_FN = {
+    "scan": mle_coeffs_to_evals,
+    "unroll": _coeffs_to_evals_unroll,
+    "at_add": _coeffs_to_evals_at,
+}[_RS_MLE]
+
+
 def eval_to_coeff_rs_message(
     l_skip: int, evals: Array, *, _prof: _RsProfiler | None = None
 ) -> Array:
@@ -80,7 +122,7 @@ def eval_to_coeff_rs_message(
     coeffs = lax.fft(chunks, "IFFT", chunk_len)
     if _prof is not None:
         _prof.mark("ifft", coeffs)
-    message = mle_coeffs_to_evals(coeffs).reshape(evals.shape)
+    message = _RS_MLE_FN(coeffs).reshape(evals.shape)
     if _prof is not None:
         _prof.mark("mle_coeffs_to_evals", message)
     return message
