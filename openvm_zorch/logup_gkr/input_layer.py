@@ -27,8 +27,10 @@ unfolded trace height before the stacked lifting. Only the source of
 
 from __future__ import annotations
 
-from typing import Sequence
+import weakref
+from typing import Any, Callable, Sequence
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 from zk_dtypes import babybear_mont as F
@@ -43,6 +45,15 @@ from openvm_zorch.logup_zerocheck.constraints import (
     eval_nodes,
 )
 from zorch.utils.bits import log2_strict_usize
+
+# Per-AIR jitted DAG evaluators, keyed by DAG identity. The per-AIR
+# eval_nodes + eval_interactions must be jitted (one kernel per AIR) or they run
+# as an eager node-by-node dispatch storm — 84% of GKR's warm GPU time (#44).
+# The compiled kernel is reused across proves (a fresh ``jax.jit`` per call would
+# re-trace the whole node walk — the same dispatch cost). The entry is dropped by
+# a ``finalize`` when the DAG is collected, so the cache neither leaks nor returns
+# a stale kernel for a recycled ``id()``.
+_air_eval_cache: dict[int, Callable[..., Any]] = {}
 
 
 def interactions_layout(
@@ -79,6 +90,38 @@ def _parts(
         nxt = jnp.concatenate([m[1:], m[:1]], axis=0) if needs_next else None
         parts.append((m, nxt))
     return parts
+
+
+def _air_pairs(
+    dag: ConstraintsDag, pubs: Sequence[int], nxt: bool
+) -> Callable[..., list[tuple[Array, Array]]]:
+    """One AIR's ``(count, denom)`` builder — ``eval_nodes`` (the node-by-node
+    DAG walk) then ``eval_interactions`` — jitted into a single kernel per AIR
+    (cached; see ``_air_eval_cache`` for why).
+
+    ``dag`` / ``pubs`` / ``nxt`` are static, so they are captured in the closure
+    (``ConstraintsDag`` has dict-valued nodes ⇒ unhashable ⇒ not a
+    ``static_argnum``); ``trace`` / ``cached`` / ``beta_pows`` are the traced
+    args. Mirrors ZeroCheck's per-AIR jit (``_round0_constraint_fns``). The DAG is
+    held weakly but is always live when the kernel traces — the caller holds it to
+    invoke this — so the weak ref never resolves to ``None`` there."""
+    key = id(dag)
+    hit = _air_eval_cache.get(key)
+    if hit is not None:
+        return hit
+
+    dag_ref = weakref.ref(dag)
+
+    @jax.jit
+    def _run(trace, cached, beta_pows):
+        dag_ = dag_ref()
+        sels = _sels(trace.shape[0])
+        node_vals = eval_nodes(dag_, sels, _parts(trace, cached, nxt), pubs)
+        return eval_interactions(dag_, node_vals, beta_pows)
+
+    _air_eval_cache[key] = _run
+    weakref.finalize(dag, _air_eval_cache.pop, key, None)
+    return _run
 
 
 def gkr_input_evals(
@@ -127,9 +170,7 @@ def gkr_input_evals(
         if not dag.interactions:
             pairs.append([])
             continue
-        sels = _sels(trace.shape[0])
-        node_vals = eval_nodes(dag, sels, _parts(trace, cached, nxt), pubs)
-        pairs.append(eval_interactions(dag, node_vals, beta_pows))
+        pairs.append(_air_pairs(dag, pubs, nxt)(trace, tuple(cached), beta_pows))
 
     modulus = pfinfo(F).modulus
     size = 1 << (l_skip + n_logup)
