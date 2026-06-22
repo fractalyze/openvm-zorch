@@ -3,6 +3,13 @@ load("@rules_python//python:defs.bzl", "py_binary")
 
 # Local-only zkbench harness (NOT a test): LogUp-GKR per-phase warm runtime on a
 # prove fixture, mirroring sp1-zorch's bench_logup_gkr_phases. Issue #44.
+# Deps the cuda plugin (loaded by jax at import, needs libcuda — not a CI test)
+# so the per-phase split can be measured on the GPU bar, not just CPU. Run:
+#   CPU: bazel run //openvm_zorch/bench_gkr_boundary:bench_logup_gkr_phases \
+#          -- --fixture_dir /path/to/fixture
+#   GPU: JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+#        bazel run //openvm_zorch/bench_gkr_boundary:bench_logup_gkr_phases \
+#          -- --fixture_dir /path/to/fixture
 py_binary(
     name = "bench_logup_gkr_phases",
     srcs = ["bench_logup_gkr_phases.py"],
@@ -18,8 +25,10 @@ py_binary(
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("jax"),
+        requirement("jax_cuda12_plugin"),
         requirement("numpy"),
         requirement("zk_dtypes"),
         requirement("zkbench"),
+        requirement("zkx_cuda_pjrt"),
     ],
 )
