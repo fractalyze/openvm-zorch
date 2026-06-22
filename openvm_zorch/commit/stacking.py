@@ -99,6 +99,39 @@ class StackedLayout:
         return StackedLayout(l_skip, height, width, sorted_cols, mat_starts)
 
 
+# The gather index is a pure function of the static layout (trace *shapes*, not
+# trace *data*) — native bakes the equivalent into tracegen. Rebuilding it host-
+# side every commit (numpy index assembly + a ``height*width`` host->device
+# transfer, ``height = 2^(l_skip+n_stack)``) is host-bound and spikes under load,
+# dwarfing the device gather + NTT + Merkle it feeds (#46). Memoize the device
+# index by shape signature so only the first commit pays it; every later commit's
+# stacking cost is then just the data-dependent ``src`` concat + ``jnp.take``.
+_GATHER_INDEX_CACHE: dict[tuple, Array] = {}
+
+
+def _gather_index(l_skip: int, layout: StackedLayout, width: int) -> Array:
+    """Device gather index mapping each output cell of the ``(height, width)``
+    stacked matrix to its source cell (sentinel 0 for gaps / zero tail). Pure
+    function of the layout (which already carries each column's height as
+    ``1 << log_height``); memoized by ``stacked_matrix``.
+
+    Each (lifted) source cell's row-major offset is ``(row_idx + i*stride)*width
+    + col_idx``; we invert that into a per-output-cell gather index. Gather, not
+    scatter: XLA's GPU scatter serializes a large index set into a pathologically
+    slow kernel, whereas gather is well-parallelized.
+    """
+    dest = [
+        (s.row_idx + np.arange(1 << s.log_height) * s.stride(l_skip)) * width
+        + s.col_idx
+        for _mat, _j, s in layout.sorted_cols
+    ]
+    gather = np.zeros((layout.height * width,), np.int64)
+    if dest:
+        dest_flat = np.concatenate(dest)
+        gather[dest_flat] = np.arange(dest_flat.size) + 1
+    return jnp.asarray(gather)
+
+
 def stacked_matrix(
     l_skip: int, n_stack: int, traces: Sequence[Array]
 ) -> tuple[Array, StackedLayout]:
@@ -116,29 +149,15 @@ def stacked_matrix(
     total_cells = sum(max(t.shape[0], 1 << l_skip) * t.shape[1] for t in traces)
     width = -(-total_cells // height)
 
-    # Assemble with one on-device GATHER. Each (lifted) source cell's row-major
-    # offset in the (height, width) matrix is ``(row_idx + i*stride)*width +
-    # col_idx`` — a function of the static layout, computed host-side. We invert
-    # that into a per-output-cell gather index and ``take`` the source once.
-    #
-    # Gather, not scatter: XLA's GPU scatter serializes a large index set into a
-    # pathologically slow kernel (~100x the host-bound eager loop here), whereas
-    # gather is well-parallelized. Both replace an O(total columns) loop of
-    # per-column slice/lift/concatenate dispatches that storms the GPU launch
-    # queue (eager dispatch is host-bound there; #46).
-    dest = [
-        (s.row_idx + np.arange(traces[mat_idx].shape[0]) * s.stride(l_skip)) * width
-        + s.col_idx
-        for mat_idx, _j, s in layout.sorted_cols
-    ]
-    # Source cells in the layout's walk order (per matrix, column-major) behind a
-    # zero sentinel at index 0; ``t.T.reshape(-1)`` lists column 0's rows, then
-    # column 1's, ..., matching the per-column ``sorted_cols`` iteration. Output
-    # cells with no source (lifting gaps, zero tail, trailing column) gather the
-    # sentinel.
+    # One on-device GATHER (index memoized). Source cells in the layout's walk
+    # order (per matrix, column-major) behind a zero sentinel at index 0;
+    # ``t.T.reshape(-1)`` lists column 0's rows, then column 1's, ..., matching
+    # the per-column ``sorted_cols`` iteration the index was built from.
+    key = (l_skip, n_stack, tuple((t.shape[0], t.shape[1]) for t in traces))
+    gather_dev = _GATHER_INDEX_CACHE.get(key)
+    if gather_dev is None:
+        gather_dev = _gather_index(l_skip, layout, width)
+        _GATHER_INDEX_CACHE[key] = gather_dev
+
     src = jnp.concatenate([jnp.zeros((1,), dtype)] + [t.T.reshape(-1) for t in traces])
-    gather = np.zeros((height * width,), np.int64)
-    if dest:
-        dest_flat = np.concatenate(dest)
-        gather[dest_flat] = np.arange(dest_flat.size) + 1
-    return jnp.take(src, jnp.asarray(gather)).reshape(height, width), layout
+    return jnp.take(src, gather_dev).reshape(height, width), layout
