@@ -32,6 +32,7 @@ from typing import Any, Callable, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
@@ -174,8 +175,23 @@ def gkr_input_evals(
 
     modulus = pfinfo(F).modulus
     size = 1 << (l_skip + n_logup)
-    num = jnp.zeros(size, EF)
-    den = jnp.zeros(size, EF)
+
+    # Assemble (num, den) on H by a single on-device gather rather than a
+    # per-column ``.at[].set()`` scatter loop: scatters serialize on GPU (the
+    # gather-not-scatter lesson from #78), and one scatter per interaction
+    # column was the eager dispatch storm left in ``input_evals`` after #85.
+    #
+    # Each column contributes its full-height ``(count, denom)`` once to a flat
+    # buffer; a static ``gather_idx`` then maps every hypercube slot to the
+    # source row it reads, encoding both the column's ``row_idx`` offset and the
+    # cyclic lift (``j % height``). Off-image slots point at an appended zero
+    # sentinel, reproducing the additive identity ``0/α`` the old zero-init +
+    # ``den += α`` guard produced. The index is built from the static layout
+    # (heights / row offsets are Python ints), so it costs no device ops.
+    counts: list[Array] = []
+    denoms: list[Array] = []
+    gather_idx = np.full(size, -1, dtype=np.int32)  # -1 → zero sentinel
+    base = 0
     for trace_idx, int_idx, s in layout.sorted_cols:
         count, denom = pairs[trace_idx][int_idx]
         height = traces[trace_idx].shape[0]
@@ -190,7 +206,7 @@ def gkr_input_evals(
         # evaluates to a scalar — a real-block case the synthetic fixture, whose
         # interaction fields were always columns, never hit. The field is the
         # same on every row, so broadcast it to the row axis before the cyclic
-        # lift/tile below (which assumes a per-row ``(height,)`` vector).
+        # lift below (which assumes a per-row ``(height,)`` vector).
         if count.ndim == 0:
             count = jnp.broadcast_to(count, (height,))
         if denom.ndim == 0:
@@ -202,7 +218,20 @@ def gkr_input_evals(
             norm = f_to_ef(jnp.array(pow(reps, modulus - 2, modulus), F))
             count = count * norm
 
-        num = num.at[s.row_idx : s.row_idx + length].set(jnp.tile(count, reps))
-        den = den.at[s.row_idx : s.row_idx + length].set(jnp.tile(denom, reps))
+        counts.append(count)
+        denoms.append(denom)
+        # Slot ``row_idx + j`` reads source row ``j % height`` of this column.
+        gather_idx[s.row_idx : s.row_idx + length] = base + np.arange(length) % height
+        base += height
 
+    # Append the zero sentinel at index ``base`` (the total source height) and
+    # route every off-image slot to it.
+    zero = jnp.zeros((1,), EF)
+    count_flat = jnp.concatenate([*counts, zero])
+    denom_flat = jnp.concatenate([*denoms, zero])
+    gather_idx[gather_idx < 0] = base
+
+    idx = jnp.asarray(gather_idx)
+    num = jnp.take(count_flat, idx, axis=0)
+    den = jnp.take(denom_flat, idx, axis=0)
     return num, den + alpha
