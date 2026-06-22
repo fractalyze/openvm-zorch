@@ -275,9 +275,64 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
         mat_cells = [
             prism.coset_evals(l_skip, m, constraint_degree) for m in trace_mats
         ]
-        parts = _dag_parts(mat_cells, needs_next)
-        node_vals = eval_nodes(dag, sels_cells, parts, public_values)
-        numer, denom = acc_interactions(dag, node_vals, beta_pows, eq_3bs_t)
+        # The two LogUp folds via zorch's constraint_eval composite (#45) — the
+        # same no-materialize lever as the zerocheck fold above. A composite's
+        # eval_fn may not close over a traced value, so β rides in the fold
+        # COEFFICIENTS (the alpha operand), never inside eval_fn:
+        #   numerator  Σ_i eq_3b_i · count_i  — eval_fn returns the count nodes,
+        #     α = eq_3b.
+        #   denominator Σ_i eq_3b_i · h_β_i, with the inner β-RLC
+        #     h_β_i = β^{|m_i|}·(bus_i+1) + Σ_j β^j·node[m_i[j]] FLATTENED into one
+        #     RLC: the node terms fold under α_{i,j} = eq_3b_i·β^j (eval_fn returns
+        #     those nodes) and the row-constant bus term
+        #     Σ_i eq_3b_i·β^{|m_i|}·(bus_i+1) adds outside the fold.
+        # Both are exact field reassociations of acc_interactions, so byte-
+        # identical; each fold re-runs eval_nodes (a 2nd opaque DAG walk that
+        # fuses into the kernel) in exchange for dropping the [..., K] HBM spill.
+        mat_ws = [c.shape[-1] for c in mat_cells]
+        packed = jnp.concatenate([sels_cells, *mat_cells], axis=-1)
+
+        def _nodes(tr):
+            sels = tr[..., :3]
+            cols, off = [], 3
+            for w in mat_ws:
+                cols.append(tr[..., off : off + w])
+                off += w
+            return eval_nodes(dag, sels, _dag_parts(cols, needs_next), public_values)
+
+        def count_fn(tr):
+            nv = _nodes(tr)
+            return jnp.stack([_promote(nv[i.count]) for i in dag.interactions], axis=-1)
+
+        numer = constraint_eval(count_fn, packed, jnp.stack(list(eq_3bs_t)))
+
+        # denominator: flatten the per-interaction β-RLC into one node RLC + the
+        # row-constant bus term.
+        denom_refs = [m for intr in dag.interactions for m in intr.message]
+        denom_coeffs = [
+            eq_3bs_t[i] * beta_pows[j]
+            for i, intr in enumerate(dag.interactions)
+            for j in range(len(intr.message))
+        ]
+        bus_const = sum(
+            (
+                eq_3bs_t[i]
+                * beta_pows[len(intr.message)]
+                * f_to_ef(f_const(intr.bus_index + 1))
+                for i, intr in enumerate(dag.interactions)
+            ),
+            jnp.zeros((), EF),
+        )
+        if denom_refs:
+
+            def denom_fn(tr):
+                nv = _nodes(tr)
+                return jnp.stack([_promote(nv[r]) for r in denom_refs], axis=-1)
+
+            denom = constraint_eval(denom_fn, packed, jnp.stack(denom_coeffs)) + bus_const
+        else:
+            denom = jnp.broadcast_to(bus_const, packed.shape[:-1])
+
         p = (numer * eq_xi[None, None, :]).sum(axis=2)
         q = (denom * eq_xi[None, None, :]).sum(axis=2)
         return p, q  # each (num_cosets, size)
