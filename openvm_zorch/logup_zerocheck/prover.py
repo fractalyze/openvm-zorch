@@ -281,7 +281,9 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 )
 
             alpha = jnp.stack([lambda_pows[k] for k in range(len(dag.constraint_idx))])
-            acc = constraint_eval(eval_fn, packed, alpha).reshape(lead)  # (cosets,size,rows)
+            acc = constraint_eval(
+                eval_fn, packed, alpha, live_width=packed.shape[0]
+            ).reshape(lead)  # (cosets,size,rows)
             weighted = acc * eq_xi[None, None, :]
             return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
     else:
@@ -323,7 +325,9 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
             nv = _nodes(tr)
             return jnp.stack([_promote(nv[i.count]) for i in dag.interactions], axis=-1)
 
-        numer = constraint_eval(count_fn, packed, jnp.stack(list(eq_3bs_t))).reshape(lead)
+        numer = constraint_eval(
+            count_fn, packed, jnp.stack(list(eq_3bs_t)), live_width=packed.shape[0]
+        ).reshape(lead)
 
         # denominator: flatten the per-interaction β-RLC into one node RLC + the
         # row-constant bus term.
@@ -349,7 +353,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 return jnp.stack([_promote(nv[r]) for r in denom_refs], axis=-1)
 
             denom = constraint_eval(
-                denom_fn, packed, jnp.stack(denom_coeffs)
+                denom_fn, packed, jnp.stack(denom_coeffs), live_width=packed.shape[0]
             ).reshape(lead) + bus_const
         else:
             denom = jnp.broadcast_to(bus_const, lead)
