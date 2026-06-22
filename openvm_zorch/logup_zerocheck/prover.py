@@ -198,6 +198,23 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     return [[f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)]
 
 
+def _pack_cols(sels_cells: Array, mat_cells: list[Array]) -> Array:
+    """Pack selector + matrix coset columns into a RANK-2 ``(M, 3 + Σ widths)``
+    ``trace`` for ``constraint_eval`` — sp1-zorch's ``_fold_chip`` layout, which
+    flattens every leading (coset / size / row) dimension into the row axis and
+    stacks the scalar columns on the trailing axis.
+
+    Matching that rank-2 shape is load-bearing on GPU: passing the natural
+    higher-rank ``(num_cosets, size, rows, nc)`` trace tripped the zkx
+    ``EmitConcat`` codegen (a null cmpi index → ``IntegerType::get`` SIGSEGV,
+    fractalyze/zkx#754); the rank-2 form sp1 already compiles cleanly. The caller
+    reshapes the folded ``(M,)`` result back to the leading shape. Column order is
+    selectors then each part's columns, so the ``eval_fn`` slicing is unchanged."""
+    cols = [sels_cells[..., j].reshape(-1) for j in range(sels_cells.shape[-1])]
+    cols += [m[..., j].reshape(-1) for m in mat_cells for j in range(m.shape[-1])]
+    return jnp.stack(cols, axis=-1)  # (M, nc)
+
+
 def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_degree):
     """jitted per-trace round-0 constraint evaluators (#45).
 
@@ -247,7 +264,8 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
             # (selectors ‖ each part's columns); it slices them back, runs the
             # DAG, and returns the constraint nodes stacked on the trailing axis.
             mat_ws = [c.shape[-1] for c in mat_cells]
-            packed = jnp.concatenate([sels_cells, *mat_cells], axis=-1)
+            lead = sels_cells.shape[:-1]  # (num_cosets, size, rows)
+            packed = _pack_cols(sels_cells, mat_cells)  # (M, nc)
 
             def eval_fn(tr):
                 sels = tr[..., :3]
@@ -263,7 +281,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 )
 
             alpha = jnp.stack([lambda_pows[k] for k in range(len(dag.constraint_idx))])
-            acc = constraint_eval(eval_fn, packed, alpha)  # (num_cosets, size, rows)
+            acc = constraint_eval(eval_fn, packed, alpha).reshape(lead)  # (cosets,size,rows)
             weighted = acc * eq_xi[None, None, :]
             return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
     else:
@@ -290,7 +308,8 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
         # identical; each fold re-runs eval_nodes (a 2nd opaque DAG walk that
         # fuses into the kernel) in exchange for dropping the [..., K] HBM spill.
         mat_ws = [c.shape[-1] for c in mat_cells]
-        packed = jnp.concatenate([sels_cells, *mat_cells], axis=-1)
+        lead = sels_cells.shape[:-1]  # (num_cosets, size, rows)
+        packed = _pack_cols(sels_cells, mat_cells)  # (M, nc)
 
         def _nodes(tr):
             sels = tr[..., :3]
@@ -304,7 +323,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
             nv = _nodes(tr)
             return jnp.stack([_promote(nv[i.count]) for i in dag.interactions], axis=-1)
 
-        numer = constraint_eval(count_fn, packed, jnp.stack(list(eq_3bs_t)))
+        numer = constraint_eval(count_fn, packed, jnp.stack(list(eq_3bs_t))).reshape(lead)
 
         # denominator: flatten the per-interaction β-RLC into one node RLC + the
         # row-constant bus term.
@@ -329,9 +348,11 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 nv = _nodes(tr)
                 return jnp.stack([_promote(nv[r]) for r in denom_refs], axis=-1)
 
-            denom = constraint_eval(denom_fn, packed, jnp.stack(denom_coeffs)) + bus_const
+            denom = constraint_eval(
+                denom_fn, packed, jnp.stack(denom_coeffs)
+            ).reshape(lead) + bus_const
         else:
-            denom = jnp.broadcast_to(bus_const, packed.shape[:-1])
+            denom = jnp.broadcast_to(bus_const, lead)
 
         p = (numer * eq_xi[None, None, :]).sum(axis=2)
         q = (denom * eq_xi[None, None, :]).sum(axis=2)
