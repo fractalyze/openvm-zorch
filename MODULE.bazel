@@ -24,13 +24,17 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "zorch", version = "0.0.0")
 git_override(
     module_name = "zorch",
-    # main @ #284 — the homogeneous `zorch.sumcheck.prove` scan gains a truncated
-    # round-poly domain (eval_start → the {s(1), s(2)} wire form) and an
-    # extension-field fold challenge (sampled via the shared
-    # `transcript.reinterpret_challenge`), which Stage-4 stacking now drives
-    # (openvm-zorch #43; Stage-3 zerocheck #45 reuses it). Also advances the
-    # routine #277→#284 zorch pin (the jax/zk-dtypes wheels here already match —
-    # no requirements change; byte-match re-validated). Prior lineage retained:
+    # main @ #322 — the dedicated-fusion `zorch.sumcheck` marker now routes the
+    # truncated round-poly domain (eval_start → the {s(1), s(2)} wire form) AND
+    # the extension-field fold challenge through `_prove_marked` (#306); before,
+    # a non-default `eval_start` fell through to the plain scan, so a register-
+    # resident sumcheck was unreachable for those shapes. Stage-2 GKR
+    # `fractional_sumcheck` drives this (openvm-zorch #44), the same truncated +
+    # EF round Stage-4 stacking (#43) and Stage-3 zerocheck (#45) use. The
+    # jax/zk-dtypes wheels match openvm's (0.0.5.dev20260623074144) — no
+    # requirements change; byte-match re-validated. Prior lineage (#284): the
+    # scan first gained the truncated domain + EF challenge (plain-scan only,
+    # which Stage-4 stacking already drove). Earlier lineage retained:
     # main @ #277 — generic multi-commitment WHIR: WhirProver.open takes a
     # list of WhirProverData and μ-combines columns across all commitments
     # (common first, matching the reference committed_mats.flat_map(columns)),
@@ -45,7 +49,7 @@ git_override(
     # `zorch.poseidon2` composite.attributes form the pinned zkx wheel
     # requires; the older b2a15826 pin emitted the legacy
     # `poseidon2:16:4:13:7` string the wheel rejects — CI red).
-    commit = "d8a9bd6dc99384f5e9f23908a86a978e4e98b656",
+    commit = "3ee8f9e730b7083da37f9655f0d628c48bf1ed05",
     remote = "https://github.com/fractalyze/zorch.git",
 )
 

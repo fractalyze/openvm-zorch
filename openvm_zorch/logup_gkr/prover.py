@@ -1,10 +1,10 @@
 """SWIRL's fractional sumcheck over the LogUp-GKR circuit (dense variant).
 
 Reuses zorch's dense circuit (``GkrLayer`` / ``build_pyramid`` — the stride-2
-pair fold is byte-identical to the reference's segment tree) and its sumcheck
-primitives (``lift_to_domain`` / ``fold_pair``), but drives the per-layer
-sumcheck itself: the reference's transcript differs from zorch's own GKR
-protocol in form, not structure —
+pair fold is byte-identical to the reference's segment tree) and drives each
+layer's per-variable sumcheck through the generic ``zorch.sumcheck.prove`` (a
+register-resident marker when the transcript supports it). The reference's
+transcript differs from zorch's own GKR protocol in form, not structure —
 
 - round polynomials are sent as evaluations on ``{1, 2, 3}`` (the verifier
   infers ``s(0)`` from the previous claim); zorch observes all of ``{0..3}``;
@@ -24,46 +24,40 @@ plus the ξ padding loop of ``prove_zerocheck_and_logup`` (mod.rs).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from jax import Array
+from jax import Array, lax
 
-from openvm_zorch.transcript import sample_ext
+from openvm_zorch.fields import EF
+from openvm_zorch.transcript import EF_LIMBS, sample_ext
 from zorch.logup_gkr.circuit import GkrLayer, build_pyramid
 from zorch.poly.eq import expand_eq_to_hypercube
-from zorch.sumcheck.prover import fold_pair
+from zorch.sumcheck.prover import prove as sumcheck_prove
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
-# Stage-2 ran fully eager, and the per-round Fiat-Shamir dominated it: a single
-# eager `observe + sample_ext` dispatches the width-16 Poseidon2 permutation as
-# thousands of tiny ops (~4.4 s/round measured), so the ~O(rounds²) binding
-# steps cost ~174 s = 35% of prove — while the round *arithmetic* is only a few
-# seconds. jit collapses each Poseidon2 permutation to one kernel (~70000×
-# measured on observe+sample). Every transcript touch below is therefore jitted.
-# GKR's round loop carries no per-round PoW grind (unlike WHIR, whose grind
-# host-reads and breaks the trace), so the transcript threads through @jit
-# cleanly. Byte-identical: jit fuses without reassociating field/Poseidon2 ops.
-# The transcript runs through the shape-stable `_observe`/`_sample` islands rather
-# than bundled into the variable-width round arithmetic — a compile lever explained
-# at `_round_poly` (Poseidon2 lowered once, not once per layer width).
+# Each layer's per-variable sumcheck runs on the generic `zorch.sumcheck.prove`
+# driver, not an eager Python round loop. An eager loop dispatches
+# `_round_poly`/observe/sample/fold per round — an ~O(rounds²) chain of tiny
+# sequential kernels over data that halves each fold, launch-bound on GPU (not
+# FLOP-bound). When the transcript carries a dedicated-fusion Poseidon2
+# (`has_dedicated_fusion`), `prove` wraps the whole binding scan — round poly,
+# fold, and the Fiat-Shamir absorb/squeeze — in one `zorch.sumcheck` composite a
+# vendor codegens register-resident, collapsing that storm into a single kernel.
+# The SWIRL form rides the marker as `eval_start=1` (the `{1,2,3}` sent domain),
+# a custom `_GkrSummand` (λ on the denominator, via the combine-agnostic
+# `zorch.sumcheck.combine` seam), and an EF fold challenge (`challenge_dtype=EF`).
+# The marker decomposes to the same scan when unrecognized, so the path is
+# byte-identical. Only the SWIRL-specific transcript wiring stays here as
+# shape-stable `_observe`/`_sample`/`_observe_sample` islands: the head (q_root,
+# layer-1 claims, μ_1) and each layer's claims-observe + μ-sample.
 #
 # Round poly degree: eq (deg 1) * projective fraction addition (deg 2) = 3, so
 # four evals {0,1,2,3} determine it — but the prover sends only {1,2,3} (the
-# verifier infers s(0) from the running claim s(0)+s(1) = prev). Lifting to the
-# SENT domain skips the discarded u=0 across all five MLEs.
-_SENT_US = (1, 2, 3)
-
-
-def _lift_sent(lo: Array, hi: Array) -> Array:
-    """Lift a split pair to the SENT eval domain ``{1,2,3}`` (skips u=0).
-
-    ``f[u] = lo + u*(hi - lo)``, shape ``(3, *lo.shape)``. ``us`` uses
-    ``jnp.stack`` (not ``jnp.arange``, whose iota is unsupported for extension
-    dtypes)."""
-    us = jnp.stack([jnp.array(u, dtype=lo.dtype) for u in _SENT_US])
-    return lo + us.reshape((-1,) + (1,) * lo.ndim) * (hi - lo)
+# verifier infers s(0) from the running claim s(0)+s(1) = prev). `eval_start=1`
+# gives the scan that truncated SENT domain.
 
 
 @jax.jit
@@ -85,42 +79,63 @@ def _observe_sample(
     """Absorb ``values`` then squeeze one challenge in a SINGLE fused Poseidon2
     region — one dispatch in place of a separate ``_observe`` then ``_sample``.
 
-    The per-layer sumcheck is host-launch-bound on GPU: the O(rounds²) binding
-    loop fires hundreds of tiny sequential kernels, so each saved launch counts.
-    Every absorb on the hot path is immediately followed by its squeeze
-    (round-poly → challenge, claims → μ), so fusing the pair halves the
-    transcript launches there. Byte-identical to ``_sample(_observe(...))`` — the
-    same Poseidon2 absorb/squeeze ops in the same order, just one jit boundary.
-    ``values`` is shape-stable per call site ((3,) round polys, (4,) claims), so
-    Poseidon2 still lowers once per site, not per round width."""
+    Used for the claims → μ merge between layers (the binding-loop transcript now
+    rides the ``zorch.sumcheck`` marker). Each layer's claims absorb is
+    immediately followed by its μ squeeze, so fusing the pair saves a launch per
+    layer. Byte-identical to ``_sample(_observe(...))`` — the same Poseidon2
+    absorb/squeeze ops in the same order, just one jit boundary. ``values`` is
+    shape-stable ((4,) claims), so Poseidon2 lowers once."""
     return sample_ext(transcript.observe(values))
 
 
-# The round splits into two variable-width arithmetic islands (`_round_poly`,
-# `_round_fold`) with the Fiat-Shamir transcript run between them via the
-# shape-stable `_observe`/`_sample` islands above. Keeping the width-16 Poseidon2
-# OUT of the per-round arithmetic is a COMPILE lever, not a warm one: the layer
-# loop feeds widths 2^1..2^(rounds-1), so anything jitted with the state re-lowers
-# once per width — and the Poseidon2 composite (sponge state / (3,) poly / (4,)
-# challenge, all width-invariant) is ~3.6 s to lower vs ~0.1 s for the bare
-# arithmetic (measured). Bundling it into the round step re-paid that ~3.6 s every
-# width (~90% of GKR compile); routing the transcript through the stable islands
-# lowers Poseidon2 ONCE. Warm runtime is unchanged — both keep one fused permutation
-# kernel per round — and the split is byte-identical (same ops, same order).
-@jax.jit
-def _round_poly(state: list[Array], lam: Array) -> Array:
-    """The sent round poly s(1,2,3). λ weights the denominator term — opposite of
-    logup_combine. Binds the LSB: pairs adjacent entries (the reference's MLE
-    fold). No transcript: only this cheap arithmetic re-lowers per layer width."""
-    eq, p0, q0, p1, q1 = (_lift_sent(a[0::2], a[1::2]) for a in state)
-    return jnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
+@dataclass(frozen=True)
+class _GkrSummand:
+    """The SWIRL LogUp round summand the ``zorch.sumcheck`` scan folds, over the
+    five MLE factors ``[eq, p0, q0, p1, q1]``: ``eq·((p0·q1 + p1·q0) + λ·q0·q1)``.
+
+    Degree 3 (eq deg 1 × the projective fraction-add deg 2). λ weights the
+    *denominator* term — opposite of zorch's ``logup_combine`` (numerator), which
+    is why this rides the generic scan with a local summand rather than zorch's
+    ``LogupSumcheckRound``. λ is a loop-invariant scalar (fixed across the layer's
+    rounds), threaded via ``combine_scalars`` — the marker carries it as the
+    ``[combine scalars]`` operand segment of the nested ``zorch.sumcheck.combine``
+    region, so the custom combine rides the recognizer with no zkx change."""
+
+    lam: Array
+
+    @property
+    def degree(self) -> int:
+        return 3
+
+    def combine_scalars(self) -> tuple[Array, ...]:
+        return (self.lam,)
+
+    def combine(self, scalars: Sequence[Array], *factors: Array) -> Array:
+        (lam,) = scalars
+        eq, p0, q0, p1, q1 = factors
+        return eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1))
+
+    def _combine(self, *factors: Array) -> Array:
+        # Required by the SumcheckSummand protocol; the scan path calls `combine`.
+        return self.combine(self.combine_scalars(), *factors)
 
 
 @jax.jit
-def _round_fold(state: list[Array], r: Array) -> list[Array]:
-    """Fold each MLE at challenge r over the same LSB pairing as `_round_poly`.
-    Variable width, no transcript."""
-    return [fold_pair(a[0::2], a[1::2], r) for a in state]
+def _marked_sumcheck(lam, state, transcript):
+    """One layer's per-variable sumcheck through the marker, jitted with a STABLE
+    identity so the `zorch.sumcheck` composite lowers once per layer width and
+    caches across layers and proofs — the amortization the eager islands get from
+    their module-level `@jax.jit`. Calling `zorch.sumcheck.prove` directly in the
+    eager layer loop instead re-traces the fresh composite body on every call (no
+    cache), which dominates warm runtime."""
+    return sumcheck_prove(
+        _GkrSummand(lam),
+        state,
+        transcript,
+        eval_start=1,
+        challenge_dtype=EF,
+        challenge_limbs=EF_LIMBS,
+    )
 
 
 @dataclass(frozen=True)
@@ -203,36 +218,32 @@ def fractional_sumcheck(
         transcript, lam = _sample(transcript)
         lambdas.append(lam)
 
+        # Bit-reverse each MLE so the scan's MSB-first block fold reproduces the
+        # reference's LSB-first stride fold (mirrors Stage-4 stacking).
         state = [
-            _eq_table(xi),
-            layer.numerator_0,
-            layer.denominator_0,
-            layer.numerator_1,
-            layer.denominator_1,
+            lax.bit_reverse(a, dimensions=(0,))
+            for a in (
+                _eq_table(xi),
+                layer.numerator_0,
+                layer.denominator_0,
+                layer.numerator_1,
+                layer.denominator_1,
+            )
         ]
-        rho: list[Array] = []
-        round_polys = []
-        for _ in range(round_):
-            s_evals = _round_poly(state, lam)
-            transcript, r_round = _observe_sample(transcript, s_evals)
-            state = _round_fold(state, r_round)
-            rho.append(r_round)
-            round_polys.append(s_evals)
+        final_state, transcript, msgs = _marked_sumcheck(lam, state, transcript)
+        rho = list(msgs.challenge)
+        round_polys = msgs.round_poly  # (round_, 3): the sent evals s(1,2,3)
 
-        folded = GkrLayer(
-            numerator_0=state[1],
-            numerator_1=state[3],
-            denominator_0=state[2],
-            denominator_1=state[4],
-            num_interaction_variables=0,
-        )
-        claims = layer_claims(folded)
+        # Folded claims (num0, den0, num1, den1) at the bound point; the eq factor
+        # (final_state[0]) is not on the wire.
+        _, num0, den0, num1, den1 = (f[0] for f in final_state)
+        claims = jnp.stack([num0, den0, num1, den1])
         transcript, mu = _observe_sample(transcript, claims)
         # ξ^{(j)} = (μ_j, ρ): the merge challenge is the new first coordinate.
         xi = [mu] + rho
 
         claims_per_layer.append(claims)
-        sumcheck_polys.append(jnp.stack(round_polys))
+        sumcheck_polys.append(round_polys)
         mus.append(mu)
         rhos.append(rho)
 

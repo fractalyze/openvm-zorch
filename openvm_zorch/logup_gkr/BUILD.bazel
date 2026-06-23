@@ -36,6 +36,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//openvm_zorch:fields",
         "//openvm_zorch:transcript",
         "@zorch//zorch:transcript",
         "@zorch//zorch/logup_gkr",
