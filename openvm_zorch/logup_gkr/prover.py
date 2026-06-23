@@ -78,6 +78,24 @@ def _sample(transcript: DuplexTranscript) -> tuple[DuplexTranscript, Array]:
     return sample_ext(transcript)
 
 
+@jax.jit
+def _observe_sample(
+    transcript: DuplexTranscript, values: Array
+) -> tuple[DuplexTranscript, Array]:
+    """Absorb ``values`` then squeeze one challenge in a SINGLE fused Poseidon2
+    region — one dispatch in place of a separate ``_observe`` then ``_sample``.
+
+    The per-layer sumcheck is host-launch-bound on GPU: the O(rounds²) binding
+    loop fires hundreds of tiny sequential kernels, so each saved launch counts.
+    Every absorb on the hot path is immediately followed by its squeeze
+    (round-poly → challenge, claims → μ), so fusing the pair halves the
+    transcript launches there. Byte-identical to ``_sample(_observe(...))`` — the
+    same Poseidon2 absorb/squeeze ops in the same order, just one jit boundary.
+    ``values`` is shape-stable per call site ((3,) round polys, (4,) claims), so
+    Poseidon2 still lowers once per site, not per round width."""
+    return sample_ext(transcript.observe(values))
+
+
 # The round splits into two variable-width arithmetic islands (`_round_poly`,
 # `_round_fold`) with the Fiat-Shamir transcript run between them via the
 # shape-stable `_observe`/`_sample` islands above. Keeping the width-16 Poseidon2
@@ -172,8 +190,7 @@ def fractional_sumcheck(
 
     # Layer 1 is checked by the verifier directly: claims, then μ_1.
     claims = layer_claims(floor)
-    transcript = _observe(transcript, claims)
-    transcript, mu_1 = _sample(transcript)
+    transcript, mu_1 = _observe_sample(transcript, claims)
     xi = [mu_1]
 
     claims_per_layer = [claims]
@@ -197,8 +214,7 @@ def fractional_sumcheck(
         round_polys = []
         for _ in range(round_):
             s_evals = _round_poly(state, lam)
-            transcript = _observe(transcript, s_evals)
-            transcript, r_round = _sample(transcript)
+            transcript, r_round = _observe_sample(transcript, s_evals)
             state = _round_fold(state, r_round)
             rho.append(r_round)
             round_polys.append(s_evals)
@@ -211,8 +227,7 @@ def fractional_sumcheck(
             num_interaction_variables=0,
         )
         claims = layer_claims(folded)
-        transcript = _observe(transcript, claims)
-        transcript, mu = _sample(transcript)
+        transcript, mu = _observe_sample(transcript, claims)
         # ξ^{(j)} = (μ_j, ρ): the merge challenge is the new first coordinate.
         xi = [mu] + rho
 
