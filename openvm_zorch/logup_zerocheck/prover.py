@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import jax
@@ -215,6 +216,20 @@ def _pack_cols(sels_cells: Array, mat_cells: list[Array]) -> Array:
     return jnp.stack(cols, axis=-1)  # (M, nc)
 
 
+def _stack_promote(node_vals: Sequence[Array], refs: Sequence[int]) -> Array:
+    """Stack promoted DAG-node values along a new trailing axis for a fold.
+
+    A DAG node is per-row (trace variables) or row-constant (``constant`` /
+    ``public`` nodes evaluate to scalars). The reference ``acc_*`` folds mix the
+    two via broadcasting addition; ``jnp.stack`` needs identical shapes, so
+    broadcast the row-constants up to the common leading shape first. Byte-
+    identical to weighting each node in place, since the fold is linear per
+    node."""
+    vals = [_promote(node_vals[r]) for r in refs]
+    shape = jnp.broadcast_shapes(*(v.shape for v in vals))
+    return jnp.stack([jnp.broadcast_to(v, shape) for v in vals], axis=-1)
+
+
 def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_degree):
     """jitted per-trace round-0 constraint evaluators (#45).
 
@@ -276,9 +291,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 node_vals = eval_nodes(
                     dag, sels, _dag_parts(cols, needs_next), public_values
                 )
-                return jnp.stack(
-                    [_promote(node_vals[idx]) for idx in dag.constraint_idx], axis=-1
-                )
+                return _stack_promote(node_vals, dag.constraint_idx)
 
             alpha = jnp.stack([lambda_pows[k] for k in range(len(dag.constraint_idx))])
             acc = constraint_eval(
@@ -323,7 +336,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
 
         def count_fn(tr):
             nv = _nodes(tr)
-            return jnp.stack([_promote(nv[i.count]) for i in dag.interactions], axis=-1)
+            return _stack_promote(nv, [i.count for i in dag.interactions])
 
         numer = constraint_eval(
             count_fn, packed, jnp.stack(list(eq_3bs_t)), live_width=packed.shape[0]
@@ -350,11 +363,17 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
 
             def denom_fn(tr):
                 nv = _nodes(tr)
-                return jnp.stack([_promote(nv[r]) for r in denom_refs], axis=-1)
+                return _stack_promote(nv, denom_refs)
 
-            denom = constraint_eval(
-                denom_fn, packed, jnp.stack(denom_coeffs), live_width=packed.shape[0]
-            ).reshape(lead) + bus_const
+            denom = (
+                constraint_eval(
+                    denom_fn,
+                    packed,
+                    jnp.stack(denom_coeffs),
+                    live_width=packed.shape[0],
+                ).reshape(lead)
+                + bus_const
+            )
         else:
             denom = jnp.broadcast_to(bus_const, lead)
 
