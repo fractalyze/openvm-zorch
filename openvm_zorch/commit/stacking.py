@@ -91,9 +91,7 @@ class StackedLayout:
                         raise ValueError(f"column overflow at stacked col {col_idx}")
                     col_idx += 1
                     row_idx = 0
-                sorted_cols.append(
-                    (mat_idx, j, StackedSlice(col_idx, row_idx, log_ht))
-                )
+                sorted_cols.append((mat_idx, j, StackedSlice(col_idx, row_idx, log_ht)))
                 row_idx += slice_len
         width = col_idx + (1 if row_idx != 0 else 0)
         return StackedLayout(l_skip, height, width, sorted_cols, mat_starts)
@@ -109,26 +107,33 @@ class StackedLayout:
 _GATHER_INDEX_CACHE: dict[tuple, Array] = {}
 
 
-def _gather_index(l_skip: int, layout: StackedLayout, width: int) -> Array:
+def _gather_index(
+    l_skip: int,
+    layout: StackedLayout,
+    width: int,
+    trace_hw: Sequence[tuple[int, int]],
+) -> Array:
     """Device gather index mapping each output cell of the ``(height, width)``
-    stacked matrix to its source cell (sentinel 0 for gaps / zero tail). Pure
-    function of the layout (which already carries each column's height as
-    ``1 << log_height``); memoized by ``stacked_matrix``.
+    stacked matrix to its source cell in the ROW-MAJOR ``src`` (each trace
+    flattened in place, sentinel 0 at index 0 for gaps / zero tail). Pure
+    function of the layout + trace shapes; memoized by ``stacked_matrix``.
 
-    Each (lifted) source cell's row-major offset is ``(row_idx + i*stride)*width
-    + col_idx``; we invert that into a per-output-cell gather index. Gather, not
-    scatter: XLA's GPU scatter serializes a large index set into a pathologically
-    slow kernel, whereas gather is well-parallelized.
+    Source row ``i`` of column ``j`` of trace ``mat`` lands at output offset
+    ``(row_idx + i*stride)*width + col_idx`` and lives at row-major source offset
+    ``off[mat] + i*w[mat] + j`` (``off[mat]`` = the cells of earlier traces, +1
+    for the sentinel). Folding that source layout into this cached host index is
+    what lets ``stacked_matrix`` flatten each trace row-major (a free view)
+    instead of materialising a ``t.T`` transpose on the device every commit.
+    Gather, not scatter: XLA's GPU scatter serializes a large index set into a
+    pathologically slow kernel, whereas gather is well-parallelized.
     """
-    dest = [
-        (s.row_idx + np.arange(1 << s.log_height) * s.stride(l_skip)) * width
-        + s.col_idx
-        for _mat, _j, s in layout.sorted_cols
-    ]
+    off = (np.cumsum([0, *(h * w for h, w in trace_hw)]) + 1)[:-1]
     gather = np.zeros((layout.height * width,), np.int64)
-    if dest:
-        dest_flat = np.concatenate(dest)
-        gather[dest_flat] = np.arange(dest_flat.size) + 1
+    for mat_idx, j, s in layout.sorted_cols:
+        w_m = trace_hw[mat_idx][1]
+        rows = np.arange(1 << s.log_height)
+        dest = (s.row_idx + rows * s.stride(l_skip)) * width + s.col_idx
+        gather[dest] = off[mat_idx] + rows * w_m + j
     return jnp.asarray(gather)
 
 
@@ -149,15 +154,16 @@ def stacked_matrix(
     total_cells = sum(max(t.shape[0], 1 << l_skip) * t.shape[1] for t in traces)
     width = -(-total_cells // height)
 
-    # One on-device GATHER (index memoized). Source cells in the layout's walk
-    # order (per matrix, column-major) behind a zero sentinel at index 0;
-    # ``t.T.reshape(-1)`` lists column 0's rows, then column 1's, ..., matching
-    # the per-column ``sorted_cols`` iteration the index was built from.
-    key = (l_skip, n_stack, tuple((t.shape[0], t.shape[1]) for t in traces))
+    # One on-device GATHER (index memoized). Each trace is flattened ROW-MAJOR
+    # (``t.reshape(-1)`` — a free view, no transpose copy) behind a zero sentinel
+    # at index 0; the per-cell source offset that used to require a device ``t.T``
+    # transpose is folded into the cached gather index instead.
+    trace_hw = [(t.shape[0], t.shape[1]) for t in traces]
+    key = (l_skip, n_stack, tuple(trace_hw))
     gather_dev = _GATHER_INDEX_CACHE.get(key)
     if gather_dev is None:
-        gather_dev = _gather_index(l_skip, layout, width)
+        gather_dev = _gather_index(l_skip, layout, width, trace_hw)
         _GATHER_INDEX_CACHE[key] = gather_dev
 
-    src = jnp.concatenate([jnp.zeros((1,), dtype)] + [t.T.reshape(-1) for t in traces])
+    src = jnp.concatenate([jnp.zeros((1,), dtype)] + [t.reshape(-1) for t in traces])
     return jnp.take(src, gather_dev).reshape(height, width), layout
