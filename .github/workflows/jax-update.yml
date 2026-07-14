@@ -6,10 +6,10 @@
 #
 # Like sp1-zorch, openvm-zorch pins jax-cuda12-plugin in lockstep with the other
 # jax wheels (see requirements.in), so all four bump together. zk-dtypes is
-# pinned separately at ==0.0.6 and is deliberately NOT in the bump set: the
+# pinned separately at ==0.0.8 and is deliberately NOT in the bump set: the
 # pip-bump action rewrites `pkg==.*` to the jax version, so listing zk-dtypes
-# would clobber 0.0.6 with a nonexistent jax-versioned wheel (cf. #32 / PR #36 —
-# the EF lowering needs efinfo.modulus_low_coeffs, added in zk_dtypes 0.0.6).
+# would clobber 0.0.8 with a nonexistent jax-versioned wheel (its ABI is
+# coupled to the jax line, so bump it by hand when a new jax build needs it).
 # The lock regen keeps zk-dtypes at its pin; if a future jax build needs a newer
 # zk-dtypes, bump that pin manually in the same way. The zorch git pin in
 # MODULE.bazel is likewise a separate, manual bump — the pip-bump action only
@@ -33,11 +33,11 @@ jobs:
         with:
           token: ${{ secrets.BUMPER_GH_PAT }}
 
-      - name: Bump jax/jaxlib/jax-cuda12-plugin/zkx-cuda-pjrt
+      - name: Bump jax/jaxlib/jax-cuda12-pjrt/jax-cuda12-plugin
         uses: fractalyze/github-actions/pip-bump@main
         with:
           upstream_repo: jax
           version: ${{ github.event.client_payload.jax_version }}
           upstream_commit: ${{ github.event.client_payload.commit }}
-          packages: jax jaxlib jax-cuda12-plugin zkx-cuda-pjrt
+          packages: jax jaxlib jax-cuda12-pjrt jax-cuda12-plugin
           github_token: ${{ secrets.BUMPER_GH_PAT }}

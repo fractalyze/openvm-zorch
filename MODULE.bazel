@@ -24,28 +24,17 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "zorch", version = "0.0.0")
 git_override(
     module_name = "zorch",
-    # main @ #284 — the homogeneous `zorch.sumcheck.prove` scan gains a truncated
-    # round-poly domain (eval_start → the {s(1), s(2)} wire form) and an
-    # extension-field fold challenge (sampled via the shared
-    # `transcript.reinterpret_challenge`), which Stage-4 stacking now drives
-    # (openvm-zorch #43; Stage-3 zerocheck #45 reuses it). Also advances the
-    # routine #277→#284 zorch pin (the jax/zk-dtypes wheels here already match —
-    # no requirements change; byte-match re-validated). Prior lineage retained:
-    # main @ #277 — generic multi-commitment WHIR: WhirProver.open takes a
-    # list of WhirProverData and μ-combines columns across all commitments
-    # (common first, matching the reference committed_mats.flat_map(columns)),
-    # opening each commitment's tree at round 0. The A5 cached-main prover
-    # (#59) drives this to open the cached mains alongside the common main.
-    # Carries forward the #257 lineage (eval_coeffs via lax.scan, not a
-    # Python-unrolled power chain — removes the ptxas 32 KB kernel-parameter
-    # overflow in WHIR's _island_ood at stacked >= 2^16), the generic WHIR
-    # final-residual lineage (#250 prover + per-query sampling, #251 verifier)
-    # this consumer's Stage-5 prove AND verify drive, the WHIR PCS lineage
-    # (#234/#236/#237/#242–#246), and >= #212 (poseidon2 marker on the
-    # `zorch.poseidon2` composite.attributes form the pinned zkx wheel
-    # requires; the older b2a15826 pin emitted the legacy
-    # `poseidon2:16:4:13:7` string the wheel rejects — CI red).
-    commit = "d8a9bd6dc99384f5e9f23908a86a978e4e98b656",
+    # main @ #443 — advanced in lockstep with the jax 0.0.5 -> 0.10.0 wheel
+    # migration. The zkx-marker contract requires it: an old-jax zorch emits
+    # composite markers a new-jax wheel rejects, so the pin and the wheel set
+    # move together. Relative to the prior #284 pin this crosses the #329
+    # merkle/hash API modernization and #283's JAX-native jagged PCS +
+    # `sumcheck.prover` -> `transcript` state-leaf move; the SWIRL surface this
+    # consumer drives is retained (multi-commitment WHIR open, truncated
+    # round-poly domain + extension-field fold challenge, eval_coeffs via
+    # lax.scan). sp1-zorch validated this exact commit on jax
+    # 0.10.0.dev20260709073514.
+    commit = "3c0a0208a69a573584d3b1004f118a8620f60bf6",
     remote = "https://github.com/fractalyze/zorch.git",
 )
 
@@ -57,7 +46,7 @@ python.toolchain(
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
-    # jax / jaxlib / zkx-cuda-pjrt are published on the Fractalyze index.
+    # jax / jaxlib / jax-cuda12-pjrt are published on the Fractalyze index.
     extra_pip_args = ["--extra-index-url=https://fractalyze.github.io/pypi/simple/"],
     hub_name = "openvm_zorch_pip",
     python_version = "3.11",

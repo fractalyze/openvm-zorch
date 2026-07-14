@@ -40,7 +40,7 @@ py_library(
         "@zorch//zorch:transcript",
         "@zorch//zorch/logup_gkr",
         "@zorch//zorch/poly",
-        "@zorch//zorch/sumcheck",
+        "//openvm_zorch:_sumcheck_scan",
         "@zorch//zorch/utils:bits",
         requirement("jax"),
     ],
@@ -111,6 +111,6 @@ py_binary(
         requirement("numpy"),
         requirement("zk_dtypes"),
         requirement("zkbench"),
-        requirement("zkx_cuda_pjrt"),
+        requirement("jax_cuda12_pjrt"),
     ],
 )

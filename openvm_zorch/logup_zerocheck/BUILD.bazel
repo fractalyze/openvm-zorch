@@ -55,7 +55,7 @@ py_library(
         "//openvm_zorch/logup_gkr:input_layer",
         "@zorch//zorch:transcript",
         "@zorch//zorch/poly",
-        "@zorch//zorch/sumcheck",
+        "//openvm_zorch:_sumcheck_scan",
         "@zorch//zorch/utils:bits",
         requirement("jax"),
         requirement("zk_dtypes"),

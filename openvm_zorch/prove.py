@@ -491,7 +491,7 @@ class WhirRound(Round):
             # Lower each Stage-5 device island to one fused kernel (byte-identical
             # — whir prover_test gates both paths). The strided merkle_commit marker
             # only fuses under jit; eager dispatch decomposes it, so this flip is
-            # what turns fuse=True into an actual compute win.
+            # what turns the strided merkle_commit fusion into an actual compute win.
             jit=self._jit,
         )
         return carry, transcript, whir_proof
