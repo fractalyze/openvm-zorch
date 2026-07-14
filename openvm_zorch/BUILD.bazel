@@ -15,7 +15,7 @@ filegroup(
     visibility = ["//openvm_zorch:__subpackages__"],
 )
 
-# Native-prover baseline JSONs (--baseline-out); see docs/native-baseline.md.
+# Native-prover baseline JSONs (--baseline-out); see docs/development.md.
 filegroup(
     name = "baseline_testdata",
     srcs = glob(["testdata/baseline/**"]),

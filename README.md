@@ -72,5 +72,5 @@ plonky3 `=0.4.3`).
 
 ## Documentation
 
-See [`docs/`](docs/README.md) for the full index — pipeline & terminology,
-conventions, development setup, byte-match methodology, and the native baseline.
+See [`docs/`](docs/README.md) for the full index — pipeline & terminology, and
+development & benchmarking.
