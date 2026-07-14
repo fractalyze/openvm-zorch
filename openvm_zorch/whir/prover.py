@@ -7,7 +7,7 @@ out-of-domain sample, strided query consistency, final constraint — lives in
 message, Möbius weight, no-op transcript bind) live in ``SwirlWhirScheme``
 (``scheme.py``). This module builds the prover from the reference's
 ``WhirConfig`` plus the Stage-1 commitment, drives one open, and repackages the
-generic ``WhirProof`` into the reference field layout — so ``whir_test``
+generic ``WhirProof`` into the reference field layout — so ``prover_test``
 byte-matches the fixture unchanged.
 
 The migration replaces the hand-rolled round loop (and its device-compute
@@ -120,7 +120,7 @@ def prove_whir_opening(
     ``jit`` is accepted for call-site compatibility but no longer changes
     behaviour: the generic driver always lowers its device compute to jitted
     islands and is byte-identical to an eager run (the islands are pure functions
-    of their arrays), so both ``whir_test`` paths exercise the same code.
+    of their arrays), so both ``prover_test`` paths exercise the same code.
     """
     del jit  # generic driver is always island-jitted; both paths are identical.
     if not committed:

@@ -90,3 +90,89 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   scalar-list polynomial (`_conv` over 0-D coeffs) in `jax.jit` directly —
   hundreds of pytree-leaf scalars regress; vectorize into arrays first.
   (PR #14 took round-0 prism 4.26→1.0s, whole prove −29%, this way.)
+
+## Benchmarking
+
+The bar is the **native (Rust) reference prover** — openvm-stark-backend
+`v2.0.0` (`16d60de7`), the exact prover this repo byte-matches — proving
+the same instance at the same params. The timed unit on both sides is the
+prove step alone (trace-in → proof-out, `prove_chain`'s scope): keygen,
+tracegen, and device transport are one-time setup, recorded separately under
+`setup_s`, never folded into the prove number.
+
+### Generating a native baseline
+
+`tools/fixture-gen --baseline-out` times the native prover on the synthetic
+instance and writes a JSON under `openvm_zorch/testdata/baseline/` (committed,
+keyed by platform + params):
+
+```sh
+cd tools/fixture-gen
+
+# CPU (rayon-parallel — the configuration the production native prover runs):
+FIB_LOG_HEIGHT=20 N_STACK=16 BENCH_RUNS=5 BENCH_PLATFORM_LABEL="<machine>" \
+  cargo run --release --features parallel -- \
+  --baseline-out ../../openvm_zorch/testdata/baseline/native_prod_cpu.json
+
+# GPU (openvm-cuda-backend compiles .cu kernels at build time, so this needs
+# a CUDA toolchain + GPU on the build box):
+FIB_LOG_HEIGHT=20 N_STACK=16 BENCH_RUNS=5 BENCH_PLATFORM_LABEL="<machine>" \
+  CUDA_VISIBLE_DEVICES=0 \
+  cargo run --release --features cuda -- \
+  --baseline-out ../../openvm_zorch/testdata/baseline/native_prod_gpu.json
+```
+
+`BENCH_RUNS` (default 3) sets the warm-run count; `BENCH_PLATFORM_LABEL` tags
+the machine. `FIB_LOG_HEIGHT` / `L_SKIP` / `N_STACK` / `K_WHIR` are the same
+scaling knobs that size `--prove-out` (see
+[`tools/fixture-gen/README.md`](../tools/fixture-gen/README.md)).
+`--features parallel` is for `--baseline-out` only — the `--*-out` fixture
+generators must stay single-threaded or the LogUp PoW grind goes
+non-deterministic and fixtures stop being reproducible.
+
+The synthetic instance is **narrow** (tall traces, few columns), so it
+under-utilizes a GPU. When the absolute numbers matter, baseline a **real
+openvm guest block** instead with
+[`tools/real-block-gen`](../tools/real-block-gen)'s `--baseline-out` — same
+JSON schema, same timed scope, on the tapped `ProvingContext` (see that
+README).
+
+### Comparing zorch against the baseline
+
+`verify_prove --baseline <file>` runs a second warm chain pass and prints the
+zorch per-stage `_TimedRound` warm sum against the native e2e number, with the
+delta. The baseline's params must match the fixture's, so pair a
+production-scale fixture with a production baseline:
+
+```sh
+# 1. Generate the production-scale fixture (multi-MB, not committed):
+( cd tools/fixture-gen && FIB_LOG_HEIGHT=20 N_STACK=16 \
+    cargo run --release -- --prove-out /tmp/prove_prod )
+
+# 2. Compare (GPU; drop JAX_PLATFORMS for CPU):
+JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  bazel run //openvm_zorch:verify_prove -- \
+    --fixture_dir /tmp/prove_prod \
+    --baseline openvm_zorch/testdata/baseline/native_prod_gpu.json
+```
+
+Running the committed micro fixture (`testdata/prove`) against a production
+baseline warns about the param mismatch — that combination is only a smoke
+check of the wiring.
+
+### GPU measurement hygiene
+
+- **Idle GPU only.** Shared-GPU contention inflates every stage 2–50× and
+  makes the per-stage ranking meaningless (#71).
+- **The first GPU `prove()` is compile-dominated, not kernel-dominated**: the
+  zerocheck constraint DAG unrolls into one giant `jit_scan` kernel that ptxas
+  optimizes for minutes. Two levers (#70):
+  - `JAX_COMPILATION_CACHE_DIR=<dir>` persists compiled modules across process
+    runs, so every run after the first skips the compile. Leave it unset for
+    byte-match gates — a true cold compile is part of the gate.
+  - `XLA_FLAGS=--xla_gpu_force_compilation_parallelism=<cores>` compiles the
+    per-AIR kernels in parallel (~25% off the first compile; complements, not
+    replaces, the cache — the dominant cost is a single serial-ptxas kernel).
+- The native GPU prover returns before its kernels finish; fixture-gen's timer
+  already brackets `prove` with stream syncs, so the baseline JSONs record real
+  completion times — don't re-measure with a bare wall-clock around the call.

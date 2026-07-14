@@ -88,6 +88,6 @@ Do **not** pass `--features parallel` to the `--*-out` fixture generators — it
 makes the LogUp PoW grind non-deterministic and breaks fixture reproducibility.
 It is for `--baseline-out` only.
 
-See [`docs/native-baseline.md`](../../docs/native-baseline.md) for what is timed
-(the prove step alone, matching `prove_chain`'s scope), the CPU/GPU split, the
-narrow-block caveat, and the recorded numbers.
+See the Benchmarking section of [`docs/development.md`](../../docs/development.md)
+for what is timed (the prove step alone, matching `prove_chain`'s scope) and
+how `verify_prove --baseline` consumes the JSON.

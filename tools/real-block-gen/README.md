@@ -101,7 +101,7 @@ Two real-block subtleties the bin handles (vs the synthetic fixture):
 `--baseline-out <file>` times the **native** SWIRL prover on the tapped real
 block and writes a JSON in the exact schema as
 [`tools/fixture-gen`](../fixture-gen)'s `--baseline-out` (see
-[`docs/native-baseline.md`](../../docs/native-baseline.md)). It is the
+[`docs/development.md`](../../docs/development.md)). It is the
 real-block analog of the synthetic `native_prod_*.json`: the wall-clock bar
 milestone #4's per-stage "beat native" issues (#43/#44/#45/#46) measure against.
 It builds the tapped ctx exactly as `--ref-prove` does (RowMajor→ColMajor +

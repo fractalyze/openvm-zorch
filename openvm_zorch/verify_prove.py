@@ -64,7 +64,7 @@ _FIXTURE_DIR = flags.DEFINE_string(
 _BASELINE = flags.DEFINE_string(
     "baseline",
     None,
-    "Optional native-prover baseline JSON (see docs/native-baseline.md). When "
+    "Optional native-prover baseline JSON (see docs/development.md). When "
     "set, the chain is run a second (warm) time and its per-stage _TimedRound "
     "sum is printed against the native e2e prove time, with the delta.",
 )
@@ -334,7 +334,7 @@ def _compare_baseline(baseline_path: str, params, stage_times: dict) -> None:
 
     ``stage_times`` is the warm-run ``label -> seconds`` map captured by the
     second (compiled) chain pass. The baseline JSON is the native source of
-    truth from ``docs/native-baseline.md``; its params must match the fixture's
+    truth from ``docs/development.md``; its params must match the fixture's
     or the comparison is meaningless, so a mismatch is loud (the run still
     prints, but flagged)."""
     # Resolve a relative path against the workspace root so the documented
