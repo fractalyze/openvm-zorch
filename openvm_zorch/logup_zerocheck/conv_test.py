@@ -1,6 +1,6 @@
 """Unit test: the vectorized ``_batched_conv`` row-wise equals the reference
 scalar ``_conv``. Guards the dispatch-storm rewrite of round-0's polynomial
-assembly (issue #3) independently of the full byte-match in zerocheck_test."""
+assembly (issue #3) independently of the full byte-match in prover_test."""
 
 import jax.numpy as jnp
 import numpy as np

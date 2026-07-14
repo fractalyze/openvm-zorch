@@ -21,7 +21,7 @@ from the fixture's ``outputs/q0_claim.npy``, so the phases cannot silently
 diverge from what the real prove sees.
 
     # warm runtime (the standard report):
-    JAX_PLATFORMS=cpu bazel run //openvm_zorch/bench_gkr_boundary:bench_logup_gkr_phases \
+    JAX_PLATFORMS=cpu bazel run //openvm_zorch/logup_gkr:bench_logup_gkr_phases \
         -- --fixture_dir /tmp/real_fib
 
     # compile (out of band): zkbench discards warmup, so run a COLD-cache

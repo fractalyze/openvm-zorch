@@ -51,9 +51,9 @@ py_library(
 )
 
 py_test(
-    name = "stacked_reduction_test",
+    name = "prover_test",
     size = "large",
-    srcs = ["stacked_reduction_test.py"],
+    srcs = ["prover_test.py"],
     data = [":testdata"],
     deps = [
         ":prover",

@@ -98,9 +98,9 @@ py_test(
 )
 
 py_test(
-    name = "zerocheck_test",
+    name = "prover_test",
     size = "large",
-    srcs = ["zerocheck_test.py"],
+    srcs = ["prover_test.py"],
     data = [":testdata"],
     deps = [
         ":constraints",

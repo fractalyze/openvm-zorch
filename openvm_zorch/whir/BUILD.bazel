@@ -61,9 +61,9 @@ py_library(
 )
 
 py_test(
-    name = "whir_test",
+    name = "prover_test",
     size = "large",
-    srcs = ["whir_test.py"],
+    srcs = ["prover_test.py"],
     data = [":testdata"],
     deps = [
         ":prover",
