@@ -88,7 +88,7 @@ def verify_whir(
     num_rounds = len(whir.num_queries)
 
     code = ReedSolomon(message_len=1 << m, blowup=1 << log_blowup, dtype=F)
-    strided = StridedMerkleTree(sponge, compressor, 1 << k, fuse=True)
+    strided = StridedMerkleTree(sponge, compressor, 1 << k)
     wparams = WhirParams(
         k_whir=k,
         num_queries=tuple(whir.num_queries),

@@ -135,7 +135,7 @@ def prove_whir_opening(
     # Stage-1's ``stacked_merkle_commit``. SWIRL's prismalinear/Möbius maps ride
     # the scheme, so the driver stays the scheme-agnostic generic one.
     code = ReedSolomon(message_len=1 << m, blowup=1 << log_blowup, dtype=F)
-    strided = StridedMerkleTree(sponge, compressor, 1 << k, fuse=True)
+    strided = StridedMerkleTree(sponge, compressor, 1 << k)
     params = WhirParams(
         k_whir=k,
         num_queries=tuple(config.num_queries),
