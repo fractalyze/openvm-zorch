@@ -1,7 +1,7 @@
 """SWIRL's stacked layout — greedy column stacking with short-column striding.
 
 Reference: openvm-stark-backend ``StackedLayout`` / ``stacked_matrix``
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/stacked_pcs.rs#L136
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/stacked_pcs.rs#L136
 
 Traces (pre-sorted by descending height) are flattened column-by-column into
 one matrix of height ``2^(l_skip + n_stack)``. A trace column shorter than

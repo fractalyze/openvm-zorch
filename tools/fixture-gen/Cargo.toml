@@ -27,14 +27,14 @@ parallel = ["openvm-stark-backend/parallel", "openvm-stark-sdk/parallel"]
 cuda = ["dep:openvm-cuda-backend", "dep:openvm-cuda-common"]
 
 [dependencies]
-openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false, features = ["test-utils"] }
-openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", default-features = false }
+openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0", default-features = false, features = ["test-utils"] }
+openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0", default-features = false }
 # Optional GPU prover for the GPU baseline; pulled in only by `--features cuda`.
 # openvm-cuda-common provides the CUDA stream sync the GPU prove timing needs.
-openvm-cuda-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", optional = true }
-openvm-cuda-common = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0-beta.2", optional = true }
-p3-baby-bear = "=0.4.1"
-p3-field = "=0.4.1"
+openvm-cuda-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0", optional = true }
+openvm-cuda-common = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0", optional = true }
+p3-baby-bear = "=0.4.3"
+p3-field = "=0.4.3"
 serde_json = "1"
 
 [profile.release]

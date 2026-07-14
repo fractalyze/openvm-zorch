@@ -1,6 +1,6 @@
 """Stage 1 byte-match: stacked_commit reproduces the reference prover.
 
-Fixtures come from tools/fixture-gen (openvm-stark-backend v2.0.0-beta.2 CPU
+Fixtures come from tools/fixture-gen (openvm-stark-backend v2.0.0 CPU
 prover on deterministic traces); every pipeline step is compared separately —
 stacked matrix, RS codeword matrix, each stored digest layer, root — so a
 failure localizes to one transform instead of one opaque root mismatch.

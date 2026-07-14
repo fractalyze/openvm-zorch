@@ -63,12 +63,12 @@ cargo run --release -- \
 
 ## Reference pin
 
-`openvm-stark-backend` tag `v2.0.0-beta.2`
-(`f6a84921e46a7df9796d41dfdfe69f0658ad74b5`) — the same pin the openvm
-`v2.0.0-beta.2` release consumes. SWIRL lives on stark-backend's `develop-v2`
+`openvm-stark-backend` tag `v2.0.0`
+(`16d60de724c21dcadfde7d8315a1db507e5832d7`) — the same pin the openvm
+`v2.0.0` release consumes. SWIRL lives on stark-backend's `develop-v2`
 lineage, NOT `main` (main is still plonky3/FRI). Config: BabyBear base field,
 BabyBear⁴ challenges, Poseidon2 width-16 (`default_babybear_poseidon2_16`,
-plonky3 `=0.4.1`).
+plonky3 `=0.4.3`).
 
 ## Documentation
 

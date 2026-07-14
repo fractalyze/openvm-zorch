@@ -14,8 +14,8 @@ evaluates the whole grid. Works in either field: pass base-field parts for
 the univariate round, folded extension-field parts afterwards.
 
 Reference:
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/air_builders/symbolic/dag.rs
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/logup_zerocheck/single.rs
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/air_builders/symbolic/dag.rs
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/logup_zerocheck/single.rs
 """
 
 from __future__ import annotations

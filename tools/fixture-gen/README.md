@@ -1,7 +1,7 @@
 # fixture-gen
 
 Golden-fixture generator for openvm-zorch's byte-match tests. Runs the
-openvm-stark-backend reference prover (pinned to tag `v2.0.0-beta.2`,
+openvm-stark-backend reference prover (pinned to tag `v2.0.0`,
 BabyBear / Poseidon2 width-16) on deterministic inputs and dumps every
 intermediate as canonical (non-Montgomery) `u32`, which the Python tests
 compare exactly.

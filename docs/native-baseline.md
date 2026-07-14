@@ -3,7 +3,7 @@
 The single source of truth for "how fast is the native (Rust) openvm prover?",
 against which milestone #4's per-stage optimizations are measured. The numbers
 below are the wall-clock of the **reference SWIRL prover**
-(openvm-stark-backend `v2.0.0-beta.2`, `f6a84921`) — the exact prover this
+(openvm-stark-backend `v2.0.0`, `16d60de7`) — the exact prover this
 repo byte-matches — proving the same synthetic instance `prove_chain` consumes,
 at the same params, on a **production-scale block** (stacked 2²⁰).
 

@@ -1,7 +1,7 @@
 """SWIRL's query-strided Merkle tree over zorch's Sponge + Compression.
 
 Reference: openvm-stark-backend ``MerkleTree::new``
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/stacked_pcs.rs#L412
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/stacked_pcs.rs#L412
 
 The first ``log2(rows_per_query)`` levels pair leaves at *query stride*
 ``s = num_leaves / rows_per_query`` — level ``l`` compresses

@@ -15,7 +15,7 @@ on the cosets ``g·D``, ``g²·D`` and interpolated to coefficients); rounds
 value — the stacking openings, observed per commit.
 
 Reference:
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/stacked_reduction.rs
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/stacked_reduction.rs
 """
 
 from __future__ import annotations

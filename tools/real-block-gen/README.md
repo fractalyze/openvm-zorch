@@ -182,4 +182,4 @@ constraint-DAG evaluator (issue #51). Everything else — `trace_*.npy` (canonic
 `sorted_airs`/`vk_pre_hash` — matches fixture-gen byte-for-byte.
 
 Pinned to the same reference as the rest of the repo: openvm-stark-backend
-`v2.0.0-beta.2`.
+`v2.0.0`.

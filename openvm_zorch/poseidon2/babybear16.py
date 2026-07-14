@@ -3,8 +3,8 @@
 zorch ships the agnostic Poseidon2 engine but no named parameterizations: a
 named instance is a consumer concern. This is the permutation every hash byte
 in openvm-stark-backend's proofs computes — plonky3's
-``default_babybear_poseidon2_16`` at the ``=0.4.1`` pin the reference carries,
-https://github.com/Plonky3/Plonky3/blob/v0.4.1/baby-bear/src/poseidon2.rs
+``default_babybear_poseidon2_16`` at the ``=0.4.3`` pin the reference carries,
+https://github.com/Plonky3/Plonky3/blob/v0.4.3/baby-bear/src/poseidon2.rs
 
 - round constants: the HorizenLabs BabyBear instance
   (``BABYBEAR_RC16_EXTERNAL_INITIAL/FINAL``, ``BABYBEAR_RC16_INTERNAL``),

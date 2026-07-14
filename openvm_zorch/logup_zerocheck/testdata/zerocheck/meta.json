@@ -105,7 +105,7 @@
     "n_stack": 8
   },
   "prelude_len": 29,
-  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
   "s_0_deg": 12,
   "s_deg": 4,
   "sorted_airs": [

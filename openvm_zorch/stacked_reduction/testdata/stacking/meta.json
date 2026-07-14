@@ -98,7 +98,7 @@
     "log_blowup": 1,
     "n_stack": 8
   },
-  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
   "s_0_deg": 6,
   "sorted_airs": [
     0,

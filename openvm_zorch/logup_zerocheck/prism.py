@@ -17,8 +17,8 @@ to the zkx-native NTT convention (== plonky3's, byte-matched in Stage 1).
 The multiplicative-coset generator is plonky3 BabyBear's ``GENERATOR = 31``.
 
 Reference:
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/poly_common.rs
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/sumcheck.rs#L47
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/poly_common.rs
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/sumcheck.rs#L47
 """
 
 from __future__ import annotations

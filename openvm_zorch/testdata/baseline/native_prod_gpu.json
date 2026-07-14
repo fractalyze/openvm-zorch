@@ -30,7 +30,7 @@
     "warm_mean": 0.0119141852,
     "warm_min": 0.01080561
   },
-  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
   "runs": 5,
   "setup_s": {
     "keygen": 0.000096281,
