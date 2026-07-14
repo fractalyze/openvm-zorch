@@ -28,7 +28,7 @@
     "warm_mean": 0.045580839399999996,
     "warm_min": 0.034967256
   },
-  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921), real fibonacci guest (n=100)",
+  "reference": "openvm-stark-backend v2.0.0 (16d60de7), real fibonacci guest (n=100)",
   "runs": 5,
   "setup_s": {
     "keygen": 0.0,

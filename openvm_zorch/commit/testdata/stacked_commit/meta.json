@@ -3,7 +3,7 @@
   "l_skip": 2,
   "log_blowup": 1,
   "n_stack": 3,
-  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
   "stacked_height": 32,
   "stacked_width": 3,
   "trace_dims": [

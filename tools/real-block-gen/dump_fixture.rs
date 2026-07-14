@@ -874,7 +874,7 @@ fn gen_baseline(
 
     let whir = &params.whir;
     let baseline = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921), real fibonacci guest (n=100)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7), real fibonacci guest (n=100)",
         "platform": platform,
         "available_parallelism": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
         "runs": runs,
@@ -1919,7 +1919,7 @@ fn main() -> eyre::Result<()> {
 
         let whir = &params.whir;
         let mut meta = serde_json::json!({
-            "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921), real fibonacci guest (n=100)",
+            "reference": "openvm-stark-backend v2.0.0 (16d60de7), real fibonacci guest (n=100)",
             "params": {
                 "l_skip": params.l_skip,
                 "n_stack": params.n_stack,

@@ -1,6 +1,6 @@
 //! Golden-fixture generator for openvm-zorch's byte-match tests.
 //!
-//! Runs the reference prover (openvm-stark-backend v2.0.0-beta.2, BabyBear +
+//! Runs the reference prover (openvm-stark-backend v2.0.0, BabyBear +
 //! Poseidon2 width-16) on deterministic inputs and dumps every intermediate as
 //! canonical-u32 `.npy` plus a `meta.json`, so the JAX side can compare each
 //! pipeline step independently.
@@ -250,7 +250,7 @@ fn gen_stage1_fixture(out: &Path) {
     );
 
     let meta = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
         "l_skip": L_SKIP,
         "n_stack": N_STACK,
         "log_blowup": LOG_BLOWUP,
@@ -307,7 +307,7 @@ fn gen_transcript_fixture(out: &Path) {
     let log = ts.into_log();
     write_transcript_log(out, &log);
     let meta = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
         "pow_bits": pow_bits,
         "pow_witness": witness.as_canonical_u32(),
         "script": "observe 1..=5; sample; observe 100..117; sample x3; observe_ext [7,8,9,10]; sample_ext; observe_commit [0..8]; check_witness(pow_bits, witness); sample",
@@ -793,7 +793,7 @@ fn gen_gkr_fixture(out: &Path) {
     );
 
     let meta = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
         "params": {
             "l_skip": params.l_skip,
             "n_stack": params.n_stack,
@@ -1111,7 +1111,7 @@ fn gen_zerocheck_fixture(out: &Path) {
     }
 
     let meta = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
         "params": {
             "l_skip": params.l_skip,
             "n_stack": params.n_stack,
@@ -1310,7 +1310,7 @@ fn gen_stacking_fixture(out: &Path) {
     }
 
     let meta = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
         "params": {
             "l_skip": params.l_skip,
             "n_stack": params.n_stack,
@@ -1650,7 +1650,7 @@ fn gen_whir_fixture(out: &Path) {
     }
 
     let meta = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
         "params": {
             "l_skip": params.l_skip,
             "n_stack": params.n_stack,
@@ -1847,7 +1847,7 @@ fn gen_prove_fixture(out: &Path) {
     );
 
     let meta = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
         "params": {
             "l_skip": params.l_skip,
             "n_stack": params.n_stack,
@@ -2004,7 +2004,7 @@ fn gen_baseline(out_file: &Path) {
 
     let whir = &params.whir;
     let baseline = serde_json::json!({
-        "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+        "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
         "platform": platform,
         "available_parallelism": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
         "runs": runs,

@@ -120,7 +120,7 @@
       "sorted_trace_idx": 4
     }
   ],
-  "logup_pow_witness": 14,
+  "logup_pow_witness": 4,
   "n_global": 4,
   "n_logup": 3,
   "n_max": 4,
@@ -133,7 +133,7 @@
     "n_stack": 8
   },
   "prelude_len": 29,
-  "reference": "openvm-stark-backend v2.0.0-beta.2 (f6a84921)",
+  "reference": "openvm-stark-backend v2.0.0 (16d60de7)",
   "sorted_airs": [
     0,
     2,
@@ -145,13 +145,13 @@
   "total_interactions": 20,
   "transcript_len": 945,
   "vk_pre_hash": [
-    1701734110,
-    834623575,
-    73131130,
-    1660939691,
-    661687152,
-    1386660794,
-    1226539575,
-    1159370671
+    1779467931,
+    519699140,
+    567253257,
+    1211251244,
+    245751727,
+    1307612673,
+    1490030157,
+    1568020084
   ]
 }

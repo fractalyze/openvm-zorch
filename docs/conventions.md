@@ -25,11 +25,11 @@ Any claim about what the reference prover does cites a permalink pinned to the
 target tag, e.g.
 
 ```
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/stacked_pcs.rs#L116
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/stacked_pcs.rs#L116
 ```
 
 Unpinned `main` links rot silently as `develop-v2` moves; a pinned link stays
-true forever. The repo-wide pin is `v2.0.0-beta.2` (`f6a84921`).
+true forever. The repo-wide pin is `v2.0.0` (`16d60de7`).
 
 ## Byte-match is the correctness bar
 

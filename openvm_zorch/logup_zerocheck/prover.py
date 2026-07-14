@@ -32,8 +32,8 @@ prismalinear/univariate-skip pieces live in ``prism.py``; the constraint DAG
 evaluator in ``constraints.py``.
 
 Reference:
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/logup_zerocheck/mod.rs#L184
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/logup_zerocheck/cpu.rs
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/logup_zerocheck/mod.rs#L184
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/logup_zerocheck/cpu.rs
 """
 
 from __future__ import annotations

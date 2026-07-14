@@ -1,7 +1,7 @@
 """SWIRL Stage 1 — stacked PCS trace commitment.
 
 Reference: openvm-stark-backend ``stacked_commit``
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/stacked_pcs.rs#L116
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/stacked_pcs.rs#L116
 
 stack (``stacking``) → RS-encode columns (``rs_message``) → query-strided
 Merkle (``stacked_merkle``); the commitment is the tree root, observed into

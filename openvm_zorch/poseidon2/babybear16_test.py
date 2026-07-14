@@ -1,8 +1,8 @@
 """babybear16 params drive zorch's engine to the reference permutation bytes.
 
-Golden vectors are dumped by tools/fixture-gen from plonky3 =0.4.1's
+Golden vectors are dumped by tools/fixture-gen from plonky3 =0.4.3's
 ``default_babybear_poseidon2_16`` — the exact instance openvm-stark-backend
-v2.0.0-beta.2 hashes with. Pinning the bare permutation (plus the sponge and
+v2.0.0 hashes with. Pinning the bare permutation (plus the sponge and
 2-to-1 compress shapes the Merkle tree uses) isolates a parameter mistake from
 a tree-structure mistake before any commit test runs.
 """

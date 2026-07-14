@@ -1,11 +1,11 @@
 # SWIRL pipeline — stages, terminology, file inventory
 
-Reference: openvm-stark-backend `v2.0.0-beta.2` (`f6a84921`). A read-only
+Reference: openvm-stark-backend `v2.0.0` (`16d60de7`). A read-only
 worktree is convenient at `$DEVENV_ENVS_DIR/zorch/stark-backend`:
 
 ```sh
 cd /path/to/stark-backend && git worktree add \
-  "$DEVENV_ENVS_DIR/zorch/stark-backend" v2.0.0-beta.2
+  "$DEVENV_ENVS_DIR/zorch/stark-backend" v2.0.0
 ```
 
 ## The five stages

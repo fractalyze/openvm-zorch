@@ -1,8 +1,8 @@
 """Prismalinear eval→coeff RS message + codeword — SWIRL's column encoding.
 
 Reference: openvm-stark-backend ``eval_to_coeff_rs_message`` / ``rs_code_matrix``
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/poly.rs#L325
-https://github.com/openvm-org/stark-backend/blob/f6a84921/crates/stark-backend/src/prover/stacked_pcs.rs#L341
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/poly.rs#L325
+https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/src/prover/stacked_pcs.rs#L341
 
 A stacked column of length ``2^(l_skip + n)`` is read as evaluations of a
 prismalinear polynomial on ``D × {0,1}^n`` with ``D`` (the order-``2^l_skip``
