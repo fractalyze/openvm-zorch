@@ -3,14 +3,6 @@
 # Pulled from the Fractalyze package index alongside upstream PyPI:
 #   pip install -r requirements.in \
 #     --extra-index-url https://fractalyze.github.io/pypi/simple/
-#
-# zorch is proving-scheme- and zkVM-agnostic, so it deliberately does NOT
-# depend on any zkVM package (riscv-witness, rw-constraints, …). zk_dtypes
-# (native finite-field dtypes) arrives via jax but is pinned here directly:
-# each jax wheel imports a specific zk_dtypes ABI, and jax's metadata does not
-# floor the version, so bump this in lockstep with the jax pins below or imports
-# fail at `import jax`. The consolidated 0.10.0 jax line pairs with zk_dtypes
-# 0.0.8; it also renamed the CUDA PJRT plugin zkx-cuda-pjrt -> jax-cuda12-pjrt.
 absl-py
 numpy
 jax==0.10.0.dev20260709073514
