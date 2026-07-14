@@ -225,7 +225,9 @@ def _commit_cached_mains(
     for a in sorted_airs:
         if a.cached_mains:
             cds = [
-                stacked_commit(sponge, compressor, l_skip, n_stack, log_blowup, k, [cm])[1]
+                stacked_commit(
+                    sponge, compressor, l_skip, n_stack, log_blowup, k, [cm]
+                )[1]
                 for cm in a.cached_mains
             ]
             cached_by_air[id(a)] = cds
@@ -326,8 +328,13 @@ class CommitRound(Round):
 
         if self._obs_log is not None:
             _log_prelude_obs_diff(obs, self._obs_log)
-        for o in obs:
-            transcript = transcript.observe(o)
+        # One fused absorb over the whole prelude stream instead of len(obs)
+        # separate observe() dispatches. ``observe`` flattens to the base field
+        # and absorbs via one ``lax.scan`` with no per-call padding (padding only
+        # happens at ``sample``, and the prelude never samples between observes),
+        # so absorbing the concatenation is byte-identical to the per-element
+        # loop while collapsing ~86 host-dispatched kernels into one.
+        transcript = transcript.observe(jnp.concatenate([o.reshape(-1) for o in obs]))
 
         carry = replace(carry, root=root, pcs_data=pcs_data)
         return carry, transcript, root
