@@ -29,10 +29,10 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from openvm_zorch._sumcheck_scan import fold_pair
 from openvm_zorch.transcript import sample_ext
 from zorch.logup_gkr.circuit import GkrLayer, build_pyramid
 from zorch.poly.eq import expand_eq_to_hypercube
-from zorch.sumcheck.prover import fold_pair
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
@@ -165,7 +165,7 @@ def fractional_sumcheck(
             numerator_1=num[1::2],
             denominator_0=den[0::2],
             denominator_1=den[1::2],
-            num_interaction_variables=0,
+            num_batch_variables=0,
         )
     )
 
@@ -224,7 +224,7 @@ def fractional_sumcheck(
             numerator_1=state[3],
             denominator_0=state[2],
             denominator_1=state[4],
-            num_interaction_variables=0,
+            num_batch_variables=0,
         )
         claims = layer_claims(folded)
         transcript, mu = _observe_sample(transcript, claims)

@@ -32,7 +32,7 @@ from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, f_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.transcript import EF_LIMBS, sample_ext
-from zorch.sumcheck.prover import prove as sumcheck_prove
+from openvm_zorch._sumcheck_scan import prove as sumcheck_prove
 from zorch.transcript import DuplexTranscript
 
 
@@ -144,7 +144,7 @@ def _round0_group_contrib(
 
 @dataclass(frozen=True)
 class _StackingSummand:
-    """Product summand the ``zorch.sumcheck`` scan folds: ``Σ_columns Q·EQW`` per
+    """Product summand the ``_sumcheck_scan`` scan folds: ``Σ_columns Q·EQW`` per
     cube point. Degree 2 (``q`` × the eq/κ_rot weight), so each round poly is
     quadratic; ``combine`` sums the stacked-column batch axis into the scalar
     round poly while the driver folds the cube variable (the trailing axis). No
@@ -220,7 +220,7 @@ def _sumcheck_rounds(
     evals at {1, 2}) folding every stacked column to its opening, then observing
     the openings.
 
-    Driven by the generic ``zorch.sumcheck`` scan (the prover's one
+    Driven by the generic ``_sumcheck_scan`` scan (the prover's one
     runtime-dominated stage; #43): the jagged per-view fold is expressed as two
     homogeneous full-cube factors — the stacked matrices ``Q`` and their λ-batched
     eq/κ_rot weights ``EQW`` — with the stacked columns batched and the cube

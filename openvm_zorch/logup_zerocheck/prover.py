@@ -24,7 +24,8 @@ Structure per the reference (driver mod.rs, per-trace math cpu.rs):
   here is ≤ ``s_0_deg`` (13 coefficients), so unrolled exact arithmetic
   beats array plumbing.
 
-zorch reuse: ``lift_to_domain``/``fold_pair`` (LSB pairing — identical to the
+Reuse: ``lift_to_domain``/``fold_pair`` (vendored in ``_sumcheck_scan``; LSB
+pairing — identical to the
 reference's MLE fold), ``expand_eq_to_hypercube`` (fed reversed ξ slices, the
 Stage-2 convention), ``eval_eq``, ``compute_inv_vandermonde``, ``eval_coeffs``
 (coefficient-form univariate eval, O(1) graph in degree). The
@@ -46,6 +47,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
+from openvm_zorch._sumcheck_scan import fold_pair, lift_to_domain
 from openvm_zorch.fields import EF, F, f_const, f_inv_const, f_to_ef
 from openvm_zorch.logup_gkr.input_layer import interactions_layout
 from openvm_zorch.logup_zerocheck import prism
@@ -58,7 +60,6 @@ from openvm_zorch.logup_zerocheck.constraints import (
 from openvm_zorch.transcript import sample_ext
 from zorch.poly.eq import eval_eq, expand_eq_to_hypercube
 from zorch.poly.univariate import compute_inv_vandermonde, eval_coeffs
-from zorch.sumcheck.prover import fold_pair, lift_to_domain
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
@@ -212,7 +213,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     are traced args. ``prewarm_coset_weights`` must have been called for these
     coset counts so the host-int ω / weight builders are already cached and
     constant-fold (a cold cache faults under trace — ``omega_int``'s
-    ``lax.fft`` + ``int(...)`` concretization). Same DAG walk the MLE
+    ``lax.ntt`` + ``int(...)`` concretization). Same DAG walk the MLE
     ``lax.scan`` jits, pure EF arithmetic, contracted (row) axis kept LAST per
     docs/development.md ⇒ byte-exact. One compile per AIR (distinct DAGs); warm/GPU reaps
     the fusion.
@@ -464,7 +465,7 @@ def prove_batch_constraints(
     # giant module; #33). The fix is a `lax.scan` whose body compiles once,
     # independent of n_max: each trace keeps a fixed-width buffer and stride-pair
     # folds in place, re-padding the dead tail with zeros (mirroring
-    # `zorch.sumcheck._prove_scan`'s fixed-width + dynamic-window scheme, but with
+    # `_sumcheck_scan._prove_scan`'s fixed-width + dynamic-window scheme, but with
     # the reference's LSB-stride pairing, not high/low halves). Front-load
     # exhaustion (round > ñ_t, ñ_t static) becomes a per-trace `jnp.where` on the
     # dynamic scan index instead of a Python branch. The round math is unchanged

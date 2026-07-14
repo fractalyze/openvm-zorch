@@ -11,7 +11,7 @@ coset-evaluation/interpolation pair behind ``sumcheck_uni_round0_poly``.
 Smallness is structural: every transform here is over ``D`` (or ``d`` cosets
 of it), so interpolation matrices are built host-side from canonical integers
 and applied as unrolled sums — exact field arithmetic, no NTT-convention
-risk. The one ``lax.fft`` call derives ω so the subgroup generator is pinned
+risk. The one ``lax.ntt`` call derives ω so the subgroup generator is pinned
 to the zkx-native NTT convention (== plonky3's, byte-matched in Stage 1).
 
 The multiplicative-coset generator is plonky3 BabyBear's ``GENERATOR = 31``.
@@ -38,10 +38,10 @@ GENERATOR = 31
 @lru_cache(maxsize=None)
 def omega_int(l_skip: int) -> int:
     """Canonical generator of the order-``2^l_skip`` subgroup, extracted from
-    ``lax.fft`` (evaluating the polynomial ``Z`` on ``D``) so it can never
+    ``lax.ntt`` (evaluating the polynomial ``Z`` on ``D``) so it can never
     drift from the NTT the rest of the prover stands on."""
     coeffs = jnp.zeros((1, 1 << l_skip), F).at[0, 1].set(jnp.ones((), F))
-    evals = lax.fft(coeffs, "FFT", 1 << l_skip)[0]
+    evals = lax.ntt(coeffs, ntt_type="NTT", ntt_length=1 << l_skip)[0]
     omega = int(
         jnp.asarray(lax.bitcast_convert_type(evals[1:2], F).astype(jnp.uint32))[0]
     )
@@ -296,7 +296,7 @@ def _coset_from_evals_weight(l_skip: int, num_cosets: int) -> Array:
 def prewarm_coset_weights(l_skip: int, num_cosets: int) -> None:
     """Eagerly build (and lru-cache) the host-int prism weight matrices so a
     later JITTED ``coset_evals`` HITS the cache instead of running the
-    construction under trace. ``omega_int`` extracts ω via ``lax.fft`` + an
+    construction under trace. ``omega_int`` extracts ω via ``lax.ntt`` + an
     ``int(...)`` concretization that FAULTS under a jit trace
     (``ConcretizationTypeError``); pre-warming forces it eager once, so the
     cached ω / weight arrays constant-fold into the traced graph (#45). Warms the

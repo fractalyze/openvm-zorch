@@ -24,7 +24,7 @@ common --override_module=zorch=/abs/path/to/your/zorch/checkout
 
 Bump the pin when you need newer `zorch` blocks; keep it on `main` commits so
 CI is reproducible. A pin bump's commit range often also moves `zorch`'s own
-zkx wheel pins (`jax`/`jaxlib`/`zkx-cuda-pjrt`) — that does **not** force a
+zkx wheel pins (`jax`/`jaxlib`/`jax-cuda12-pjrt`) — that does **not** force a
 matching bump here. This repo pins those wheels independently in
 `requirements.in`, on a separate pip hub from `zorch`'s, and the two are
 allowed to skew. Only touch `requirements.in` if a build actually breaks;
@@ -45,7 +45,7 @@ lock keeps the old `zk-dtypes` and every target dies at `import jax`. Bump the
 per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
 
 - A target only sees the GPU if it deps **both** `requirement("jax_cuda12_plugin")`
-  and `requirement("zkx_cuda_pjrt")`; without them jax **silently falls back to
+  and `requirement("jax_cuda12_pjrt")`; without them jax **silently falls back to
   CPU**. Run with `JAX_PLATFORMS=cuda` (not `gpu`, which also inits rocm and
   dies) so a missing plugin hard-errors instead of silently using CPU.
 - Those plugin `.so`s require **`libcuda` at import**, so a cuda-dep'd target
