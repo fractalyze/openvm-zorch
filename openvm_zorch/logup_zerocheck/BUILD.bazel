@@ -62,6 +62,27 @@ py_library(
     ],
 )
 
+# Stage-3 verifier dual (the chain Round lives in //openvm_zorch:verify).
+py_library(
+    name = "verifier",
+    srcs = [
+        "__init__.py",
+        "verifier.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":constraints",
+        ":prism",
+        ":prover",
+        "//openvm_zorch:fields",
+        "//openvm_zorch:poly_common",
+        "//openvm_zorch:transcript",
+        "@zorch//zorch:transcript",
+        "@zorch//zorch/poly",
+        requirement("jax"),
+    ],
+)
+
 py_test(
     name = "conv_test",
     size = "small",

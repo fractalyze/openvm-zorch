@@ -28,6 +28,28 @@ py_library(
     ],
 )
 
+# Stage-4 verifier dual (the chain Round lives in //openvm_zorch:verify).
+py_library(
+    name = "verifier",
+    srcs = [
+        "__init__.py",
+        "verifier.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":prover",
+        "//openvm_zorch:fields",
+        "//openvm_zorch:poly_common",
+        "//openvm_zorch:transcript",
+        "//openvm_zorch/commit:stacking",
+        "//openvm_zorch/logup_zerocheck:prism",
+        "//openvm_zorch/logup_zerocheck:verifier",
+        "@zorch//zorch:transcript",
+        "@zorch//zorch/poly",
+        requirement("jax"),
+    ],
+)
+
 py_test(
     name = "stacked_reduction_test",
     size = "large",

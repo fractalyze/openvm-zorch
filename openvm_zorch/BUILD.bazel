@@ -36,6 +36,20 @@ py_library(
     ],
 )
 
+# Verifier-side scalar algebra shared by the per-stage duals (poly_common.rs).
+py_library(
+    name = "poly_common",
+    srcs = [
+        "__init__.py",
+        "poly_common.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":fields",
+        requirement("jax"),
+    ],
+)
+
 # OpenVM's Fiat-Shamir transcript: zorch DuplexTranscript + BabyBear⁴ glue.
 py_library(
     name = "transcript",
@@ -122,7 +136,7 @@ py_test(
     ],
 )
 
-# End-to-end SWIRL verifier: re-derives challenges, checks each stage.
+# End-to-end SWIRL verifier: the chain of per-stage verifier duals.
 py_library(
     name = "verify",
     srcs = [
@@ -132,22 +146,22 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":fields",
+        ":poly_common",
         ":prove",
-        ":transcript",
         "//openvm_zorch/commit:stacking",
-        "//openvm_zorch/logup_gkr:prover",
+        "//openvm_zorch/logup_gkr:verifier",
         "//openvm_zorch/logup_zerocheck:constraints",
-        "//openvm_zorch/logup_zerocheck:prism",
         "//openvm_zorch/logup_zerocheck:prover",
+        "//openvm_zorch/logup_zerocheck:verifier",
         "//openvm_zorch/stacked_reduction:prover",
+        "//openvm_zorch/stacked_reduction:verifier",
         "//openvm_zorch/whir:prover",
+        "//openvm_zorch/whir:verifier",
         "@zorch//zorch:round",
         "@zorch//zorch:transcript",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
-        "@zorch//zorch/utils:bits",
         requirement("jax"),
-        requirement("zk_dtypes"),
     ],
 )
 
