@@ -30,6 +30,7 @@ from jax import Array, lax
 # The MLE coeff↔eval (zeta / Möbius) transforms are scheme-agnostic and live in
 # zorch; re-exported here so this module stays the SWIRL RS-message home and its
 # importers are unchanged. Only the prismalinear chunking below is SWIRL-specific.
+from zorch.coding.reed_solomon import ReedSolomon
 from zorch.poly.multilinear import mle_coeffs_to_evals, mle_evals_to_coeffs
 from zorch.utils.bits import log2_strict_usize
 
@@ -82,10 +83,14 @@ def eval_to_coeff_rs_message(l_skip: int, evals: Array) -> Array:
 def rs_code_matrix(l_skip: int, log_blowup: int, eval_matrix: Array) -> Array:
     """RS codewords of every column of ``(height, width)``; returns
     ``(height << log_blowup, width)``."""
-    height = eval_matrix.shape[0]
-    rs_height = height << log_blowup
-    # Columns are independent; encode them batched on the leading axis.
+    # Columns are independent; encode them batched on the leading axis. The
+    # zero-pad + forward NTT (natural order, no coset) is zorch
+    # ``ReedSolomon.encode`` — the same code object WHIR's rounds re-encode
+    # with, so Stage 1 and Stage 5 share one convention by construction.
     messages = eval_to_coeff_rs_message(l_skip, eval_matrix.T)
-    pad = jnp.zeros(messages.shape[:-1] + (rs_height - height,), eval_matrix.dtype)
-    coeffs = jnp.concatenate([messages, pad], axis=-1)
-    return lax.fft(coeffs, "FFT", rs_height).T
+    code = ReedSolomon(
+        message_len=eval_matrix.shape[0],
+        blowup=1 << log_blowup,
+        dtype=eval_matrix.dtype,
+    )
+    return code.encode(messages).T

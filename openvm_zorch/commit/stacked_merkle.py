@@ -89,28 +89,19 @@ def stacked_merkle_commit(
     compressor: Compression,
     matrix: Array,
     rows_per_query: int,
-    *,
-    jit: bool = False,
 ) -> StackedMerkleTree:
     """Hash each row of ``(height, width)`` ``matrix`` to a leaf, fold
     ``log2(rows_per_query)`` query-strided levels, then plain pairs to the root.
 
     Delegates the strided fold to zorch's scheme-agnostic ``StridedMerkleTree``
-    (the query-strided layout is not SWIRL-specific, so it belongs upstream).
-    ``fuse=True`` emits the ``zorch.merkle_commit`` marker so zkx's
-    ``ExpandMerkleCommit`` (zkx #648, in the dev20260611070701 wheel) lowers the
-    whole commit — including the ``log2(rows_per_query)`` strided levels — through
-    the cross-leaf Poseidon2 fusion instead of dispatching one composite per pair.
-
-    The fusion marker only lowers under ``jax.jit``; an eager ``commit`` dispatches
-    the Poseidon2 tree op-by-op (the dominant cost — Stage-1's whole ~3.2s warm).
-    ``jit=True`` runs ``commit`` under ``jax.jit`` so the marker fuses, collapsing
-    the eager dispatch storm (Stage-1 commit ~3.2s -> ~1ms; issue #1). Callers
-    already inside their own jit (WHIR's ``_encode_commit``) leave it ``False`` —
-    the region fuses under the outer trace and a nested jit would only re-trace.
+    (the query-strided layout is not SWIRL-specific, so it belongs upstream) and
+    always commits under ``_jitted_commit``'s cached ``jax.jit``: the tree's
+    ``zorch.merkle_commit`` marker only lowers through zkx's
+    ``ExpandMerkleCommit`` cross-leaf Poseidon2 fusion inside a jit trace, while
+    an eager commit decomposes into one composite dispatch per pair — that
+    dispatch storm was Stage-1's whole warm cost (~3.2s eager vs ~1ms jitted,
+    issue #1), so an eager mode has no use worth a knob.
     """
-    tree = StridedMerkleTree(sponge, compressor, rows_per_query, fuse=True)
-    _, digest_layers = (
-        _jitted_commit(tree, matrix) if jit else tree.commit(matrix)
-    )
+    tree = StridedMerkleTree(sponge, compressor, rows_per_query)
+    _, digest_layers = _jitted_commit(tree, matrix)
     return StackedMerkleTree(matrix, digest_layers, rows_per_query)
