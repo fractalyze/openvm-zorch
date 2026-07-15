@@ -242,6 +242,74 @@ def _stack_promote(node_vals: Sequence[Array], refs: Sequence[int]) -> Array:
     return jnp.stack([jnp.broadcast_to(v, shape) for v in vals], axis=-1)
 
 
+def _ceval_folds(
+    dag, needs_next, public_values, sels, mats, lambda_pows, beta_pows, eq_3bs_t
+):
+    """The zerocheck (``Σ λ^k C_k``) and LogUp (numerator, denominator) folds of
+    one trace's ``(sels, mats)`` evals via ``zorch.constraint_eval``, sharing one
+    packed trace across all three (the MLE rounds evaluate zc and logup off the
+    same ``node_vals``; round 0 can't reuse this because its zc and logup use
+    different coset counts). Returns ``(acc, numer, denom)`` reshaped to the
+    leading shape; ``numer``/``denom`` are ``None`` when the AIR has no
+    interactions. Byte-identical to ``acc_constraints`` / ``acc_interactions`` —
+    see ``lu_eval`` for the β-RLC flattening the denominator fold uses."""
+    mat_ws = [m.shape[-1] for m in mats]
+    lead = sels.shape[:-1]
+    packed = _pack_cols(sels, mats)
+
+    def _nodes(tr):
+        s = tr[..., :3]
+        cols, off = [], 3
+        for w in mat_ws:
+            cols.append(tr[..., off : off + w])
+            off += w
+        return eval_nodes(dag, s, _dag_parts(cols, needs_next), public_values)
+
+    def _fold(refs, coeffs):
+        def eval_fn(tr):
+            return _stack_promote(_nodes(tr), refs)
+
+        return constraint_eval(
+            eval_fn, packed, jnp.stack(coeffs), live_width=packed.shape[0]
+        ).reshape(lead)
+
+    # A lookup-only AIR has no zerocheck constraints; match acc_constraints'
+    # empty-fold scalar zero (an empty α-stack has nothing to fold).
+    acc = (
+        _fold(
+            dag.constraint_idx,
+            [lambda_pows[k] for k in range(len(dag.constraint_idx))],
+        )
+        if dag.constraint_idx
+        else jnp.zeros((), EF)
+    )
+    if not dag.interactions:
+        return acc, None, None
+
+    numer = _fold([i.count for i in dag.interactions], list(eq_3bs_t))
+    denom_refs = [m for intr in dag.interactions for m in intr.message]
+    denom_coeffs = [
+        eq_3bs_t[i] * beta_pows[j]
+        for i, intr in enumerate(dag.interactions)
+        for j in range(len(intr.message))
+    ]
+    bus_const = sum(
+        (
+            eq_3bs_t[i]
+            * beta_pows[len(intr.message)]
+            * f_to_ef(f_const(intr.bus_index + 1))
+            for i, intr in enumerate(dag.interactions)
+        ),
+        jnp.zeros((), EF),
+    )
+    denom = (
+        (_fold(denom_refs, denom_coeffs) + bus_const)
+        if denom_refs
+        else jnp.broadcast_to(bus_const, lead)
+    )
+    return acc, numer, denom
+
+
 # Round-0 kernels, keyed by the identity of the AIR's DAG plus every other
 # static input the kernels close over. `frx.jit` caches per wrapped callable,
 # so handing it a freshly-built closure on each prove defeats that cache: every
@@ -539,19 +607,23 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                     mats_dom = [
                         round_dom.sample(m[0::2], m[1::2]) for m in bufs_mats[t]
                     ]
-                    node_vals = eval_nodes(
+                    # Per-round zc + logup folds via the same constraint_eval
+                    # markers round 0 uses (shared packed trace — one node walk
+                    # feeds both). Byte-identical to acc_constraints /
+                    # acc_interactions.
+                    acc, numer, denom = _ceval_folds(
                         dag,
-                        sels_dom,
-                        _dag_parts(mats_dom, nxt),
+                        nxt,
                         pubs,
+                        sels_dom,
+                        mats_dom,
+                        lambda_pows,
+                        beta_pows,
+                        eq_3bs[t],
                     )
-                    acc = acc_constraints(dag, node_vals, lambda_pows)
                     zc = (acc * eq_xi[None, :]).sum(axis=1)
                     zc0 = eq_n * _row0(acc)
                     if dag.interactions:
-                        numer, denom = acc_interactions(
-                            dag, node_vals, beta_pows, eq_3bs[t]
-                        )
                         p = (numer * eq_xi[None, :]).sum(axis=1) * norm
                         q = (denom * eq_xi[None, :]).sum(axis=1)
                         p0t = eq_sharp_n * _row0(numer) * norm
