@@ -15,31 +15,6 @@ as implemented by
 `develop-v2` lineage. This repo re-implements that prover on zorch, keeping
 only the SWIRL-specific surface here and pushing every generic block upstream.
 
-## Status
-
-| Stage | What it proves | Module | Status |
-|-------|----------------|--------|--------|
-| 1. Trace commit | Stacked PCS: stack traces → RS-encode columns → query-strided Merkle root | `openvm_zorch/commit` | byte-matches reference |
-| 2. LogUp-GKR | Interaction fractional sumcheck | `openvm_zorch/logup_gkr` | byte-matches reference |
-| 3. ZeroCheck | Batched constraints, univariate skip + multivariate sumcheck | `openvm_zorch/logup_zerocheck` | byte-matches reference |
-| 4. Stacked reduction | Column openings → stacked matrix openings | `openvm_zorch/stacked_reduction` | byte-matches reference |
-| 5. WHIR opening | μ-batched sumcheck folds + per-round RS commits, OOD + query phase, PoW grinds | `openvm_zorch/whir` | byte-matches reference |
-
-All five stages replay the reference prover's full 945-entry transcript log
-end-to-end on the shared fixture instance. `openvm_zorch/prove.py` composes
-them into a single `prove()` driven by raw inputs only (traces, constraint
-DAGs, interaction specs, vk pre-hash, params) — no recorded log, PoW grinds
-run natively (`prove_test.py`). That test also runs the prover at
-production-shaped params (`l_skip=4`, `k_whir=4`) against a self-contained
-fixture, where every short trace takes the lifting/striding path the test
-params never exercise.
-
-`openvm_zorch/verify.py` is the matching verifier: from the proof + verifying
-key alone (no traces) it re-derives every Fiat-Shamir challenge and checks
-each stage's algebraic relation, including WHIR's query-phase Merkle-path
-verification. `verify_test.py` confirms an honest proof verifies and that a
-proof tampered in any one stage is rejected.
-
 ## Quick start
 
 ```sh
@@ -74,3 +49,7 @@ plonky3 `=0.4.3`).
 
 See [`docs/`](docs/README.md) for the full index — pipeline & terminology, and
 development & benchmarking.
+
+## License
+
+Licensed under the Apache License, Version 2.0 (see [LICENSE](LICENSE)).
