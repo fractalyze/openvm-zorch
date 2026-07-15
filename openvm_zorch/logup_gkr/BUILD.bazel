@@ -40,7 +40,7 @@ py_library(
         "@zorch//zorch:transcript",
         "@zorch//zorch/logup_gkr",
         "@zorch//zorch/poly",
-        "//openvm_zorch:_sumcheck_scan",
+        "@zorch//zorch/sumcheck",
         "@zorch//zorch/utils:bits",
         requirement("jax"),
     ],

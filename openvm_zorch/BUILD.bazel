@@ -50,23 +50,6 @@ py_library(
     ],
 )
 
-# Vendored homogeneous sumcheck scan (fold_pair / lift_to_domain / prove),
-# removed from zorch.sumcheck.prover by the pin's #422 refactor; see the module
-# docstring. Stage-3/4/5 provers drive it.
-py_library(
-    name = "_sumcheck_scan",
-    srcs = [
-        "__init__.py",
-        "_sumcheck_scan.py",
-    ],
-    visibility = ["//openvm_zorch:__subpackages__"],
-    deps = [
-        "@zorch//zorch:transcript",
-        "@zorch//zorch/utils:bits",
-        requirement("jax"),
-    ],
-)
-
 # OpenVM's Fiat-Shamir transcript: zorch DuplexTranscript + BabyBear⁴ glue.
 py_library(
     name = "transcript",

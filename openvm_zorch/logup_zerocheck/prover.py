@@ -24,10 +24,10 @@ Structure per the reference (driver mod.rs, per-trace math cpu.rs):
   here is ≤ ``s_0_deg`` (13 coefficients), so unrolled exact arithmetic
   beats array plumbing.
 
-Reuse: ``lift_to_domain``/``fold_pair`` (vendored in ``_sumcheck_scan``; LSB
-pairing — identical to the
-reference's MLE fold), ``expand_eq_to_hypercube`` (fed reversed ξ slices, the
-Stage-2 convention), ``eval_eq``, ``compute_inv_vandermonde``, ``eval_coeffs``
+Reuse: ``natural_domain`` (the round-poly sample domain; the LSB pairing it is
+fed is identical to the reference's MLE fold), ``expand_eq_to_hypercube`` (fed
+reversed ξ slices, the Stage-2 convention), ``eval_eq``,
+``compute_inv_vandermonde``, ``eval_coeffs``
 (coefficient-form univariate eval, O(1) graph in degree). The
 prismalinear/univariate-skip pieces live in ``prism.py``; the constraint DAG
 evaluator in ``constraints.py``.
@@ -47,7 +47,6 @@ import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
-from openvm_zorch._sumcheck_scan import fold_pair, lift_to_domain
 from openvm_zorch.fields import EF, F, f_const, f_inv_const, f_to_ef
 from openvm_zorch.logup_gkr.input_layer import interactions_layout
 from openvm_zorch.logup_zerocheck import prism
@@ -60,8 +59,19 @@ from openvm_zorch.logup_zerocheck.constraints import (
 from openvm_zorch.transcript import sample_ext
 from zorch.poly.eq import eval_eq, expand_eq_to_hypercube
 from zorch.poly.univariate import compute_inv_vandermonde, eval_coeffs
+from zorch.sumcheck.domain import natural_domain
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
+
+
+def _fold_pair(p0: Array, p1: Array, r: Array) -> Array:
+    """Fold one split pair at challenge ``r``: ``P0 + r*(P1 − P0)``.
+
+    Not zorch's ``sumcheck.domain.fold``, which splits the pair off the trailing
+    axis: these buffers carry the cube variable *leading* (the trailing axis
+    indexes a trace's selectors / columns), and the caller both splits them
+    LSB-first and re-pads the dead tail, so only the combine is shared math."""
+    return p0 + r * (p1 - p0)
 
 
 @dataclass(frozen=True)
@@ -464,9 +474,8 @@ def prove_batch_constraints(
     # Wrapping the unrolled loop in one jit instead *regressed* compile time (one
     # giant module; #33). The fix is a `lax.scan` whose body compiles once,
     # independent of n_max: each trace keeps a fixed-width buffer and stride-pair
-    # folds in place, re-padding the dead tail with zeros (mirroring
-    # `_sumcheck_scan._prove_scan`'s fixed-width + dynamic-window scheme, but with
-    # the reference's LSB-stride pairing, not high/low halves). Front-load
+    # folds in place, re-padding the dead tail with zeros — pairing LSB-stride as
+    # the reference's MLE fold does, not high/low halves. Front-load
     # exhaustion (round > ñ_t, ñ_t static) becomes a per-trace `jnp.where` on the
     # dynamic scan index instead of a Python branch. The round math is unchanged
     # from the eager body — only the loop carrier moved into the scan carry.
@@ -474,6 +483,7 @@ def prove_batch_constraints(
     domain_pts = jnp.stack(
         [f_to_ef(f_const(i)) for i in range(1, s_deg + 1)]
     )  # the {1..s_deg} round-poly sample points
+    round_dom = natural_domain(s_deg - 1, EF)  # {0..s_deg-1}, the lifted MLE evals
     n_lifts = [max(n, 0) for n in n_per_trace]
     norms = [f_to_ef(f_inv_const(1 << max(-n, 0))) for n in n_per_trace]
 
@@ -539,12 +549,8 @@ def prove_batch_constraints(
                 # f̂(r⃗) lands at acc[0,0] once the buffer is frozen (below), so
                 # the tilde base reuses it — no second eval_nodes.
                 eq_xi = eq_xi_row[t]
-                sels_dom = lift_to_domain(
-                    bufs_sels[t][0::2], bufs_sels[t][1::2], s_deg - 1
-                )
-                mats_dom = [
-                    lift_to_domain(m[0::2], m[1::2], s_deg - 1) for m in bufs_mats[t]
-                ]
+                sels_dom = round_dom.sample(bufs_sels[t][0::2], bufs_sels[t][1::2])
+                mats_dom = [round_dom.sample(m[0::2], m[1::2]) for m in bufs_mats[t]]
                 node_vals = eval_nodes(
                     air.dag,
                     sels_dom,
@@ -644,12 +650,12 @@ def prove_batch_constraints(
         for t, n_lift in enumerate(n_lifts):
             if n_lift >= 1:
                 live = round_idx <= n_lift
-                fs = fold_pair(bufs_sels[t][0::2], bufs_sels[t][1::2], r_round)
+                fs = _fold_pair(bufs_sels[t][0::2], bufs_sels[t][1::2], r_round)
                 fs = jnp.concatenate([fs, jnp.zeros_like(fs)], axis=0)
                 new_bufs_sels.append(jnp.where(live, fs, bufs_sels[t]))
                 folded_m = []
                 for m in bufs_mats[t]:
-                    fm = fold_pair(m[0::2], m[1::2], r_round)
+                    fm = _fold_pair(m[0::2], m[1::2], r_round)
                     fm = jnp.concatenate([fm, jnp.zeros_like(fm)], axis=0)
                     folded_m.append(jnp.where(live, fm, m))
                 new_bufs_mats.append(folded_m)

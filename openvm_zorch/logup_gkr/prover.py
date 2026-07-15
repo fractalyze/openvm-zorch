@@ -2,9 +2,9 @@
 
 Reuses zorch's dense circuit (``GkrLayer`` / ``build_pyramid`` — the stride-2
 pair fold is byte-identical to the reference's segment tree) and its sumcheck
-primitives (``lift_to_domain`` / ``fold_pair``), but drives the per-layer
-sumcheck itself: the reference's transcript differs from zorch's own GKR
-protocol in form, not structure —
+primitives (``fold``), but drives the per-layer sumcheck itself: the
+reference's transcript differs from zorch's own GKR protocol in form, not
+structure —
 
 - round polynomials are sent as evaluations on ``{1, 2, 3}`` (the verifier
   infers ``s(0)`` from the previous claim); zorch observes all of ``{0..3}``;
@@ -29,10 +29,10 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from openvm_zorch._sumcheck_scan import fold_pair
 from openvm_zorch.transcript import sample_ext
 from zorch.logup_gkr.circuit import GkrLayer, build_pyramid
 from zorch.poly.eq import expand_eq_to_hypercube
+from zorch.sumcheck.domain import fold
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
@@ -120,7 +120,7 @@ def _round_poly(state: list[Array], lam: Array) -> Array:
 def _round_fold(state: list[Array], r: Array) -> list[Array]:
     """Fold each MLE at challenge r over the same LSB pairing as `_round_poly`.
     Variable width, no transcript."""
-    return [fold_pair(a[0::2], a[1::2], r) for a in state]
+    return [fold(a, r, msb=False) for a in state]
 
 
 @dataclass(frozen=True)
