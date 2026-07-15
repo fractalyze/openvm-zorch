@@ -43,6 +43,7 @@ from frx import lax
 from zk_dtypes import babybear_mont as F
 from zkbench import BenchmarkConfig, BenchmarkOp, FrxBenchmark
 
+from openvm_zorch.bench_common import array_leaves
 from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import fractional_sumcheck
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
@@ -55,25 +56,6 @@ from zorch.hash.poseidon2.poseidon2 import Poseidon2
 from zorch.hash.sponge import Sponge, SpongeParams
 
 _OPS = ("grind", "input_evals", "frac_sumcheck", "total")
-
-
-def _array_leaves(obj):
-    """Flatten FRX arrays out of a (possibly dataclass) structure, so the
-    harness's ``block_until_ready`` reaches them — stage outputs are plain
-    dataclasses, not registered pytrees (block on them is a silent no-op)."""
-    if isinstance(obj, frx.Array):
-        return [obj]
-    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return [
-            a
-            for f in dataclasses.fields(obj)
-            for a in _array_leaves(getattr(obj, f.name))
-        ]
-    if isinstance(obj, (list, tuple)):
-        return [a for x in obj for a in _array_leaves(x)]
-    if isinstance(obj, dict):
-        return [a for x in obj.values() for a in _array_leaves(x)]
-    return []
 
 
 def _poseidon2():
@@ -201,7 +183,7 @@ class LogupGkrPhasesBenchmark(FrxBenchmark):
         def _op(name, fn) -> BenchmarkOp:
             return BenchmarkOp(
                 name=name,
-                fn=lambda: _array_leaves(fn()),
+                fn=lambda: array_leaves(fn()),
                 metadata=meta,
                 throughput_unit="rows/s",
                 throughput_count=total_rows,
