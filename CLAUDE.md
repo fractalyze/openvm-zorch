@@ -1,7 +1,7 @@
 # Project context for Claude Code
 
 - **Overview & quick start:** [`README.md`](README.md)
-- **Pipeline & terminology:** [`docs/architecture.md`](docs/architecture.md) — SWIRL stages as Round compositions, openvm-stark-backend vocabulary mapping.
+- **Pipeline & terminology:** [`docs/architecture.md`](docs/architecture.md) — the five SWIRL stages as zorch Stage/Bridge/Round compositions, openvm-stark-backend vocabulary mapping.
 - **Development & benchmarking:** [`docs/development.md`](docs/development.md) — dev environment, the `zorch` dependency and pin/wheel-bump rules, running on GPU, the recurring JAX/fork gotchas, and how to benchmark against the native prover.
 
 ## One non-negotiable

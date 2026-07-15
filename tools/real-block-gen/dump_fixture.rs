@@ -1417,7 +1417,7 @@ fn main() -> eyre::Result<()> {
     //
     // Holders for two meta.json fields populated inside this block (they need
     // the present-set + the recorded transcript). Emitted in meta.json so
-    // zorch's CommitRound can iterate the real vk prelude and diff its
+    // zorch's CommitStage can iterate the real vk prelude and diff its
     // transcript element-by-element against ground truth (issue #59).
     let mut vk_prelude_json: Option<serde_json::Value> = None;
     let mut obs_log_json: Option<serde_json::Value> = None;

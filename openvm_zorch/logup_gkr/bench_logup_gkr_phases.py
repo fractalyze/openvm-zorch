@@ -1,21 +1,21 @@
 """LogUp-GKR stage phase ablation over a prove fixture (zkbench).
 
-Phases mirror GkrRound's body in ``openvm_zorch/prove.py``: ``grind`` (LogUp
+Phases mirror GkrStage's body in ``openvm_zorch/prove.py``: ``grind`` (LogUp
 PoW), ``input_evals`` (the DAG-built ``(count, denom)`` input layer over all
 AIRs), ``frac_sumcheck`` (the fractional-sumcheck round chain), plus ``total``
-(the whole GkrRound). ``total`` is the op that joins the milestone-4 per-stage
+(the whole GkrStage). ``total`` is the op that joins the milestone-4 per-stage
 report; the three sub-phases are this prover's own ablation.
 
 Structure mirrors sp1-zorch's ``bench_logup_gkr_phases.py`` so the per-stage
 benches read the same across repos. The harness is zkbench's ``JaxBenchmark``:
 it runs ``--warmup`` then ``--iterations`` timed runs and reports warm latency
-(GkrRound has no single ``lowered.compile()`` — a host-loop grind plus jit
+(GkrStage has no single ``lowered.compile()`` — a host-loop grind plus jit
 islands across a Python round loop — so no ``lower`` thunk is given and the op
 carries no zkbench compile metric; observe COMPILE out of band, see below).
 
 File loading, the chain build, and every phase's entry state stay outside the
-timers. Phase inputs are re-derived from the post-commit transcript (GkrRound
-reads only ``carry.sorted_airs`` + that transcript, never CommitRound's carry
+timers. Phase inputs are re-derived from the post-commit transcript (GkrStage
+reads only ``carry.sorted_airs`` + that transcript, never CommitStage's carry
 outputs) and the run aborts before timing if ``total``'s ``q0_claim`` drifts
 from the fixture's ``outputs/q0_claim.npy``, so the phases cannot silently
 diverge from what the real prove sees.
