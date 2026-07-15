@@ -20,8 +20,8 @@ and the BabyBear⁴ challenge conventions:
 
 from __future__ import annotations
 
-import jax.numpy as jnp
-from jax import Array, lax
+import frx.numpy as jnp
+from frx import Array, lax
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
 

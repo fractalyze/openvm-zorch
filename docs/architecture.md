@@ -272,7 +272,7 @@ worthwhile follow-up.
 
 | Rust (stark-backend) | Here / zorch |
 |----------------------|--------------|
-| `ColMajorMatrix<F>` | `(height, width)` row-major `jax.Array` (transpose at the fixture boundary) |
+| `ColMajorMatrix<F>` | `(height, width)` row-major `frx.Array` (transpose at the fixture boundary) |
 | `PaddingFreeSponge<Perm,16,8,8>` | `zorch.hash.sponge.Sponge(rate=8, out=8)` |
 | `TruncatedPermutation<Perm,2,8,16>` | `zorch.hash.compression.Compression(arity=2, chunk=8)` |
 | `default_babybear_poseidon2_16` | `openvm_zorch.poseidon2.babybear16` |

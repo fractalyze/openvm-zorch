@@ -23,8 +23,9 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass
 
-import jax
-from jax import Array
+import frx
+import frx.numpy as jnp
+from frx import Array
 
 from zorch.commit.strided_merkle import StridedMerkleTree
 from zorch.hash.compression import Compression
@@ -73,12 +74,12 @@ class StackedMerkleTree:
         for layer in self.digest_layers[:-1]:
             siblings.append(layer[index ^ 1])
             index >>= 1
-        return jax.numpy.stack(siblings)
+        return jnp.stack(siblings)
 
 
-@functools.partial(jax.jit, static_argnums=0)
+@functools.partial(frx.jit, static_argnums=0)
 def _jitted_commit(tree: StridedMerkleTree, matrix: Array):
-    """``commit`` under ``jax.jit`` with ``tree`` static. ``StridedMerkleTree``
+    """``commit`` under ``frx.jit`` with ``tree`` static. ``StridedMerkleTree``
     hashes/compares by value (built for static jit-zone keys, zorch #214), so
     JAX's compile cache reuses one lowering per sponge/compressor/stride config."""
     return tree.commit(matrix)
@@ -95,7 +96,7 @@ def stacked_merkle_commit(
 
     Delegates the strided fold to zorch's scheme-agnostic ``StridedMerkleTree``
     (the query-strided layout is not SWIRL-specific, so it belongs upstream) and
-    always commits under ``_jitted_commit``'s cached ``jax.jit``: the tree's
+    always commits under ``_jitted_commit``'s cached ``frx.jit``: the tree's
     ``zorch.merkle_commit`` marker only lowers through zkx's
     ``ExpandMerkleCommit`` cross-leaf Poseidon2 fusion inside a jit trace, while
     an eager commit decomposes into one composite dispatch per pair — that

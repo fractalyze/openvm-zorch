@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Sequence
 
-import jax.numpy as jnp
-from jax import Array
+import frx.numpy as jnp
+from frx import Array
 
 from openvm_zorch.fields import MODULUS, f_const, f_inv_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism

@@ -24,8 +24,8 @@ op).
 
 from __future__ import annotations
 
-import jax.numpy as jnp
-from jax import Array, lax
+import frx.numpy as jnp
+from frx import Array, lax
 
 # The MLE coeff↔eval (zeta / Möbius) transforms are scheme-agnostic and live in
 # zorch; re-exported here so this module stays the SWIRL RS-message home and its

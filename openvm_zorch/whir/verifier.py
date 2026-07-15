@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
-import jax.numpy as jnp
-from jax import Array, lax
+import frx.numpy as jnp
+from frx import Array, lax
 
 from openvm_zorch.fields import F
 from openvm_zorch.poly_common import VerificationError

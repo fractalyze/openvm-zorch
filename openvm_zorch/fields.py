@@ -8,8 +8,8 @@ building canonical small constants (inverses included) host-side.
 
 from __future__ import annotations
 
-import jax.numpy as jnp
-from jax import Array
+import frx.numpy as jnp
+from frx import Array
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
 from zk_dtypes import pfinfo

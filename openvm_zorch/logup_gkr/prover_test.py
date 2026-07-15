@@ -12,10 +12,10 @@ no tolerances.
 import json
 from pathlib import Path
 
-import jax.numpy as jnp
+import frx.numpy as jnp
 import numpy as np
 from absl.testing import absltest
-from jax import lax
+from frx import lax
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.logup_gkr.input_layer import gkr_input_evals

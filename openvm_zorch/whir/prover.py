@@ -25,8 +25,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import jax.numpy as jnp
-from jax import Array
+import frx.numpy as jnp
+from frx import Array
 from zorch.coding.reed_solomon import ReedSolomon
 from zorch.commit.merkle import Opening
 from zorch.commit.strided_merkle import StridedMerkleTree

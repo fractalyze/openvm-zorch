@@ -14,10 +14,10 @@ log exactly. Canonical-u32 equality, no tolerances.
 import json
 from pathlib import Path
 
-import jax.numpy as jnp
+import frx.numpy as jnp
 import numpy as np
 from absl.testing import absltest
-from jax import lax
+from frx import lax
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.commit.trace_commit import stacked_commit

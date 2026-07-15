@@ -32,7 +32,7 @@ py_library(
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/pcs/whir",
         "@zorch//zorch/utils:bits",
-        requirement("jax"),
+        requirement("frx"),
         requirement("zk_dtypes"),
     ],
 )
@@ -56,7 +56,7 @@ py_library(
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/pcs/whir",
-        requirement("jax"),
+        requirement("frx"),
     ],
 )
 
@@ -74,7 +74,7 @@ py_test(
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("absl_py"),
-        requirement("jax"),
+        requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
     ],

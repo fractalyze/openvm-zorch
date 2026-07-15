@@ -25,9 +25,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import jax
-import jax.numpy as jnp
-from jax import Array
+import frx
+import frx.numpy as jnp
+from frx import Array
 
 from openvm_zorch.transcript import sample_ext
 from zorch.logup_gkr.circuit import GkrLayer, build_pyramid
@@ -66,19 +66,19 @@ def _lift_sent(lo: Array, hi: Array) -> Array:
     return lo + us.reshape((-1,) + (1,) * lo.ndim) * (hi - lo)
 
 
-@jax.jit
+@frx.jit
 def _observe(transcript: DuplexTranscript, values: Array) -> DuplexTranscript:
     """Absorb ``values`` inside one fused Poseidon2 kernel."""
     return transcript.observe(values)
 
 
-@jax.jit
+@frx.jit
 def _sample(transcript: DuplexTranscript) -> tuple[DuplexTranscript, Array]:
     """Squeeze one BabyBear⁴ challenge inside one fused Poseidon2 kernel."""
     return sample_ext(transcript)
 
 
-@jax.jit
+@frx.jit
 def _observe_sample(
     transcript: DuplexTranscript, values: Array
 ) -> tuple[DuplexTranscript, Array]:
@@ -107,7 +107,7 @@ def _observe_sample(
 # width (~90% of GKR compile); routing the transcript through the stable islands
 # lowers Poseidon2 ONCE. Warm runtime is unchanged — both keep one fused permutation
 # kernel per round — and the split is byte-identical (same ops, same order).
-@jax.jit
+@frx.jit
 def _round_poly(state: list[Array], lam: Array) -> Array:
     """The sent round poly s(1,2,3). λ weights the denominator term — opposite of
     logup_combine. Binds the LSB: pairs adjacent entries (the reference's MLE
@@ -116,7 +116,7 @@ def _round_poly(state: list[Array], lam: Array) -> Array:
     return jnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
 
 
-@jax.jit
+@frx.jit
 def _round_fold(state: list[Array], r: Array) -> list[Array]:
     """Fold each MLE at challenge r over the same LSB pairing as `_round_poly`.
     Variable width, no transcript."""
@@ -136,7 +136,7 @@ class FracSumcheckProof:
     rhos: list[list[Array]]
 
 
-@jax.jit
+@frx.jit
 def _eq_table(xi: list[Array]) -> Array:
     """eq(ξ, y) for y on the hypercube, little-endian in ξ (ξ[0] ↔ bit 0)."""
     point = jnp.stack(xi[::-1])

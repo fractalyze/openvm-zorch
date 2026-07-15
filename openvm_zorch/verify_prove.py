@@ -36,11 +36,11 @@ import sys
 import time
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
+import frx
+import frx.numpy as jnp
 import numpy as np
 from absl import app, flags
-from jax import lax
+from frx import lax
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
@@ -109,16 +109,16 @@ def _rounds_through(rounds, stop_label):
 
 
 def _array_leaves(obj):
-    """Flatten the jax arrays out of an arbitrary nested structure.
+    """Flatten the JAX arrays out of an arbitrary nested structure.
 
     A stage's output (carry, transcript, message) mixes plain ``@dataclass``
     objects -- ``ProveCarry``, the proof messages -- that are not registered
-    JAX pytrees, so ``jax.tree_util`` (and therefore ``jax.block_until_ready``)
+    JAX pytrees, so ``frx.tree_util`` (and therefore ``frx.block_until_ready``)
     cannot see the arrays inside them; blocking on them directly is a silent
     no-op that would stop the timer at dispatch rather than at compute
     completion. Walk the structure by hand instead.
     """
-    if isinstance(obj, jax.Array):
+    if isinstance(obj, frx.Array):
         return [obj]
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return [
@@ -151,7 +151,7 @@ class _TimedRound(Round):
     def __call__(self, carry, transcript):
         t0 = time.monotonic()
         out = self._inner(carry, transcript)
-        jax.block_until_ready(_array_leaves(out))
+        frx.block_until_ready(_array_leaves(out))
         dt = time.monotonic() - t0
         label = _STAGE_LABELS.get(
             type(self._inner).__name__, type(self._inner).__name__
@@ -393,7 +393,7 @@ def main(argv) -> None:
     sponge, comp = _poseidon2()
 
     heights = [int(a.trace.shape[0]) for a in airs]
-    print(f"backend={jax.default_backend()} devices={jax.devices()}")
+    print(f"backend={frx.default_backend()} devices={frx.devices()}")
     print(
         f"fixture={prove_dir}  trace_heights={heights}  "
         f"whir_rounds={len(params.whir.num_queries)}"
