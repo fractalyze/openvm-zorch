@@ -5,5 +5,5 @@ Reference documentation for the openvm-zorch SWIRL prover. Start with the
 
 | Doc | What's in it |
 |-----|--------------|
-| [`swirl-pipeline.md`](swirl-pipeline.md) | The five SWIRL stages in detail, end-to-end composition, verifier, terminology mapping to openvm-stark-backend, and the `SystemParams` cheat sheet. |
+| [`architecture.md`](architecture.md) | The five SWIRL stages in detail, end-to-end composition, verifier, terminology mapping to openvm-stark-backend, and the `SystemParams` cheat sheet. |
 | [`development.md`](development.md) | Dev environment (JAX/Bazel), the `zorch` dependency and pin/wheel-bump rules, running on GPU, the recurring JAX/fork gotchas, and benchmarking against the native prover. |

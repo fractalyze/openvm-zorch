@@ -10,7 +10,7 @@ export PYTHONPATH="$PWD:/abs/path/to/zorch"
 ```
 
 A read-only worktree of the reference prover is expected at
-`$DEVENV_ENVS_DIR/zorch/stark-backend` (see [`swirl-pipeline.md`](swirl-pipeline.md)).
+`$DEVENV_ENVS_DIR/zorch/stark-backend` (see [`architecture.md`](architecture.md)).
 
 ## Dependency on zorch
 
