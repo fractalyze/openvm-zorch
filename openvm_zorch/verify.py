@@ -62,7 +62,7 @@ from openvm_zorch.whir.prover import WhirProof
 from openvm_zorch.whir.verifier import verify_whir
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
-from zorch.round import Round, VerifyChain
+from zorch.round import Stage, VerifyChain
 from zorch.transcript import DuplexTranscript
 
 
@@ -120,7 +120,7 @@ class VerifyCarry:
     stacking_openings: Sequence[Sequence[Array]] | None = None
 
 
-class CommitVerifierStage(Round):
+class CommitVerifierStage(Stage):
     """Stage 1 dual of ``CommitStage``: replays the preamble absorb stream (vk
     pre-hash, the commitment, then per AIR in *input* order an optional present
     flag, log height, and public values) with the proof's commitment message,
@@ -145,7 +145,7 @@ class CommitVerifierStage(Round):
         return carry, transcript, jnp.bool_(True)
 
 
-class GkrVerifierStage(Round):
+class GkrVerifierStage(Stage):
     """Stage 2 dual of ``GkrStage`` over ``verify_gkr_stage``: writes α/β, the
     padded point ξ, and the GKR claims onto the carry for ZeroCheck. The message
     is the GKR stage's proof contribution (``GkrStageMsg``); its ``xi`` field is
@@ -184,7 +184,7 @@ class GkrVerifierStage(Round):
         return carry, transcript, jnp.bool_(True)
 
 
-class ZeroCheckVerifierStage(Round):
+class ZeroCheckVerifierStage(Stage):
     """Stage 3 dual of ``ZeroCheckStage`` over ``verify_zerocheck_stage``:
     consumes the Stage-2 outputs off the carry, verifies the batched ZeroCheck +
     LogUp sumcheck, and writes the sumcheck point ``r`` plus the proof's column
@@ -219,7 +219,7 @@ class ZeroCheckVerifierStage(Round):
         return carry, transcript, jnp.bool_(True)
 
 
-class StackingVerifierStage(Round):
+class StackingVerifierStage(Stage):
     """Stage 4 dual of ``StackingStage`` over ``verify_stacked_reduction``:
     rebuilds the stacked layout from the verifying keys, batches the column
     openings off the carry, and verifies the stacked opening reduction. Writes
@@ -253,7 +253,7 @@ class StackingVerifierStage(Round):
         return carry, transcript, jnp.bool_(True)
 
 
-class WhirVerifierStage(Round):
+class WhirVerifierStage(Stage):
     """Stage 5 dual of ``WhirStage`` over ``verify_whir``: forms ``u_cube`` from
     the opening point on the carry (the same Stage-4 → Stage-5 handoff
     ``u_cube = (u₀ squarings over the skip domain) ‖ u[1..]`` the prover does),
