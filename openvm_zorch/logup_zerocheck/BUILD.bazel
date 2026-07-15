@@ -53,6 +53,7 @@ py_library(
         "//openvm_zorch:fields",
         "//openvm_zorch:transcript",
         "//openvm_zorch/logup_gkr:input_layer",
+        "@zorch//zorch:constraint_eval",
         "@zorch//zorch:transcript",
         "@zorch//zorch/poly",
         "@zorch//zorch/sumcheck",

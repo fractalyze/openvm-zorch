@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import time
 import weakref
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import frx
@@ -53,11 +54,13 @@ from openvm_zorch.logup_gkr.input_layer import interactions_layout
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.logup_zerocheck.constraints import (
     ConstraintsDag,
+    _promote,
     acc_constraints,
     acc_interactions,
     eval_nodes,
 )
 from openvm_zorch.transcript import sample_ext
+from zorch.constraint_eval import constraint_eval
 from zorch.poly.eq import eval_eq, expand_eq_to_hypercube
 from zorch.poly.univariate import compute_inv_vandermonde, eval_coeffs
 from zorch.sumcheck.domain import natural_domain
@@ -208,6 +211,37 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     return [[f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)]
 
 
+def _pack_cols(sels_cells: Array, mat_cells: list[Array]) -> Array:
+    """Pack selector + matrix coset columns into a RANK-2 ``(M, 3 + Σ widths)``
+    ``trace`` for ``constraint_eval`` — sp1-zorch's ``_fold_chip`` layout, which
+    flattens every leading (coset / size / row) dimension into the row axis and
+    stacks the scalar columns on the trailing axis.
+
+    Matching that rank-2 shape is load-bearing on GPU: passing the natural
+    higher-rank ``(num_cosets, size, rows, nc)`` trace tripped the XLA
+    ``EmitConcat`` codegen (a null cmpi index → ``IntegerType::get`` SIGSEGV,
+    fractalyze/zkx#754); the rank-2 form sp1 already compiles cleanly. The caller
+    reshapes the folded ``(M,)`` result back to the leading shape. Column order is
+    selectors then each part's columns, so the ``eval_fn`` slicing is unchanged."""
+    cols = [sels_cells[..., j].reshape(-1) for j in range(sels_cells.shape[-1])]
+    cols += [m[..., j].reshape(-1) for m in mat_cells for j in range(m.shape[-1])]
+    return jnp.stack(cols, axis=-1)  # (M, nc)
+
+
+def _stack_promote(node_vals: Sequence[Array], refs: Sequence[int]) -> Array:
+    """Stack promoted DAG-node values along a new trailing axis for a fold.
+
+    A DAG node is per-row (trace variables) or row-constant (``constant`` /
+    ``public`` nodes evaluate to scalars). The reference ``acc_*`` folds mix the
+    two via broadcasting addition; ``jnp.stack`` needs identical shapes, so
+    broadcast the row-constants up to the common leading shape first. Byte-
+    identical to weighting each node in place, since the fold is linear per
+    node."""
+    vals = [_promote(node_vals[r]) for r in refs]
+    shape = jnp.broadcast_shapes(*(v.shape for v in vals))
+    return jnp.stack([jnp.broadcast_to(v, shape) for v in vals], axis=-1)
+
+
 # Round-0 kernels, keyed by the identity of the AIR's DAG plus every other
 # static input the kernels close over. `frx.jit` caches per wrapped callable,
 # so handing it a freshly-built closure on each prove defeats that cache: every
@@ -277,9 +311,34 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
             mat_cells = [
                 prism.coset_evals(l_skip, m, num_cosets_zc) for m in trace_mats
             ]
-            parts = _dag_parts(mat_cells, needs_next)
-            node_vals = eval_nodes(dag_, sels_cells, parts, public_values)
-            acc = acc_constraints(dag_, node_vals, lambda_pows)
+            # Fold the K constraints under λ via ``zorch.constraint_eval`` (#45):
+            # the marker lets a recognizing emitter accumulate ``Σ λ^k C_k`` in
+            # one kernel and never materialize the ``[..., K]`` constraint
+            # tensor. ``eval_fn`` is opaque, so the coset cells ride in as one
+            # packed ``trace`` (selectors ‖ each part's columns); it slices them
+            # back, walks the DAG, and returns the K constraint nodes stacked on
+            # the trailing axis. Byte-identical to ``eval_nodes`` +
+            # ``acc_constraints`` — the composite inlines to the same fold on an
+            # unrecognizing backend, and field addition is associative.
+            mat_ws = [c.shape[-1] for c in mat_cells]
+            lead = sels_cells.shape[:-1]  # (num_cosets, size, rows)
+            packed = _pack_cols(sels_cells, mat_cells)  # (M, nc)
+
+            def eval_fn(tr):
+                sels = tr[..., :3]
+                cols, off = [], 3
+                for w in mat_ws:
+                    cols.append(tr[..., off : off + w])
+                    off += w
+                node_vals = eval_nodes(
+                    dag_, sels, _dag_parts(cols, needs_next), public_values
+                )
+                return _stack_promote(node_vals, dag_.constraint_idx)
+
+            alpha = jnp.stack([lambda_pows[k] for k in range(len(dag_.constraint_idx))])
+            acc = constraint_eval(
+                eval_fn, packed, alpha, live_width=packed.shape[0]
+            ).reshape(lead)  # (num_cosets, size, rows)
             weighted = acc * eq_xi[None, None, :]
             return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
     else:
@@ -292,9 +351,70 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
         mat_cells = [
             prism.coset_evals(l_skip, m, constraint_degree) for m in trace_mats
         ]
-        parts = _dag_parts(mat_cells, needs_next)
-        node_vals = eval_nodes(dag_, sels_cells, parts, public_values)
-        numer, denom = acc_interactions(dag_, node_vals, beta_pows, eq_3bs_t)
+        # The two LogUp folds via ``zorch.constraint_eval`` — the same
+        # no-materialize lever as the zerocheck fold above. A composite's
+        # ``eval_fn`` may not close over a traced value, so β rides in the fold
+        # COEFFICIENTS (the alpha operand), never inside ``eval_fn``:
+        #   numerator  ``Σ_i eq_3b_i · count_i`` — eval_fn returns the count
+        #     nodes, α = eq_3b.
+        #   denominator ``Σ_i eq_3b_i · h_β_i``, with the inner β-RLC
+        #     ``h_β_i = β^{|m_i|}·(bus_i+1) + Σ_j β^j·node[m_i[j]]`` FLATTENED into
+        #     one RLC: the node terms fold under ``α_{i,j} = eq_3b_i·β^j`` (eval_fn
+        #     returns those nodes) and the row-constant bus term
+        #     ``Σ_i eq_3b_i·β^{|m_i|}·(bus_i+1)`` adds outside the fold.
+        # Both are exact field reassociations of ``acc_interactions``, so byte-
+        # identical.
+        mat_ws = [c.shape[-1] for c in mat_cells]
+        lead = sels_cells.shape[:-1]  # (num_cosets, size, rows)
+        packed = _pack_cols(sels_cells, mat_cells)  # (M, nc)
+
+        def _nodes(tr):
+            sels = tr[..., :3]
+            cols, off = [], 3
+            for w in mat_ws:
+                cols.append(tr[..., off : off + w])
+                off += w
+            return eval_nodes(dag_, sels, _dag_parts(cols, needs_next), public_values)
+
+        def count_fn(tr):
+            return _stack_promote(_nodes(tr), [i.count for i in dag_.interactions])
+
+        numer = constraint_eval(
+            count_fn, packed, jnp.stack(list(eq_3bs_t)), live_width=packed.shape[0]
+        ).reshape(lead)
+
+        denom_refs = [m for intr in dag_.interactions for m in intr.message]
+        denom_coeffs = [
+            eq_3bs_t[i] * beta_pows[j]
+            for i, intr in enumerate(dag_.interactions)
+            for j in range(len(intr.message))
+        ]
+        bus_const = sum(
+            (
+                eq_3bs_t[i]
+                * beta_pows[len(intr.message)]
+                * f_to_ef(f_const(intr.bus_index + 1))
+                for i, intr in enumerate(dag_.interactions)
+            ),
+            jnp.zeros((), EF),
+        )
+        if denom_refs:
+
+            def denom_fn(tr):
+                return _stack_promote(_nodes(tr), denom_refs)
+
+            denom = (
+                constraint_eval(
+                    denom_fn,
+                    packed,
+                    jnp.stack(denom_coeffs),
+                    live_width=packed.shape[0],
+                ).reshape(lead)
+                + bus_const
+            )
+        else:
+            denom = jnp.broadcast_to(bus_const, lead)
+
         p = (numer * eq_xi[None, None, :]).sum(axis=2)
         q = (denom * eq_xi[None, None, :]).sum(axis=2)
         return p, q  # each (num_cosets, size)
