@@ -20,7 +20,7 @@ https://github.com/Plonky3/Plonky3/blob/v0.4.3/baby-bear/src/poseidon2.rs
 
 from __future__ import annotations
 
-import jax.numpy as jnp
+import frx.numpy as jnp
 import numpy as np
 from zk_dtypes import babybear_mont as F
 

@@ -30,10 +30,10 @@ from __future__ import annotations
 import weakref
 from typing import Any, Callable, Sequence
 
-import jax
-import jax.numpy as jnp
+import frx
+import frx.numpy as jnp
 import numpy as np
-from jax import Array
+from frx import Array
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
 from zk_dtypes import pfinfo
@@ -50,7 +50,7 @@ from zorch.utils.bits import log2_strict_usize
 # Per-AIR jitted DAG evaluators, keyed by DAG identity. The per-AIR
 # eval_nodes + eval_interactions must be jitted (one kernel per AIR) or they run
 # as an eager node-by-node dispatch storm — 84% of GKR's warm GPU time (#44).
-# The compiled kernel is reused across proves (a fresh ``jax.jit`` per call would
+# The compiled kernel is reused across proves (a fresh ``frx.jit`` per call would
 # re-trace the whole node walk — the same dispatch cost). The entry is dropped by
 # a ``finalize`` when the DAG is collected, so the cache neither leaks nor returns
 # a stale kernel for a recycled ``id()``.
@@ -113,7 +113,7 @@ def _air_pairs(
 
     dag_ref = weakref.ref(dag)
 
-    @jax.jit
+    @frx.jit
     def _run(trace, cached, beta_pows):
         dag_ = dag_ref()
         sels = _sels(trace.shape[0])

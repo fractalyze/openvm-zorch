@@ -24,28 +24,30 @@ common --override_module=zorch=/abs/path/to/your/zorch/checkout
 
 Bump the pin when you need newer `zorch` blocks; keep it on `main` commits so
 CI is reproducible. A pin bump's commit range often also moves `zorch`'s own
-zkx wheel pins (`jax`/`jaxlib`/`jax-cuda12-pjrt`) — that does **not** force a
+frx wheel pins (`frx`/`frxlib`/`frx-cuda12-pjrt`) — that does **not** force a
 matching bump here. This repo pins those wheels independently in
-`requirements.in`, on a separate pip hub from `zorch`'s, and the two are
-allowed to skew. Only touch `requirements.in` if a build actually breaks;
-otherwise the pin bump is a one-line `MODULE.bazel` change. (To validate the
-pin the way CI resolves it, temporarily disable the `.bazelrc.user`
-`--override_module=zorch` line — otherwise the build silently uses your local
-checkout, not the pinned commit.)
+`requirements.in`, on a separate pip hub from `zorch`'s, and their **versions**
+are allowed to skew — the distribution *name* must match, or the two hubs put
+`jax` and `frx` on one interpreter as two separate modules. Only touch
+`requirements.in` if a build actually breaks; otherwise the pin bump is a
+one-line `MODULE.bazel` change. (To validate the pin the way CI resolves it,
+temporarily disable the `.bazelrc.user` `--override_module=zorch` line —
+otherwise the build silently uses your local checkout, not the pinned commit.)
 
-A jax wheel bump must move `zk-dtypes` in lockstep: each wheel imports a
+An frx wheel bump must move `zk-dtypes` in lockstep: each wheel imports a
 specific `zk_dtypes` ABI (e.g. `efinfo.modulus_low_coeffs` from 0.0.6,
-`pallas_sf` from 0.0.7), and jax's metadata does not floor the version, so the
-lock keeps the old `zk-dtypes` and every target dies at `import jax`. Bump the
-`zk-dtypes` pin in `requirements.in` alongside the jax pins and re-lock.
+`pallas_sf` from 0.0.7, the binary-field dtypes from 0.0.10), and frx's
+metadata does not floor the version, so the lock keeps the old `zk-dtypes` and
+every target dies at `import frx`. Bump the `zk-dtypes` pin in
+`requirements.in` alongside the frx pins and re-lock.
 
 ## Running on GPU
 
 `//openvm_zorch:verify_prove` is the entry point — the byte-match +
 per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
 
-- A target only sees the GPU if it deps **both** `requirement("jax_cuda12_plugin")`
-  and `requirement("jax_cuda12_pjrt")`; without them jax **silently falls back to
+- A target only sees the GPU if it deps **both** `requirement("frx_cuda12_plugin")`
+  and `requirement("frx_cuda12_pjrt")`; without them frx **silently falls back to
   CPU**. Run with `JAX_PLATFORMS=cuda` (not `gpu`, which also inits rocm and
   dies) so a missing plugin hard-errors instead of silently using CPU.
 - Those plugin `.so`s require **`libcuda` at import**, so a cuda-dep'd target
@@ -53,7 +55,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   **backend-agnostic** (no cuda deps) so `bazel test //...` runs on any
   machine; GPU lives only in `bazel run` tools like `verify_prove`.
 - `Proof` (and its stage sub-proofs) are plain dataclasses, not registered
-  pytrees, so `jax.block_until_ready(proof)` is a **no-op** — walk the tree
+  pytrees, so `frx.block_until_ready(proof)` is a **no-op** — walk the tree
   and block on the array leaves to time the device honestly.
 
 ## Recurring gotchas
@@ -66,7 +68,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   extent (e.g. the stacked matrix can end in an all-zero committed column).
   When a byte-match fails at a hash, first suspect a shape/padding delta,
   not the hash params.
-- zkx-native `jax.numpy` is a subset: `jnp.roll` does not exist (first hit
+- zkx-native `frx.numpy` is a subset: `jnp.roll` does not exist (first hit
   in Stage 4's rotation kernel — use
   `jnp.concatenate([a[-1:], a[:-1]])`), and `jnp.arange` iota is
   unsupported for extension dtypes (zorch builds domains via `jnp.stack`
@@ -85,9 +87,9 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   as a field array) and replace the scalar nest with one broadcast-multiply
   + a **trailing-axis** `.sum` (mid-axis EF reduce faults under jit; keep
   the contracted axis last). This is eager-fast and jit-fusable. Do NOT use
-  `jnp.dot`/`@`/`tensordot` — they mis-lower under `jax.jit` on this fork
+  `jnp.dot`/`@`/`tensordot` — they mis-lower under `frx.jit` on this fork
   (see `zorch/fusion.py`, `zorch/pcs/whir/_math.py`). And do NOT wrap a
-  scalar-list polynomial (`_conv` over 0-D coeffs) in `jax.jit` directly —
+  scalar-list polynomial (`_conv` over 0-D coeffs) in `frx.jit` directly —
   hundreds of pytree-leaf scalars regress; vectorize into arrays first.
   (PR #14 took round-0 prism 4.26→1.0s, whole prove −29%, this way.)
 

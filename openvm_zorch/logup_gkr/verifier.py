@@ -9,7 +9,7 @@ other stage duals in ``openvm_zorch/verify.py``, mirroring sp1-zorch's
 
 from __future__ import annotations
 
-from jax import Array
+from frx import Array
 
 from openvm_zorch.logup_gkr.prover import FracSumcheckProof
 from openvm_zorch.poly_common import (

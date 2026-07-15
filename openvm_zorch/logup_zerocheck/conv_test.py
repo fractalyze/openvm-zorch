@@ -2,10 +2,10 @@
 scalar ``_conv``. Guards the dispatch-storm rewrite of round-0's polynomial
 assembly (issue #3) independently of the full byte-match in prover_test."""
 
-import jax.numpy as jnp
+import frx.numpy as jnp
 import numpy as np
 from absl.testing import absltest
-from jax import lax
+from frx import lax
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.fields import EF, f_to_ef

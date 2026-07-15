@@ -24,9 +24,9 @@ import functools
 from dataclasses import dataclass
 from typing import Sequence
 
-import jax
-import jax.numpy as jnp
-from jax import Array, lax
+import frx
+import frx.numpy as jnp
+from frx import Array, lax
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, f_const, f_to_ef
@@ -91,7 +91,7 @@ def _uni_kernel_args(l_skip: int, n: int, omega: int, r_0: Array):
     return l_skip, omega, r_0
 
 
-@functools.partial(jax.jit, static_argnums=(0, 1, 2))
+@functools.partial(frx.jit, static_argnums=(0, 1, 2))
 def _round0_group_contrib(
     l_skip: int,
     l_eff: int,

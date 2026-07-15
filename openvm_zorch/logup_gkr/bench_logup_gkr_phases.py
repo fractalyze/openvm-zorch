@@ -36,10 +36,10 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
+import frx
+import frx.numpy as jnp
 import numpy as np
-from jax import lax
+from frx import lax
 from zk_dtypes import babybear_mont as F
 from zkbench import BenchmarkConfig, BenchmarkOp, JaxBenchmark
 
@@ -58,10 +58,10 @@ _OPS = ("grind", "input_evals", "frac_sumcheck", "total")
 
 
 def _array_leaves(obj):
-    """Flatten jax arrays out of a (possibly dataclass) structure, so the
+    """Flatten JAX arrays out of a (possibly dataclass) structure, so the
     harness's ``block_until_ready`` reaches them — stage outputs are plain
     dataclasses, not registered pytrees (block on them is a silent no-op)."""
-    if isinstance(obj, jax.Array):
+    if isinstance(obj, frx.Array):
         return [obj]
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return [

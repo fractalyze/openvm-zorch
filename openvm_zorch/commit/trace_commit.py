@@ -14,8 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-import jax
-from jax import Array
+import frx
+from frx import Array
 
 from openvm_zorch.commit.rs_message import rs_code_matrix
 from openvm_zorch.commit.stacked_merkle import StackedMerkleTree, stacked_merkle_commit
@@ -45,7 +45,7 @@ class StackedPcsData:
 # real common-main dims (2^21, ~2); the forward NTT itself is only ~0.2ms, so
 # the eager dispatch was the whole pole, not NTT FLOP (#46). ``l_skip`` /
 # ``log_blowup`` are static shape params. Mirrors stacked_merkle ``_jitted_commit``.
-_rs_encode = jax.jit(rs_code_matrix, static_argnums=(0, 1))
+_rs_encode = frx.jit(rs_code_matrix, static_argnums=(0, 1))
 
 
 def stacked_commit(

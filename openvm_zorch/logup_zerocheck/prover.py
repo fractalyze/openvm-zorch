@@ -43,9 +43,9 @@ import os
 import time
 from dataclasses import dataclass
 
-import jax
-import jax.numpy as jnp
-from jax import Array, lax
+import frx
+import frx.numpy as jnp
+from frx import Array, lax
 
 from openvm_zorch.fields import EF, F, f_const, f_inv_const, f_to_ef
 from openvm_zorch.logup_gkr.input_layer import interactions_layout
@@ -242,7 +242,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
             ]
         )
 
-        @jax.jit
+        @frx.jit
         def zc_eval(trace_sels, trace_mats, lambda_pows, eq_xi):
             sels_cells = prism.coset_evals(l_skip, trace_sels, num_cosets_zc)
             mat_cells = [
@@ -256,7 +256,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     else:
         zc_eval = None
 
-    @jax.jit
+    @frx.jit
     def lu_eval(trace_sels, trace_mats, beta_pows, eq_3bs_t, eq_xi):
         sels_cells = prism.coset_evals(l_skip, trace_sels, constraint_degree)
         mat_cells = [
@@ -291,7 +291,7 @@ class _ZcProfiler:
     def mark(self, label: str, *outputs: object) -> None:
         if not _ZC_PROFILE:
             return
-        jax.block_until_ready(outputs)
+        frx.block_until_ready(outputs)
         now = time.monotonic()
         print(f"  [zc {label}] {now - self._t:.3f}s", flush=True)
         self._t = now

@@ -3,6 +3,14 @@
 # Receives a `jax-update` repository_dispatch from the jax repo's
 # notify-downstream workflow and opens a pin-bump PR. openvm-zorch must be in
 # that dispatcher's consumer list for events to arrive.
+#
+# The `jax` names below are deliberate, NOT a half-finished frx rename: the
+# event type and `client_payload.jax_version` are the *sender's* wire contract,
+# and `upstream_repo` is the real upstream repo name (still `jax` — frx is only
+# how its wheels are published). Only `packages:` names this repo's pins, so
+# only `packages:` became frx. "Fixing" the rest for consistency silently kills
+# the bot: a repository_dispatch that matches no workflow raises nothing, it
+# just stops bumping.
 
 name: JAX Update
 
@@ -22,11 +30,11 @@ jobs:
         with:
           token: ${{ secrets.BUMPER_GH_PAT }}
 
-      - name: Bump jax/jaxlib/jax-cuda12-pjrt/jax-cuda12-plugin
+      - name: Bump frx/frxlib/frx-cuda12 plugins
         uses: fractalyze/github-actions/pip-bump@main
         with:
           upstream_repo: jax
           version: ${{ github.event.client_payload.jax_version }}
           upstream_commit: ${{ github.event.client_payload.commit }}
-          packages: jax jaxlib jax-cuda12-pjrt jax-cuda12-plugin
+          packages: frx frxlib frx-cuda12-pjrt frx-cuda12-plugin
           github_token: ${{ secrets.BUMPER_GH_PAT }}

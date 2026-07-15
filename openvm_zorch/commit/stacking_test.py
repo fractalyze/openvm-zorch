@@ -6,7 +6,7 @@ so the layout semantics (head-to-tail packing, striding below ``2^l_skip``,
 buffer sizing from lifted cell count) are pinned independently of any hashing.
 """
 
-import jax.numpy as jnp
+import frx.numpy as jnp
 from absl.testing import absltest
 from zk_dtypes import babybear_mont as F
 

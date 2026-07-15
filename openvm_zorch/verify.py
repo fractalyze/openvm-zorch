@@ -45,8 +45,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Sequence
 
-import jax.numpy as jnp
-from jax import Array
+import frx.numpy as jnp
+from frx import Array
 
 from openvm_zorch.commit.stacking import StackedLayout
 from openvm_zorch.fields import F
@@ -88,7 +88,7 @@ class VerifyCarry:
 
     Like ``ProveCarry`` (and for the same reason) this is a plain dataclass, not
     a registered pytree: the verifier's stages jit *internally* (Stage 5's WHIR
-    islands), so the carry is host-side Python that never crosses a ``jax.jit``
+    islands), so the carry is host-side Python that never crosses a ``frx.jit``
     boundary and need not flatten.
     """
 

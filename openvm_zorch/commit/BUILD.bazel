@@ -15,7 +15,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "@zorch//zorch/utils:bits",
-        requirement("jax"),
+        requirement("frx"),
         requirement("numpy"),
     ],
 )
@@ -28,7 +28,7 @@ py_library(
     deps = [
         "@zorch//zorch/coding:reed_solomon",
         "@zorch//zorch/poly",
-        requirement("jax"),
+        requirement("frx"),
     ],
 )
 
@@ -41,7 +41,7 @@ py_library(
         "@zorch//zorch/commit:strided_merkle",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
-        requirement("jax"),
+        requirement("frx"),
     ],
 )
 
@@ -56,7 +56,7 @@ py_library(
         ":stacking",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
-        requirement("jax"),
+        requirement("frx"),
     ],
 )
 
@@ -67,7 +67,7 @@ py_test(
     deps = [
         ":stacking",
         requirement("absl_py"),
-        requirement("jax"),
+        requirement("frx"),
         requirement("zk_dtypes"),
     ],
 )
@@ -86,7 +86,7 @@ py_test(
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("absl_py"),
-        requirement("jax"),
+        requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
     ],

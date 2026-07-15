@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
-import jax.numpy as jnp
-from jax import Array
+import frx.numpy as jnp
+from frx import Array
 
 from openvm_zorch.commit.stacking import StackedLayout
 from openvm_zorch.fields import f_const, f_to_ef

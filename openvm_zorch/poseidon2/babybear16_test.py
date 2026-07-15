@@ -9,7 +9,7 @@ a tree-structure mistake before any commit test runs.
 
 from pathlib import Path
 
-import jax.numpy as jnp
+import frx.numpy as jnp
 import numpy as np
 from absl.testing import absltest
 from zk_dtypes import babybear_mont as F

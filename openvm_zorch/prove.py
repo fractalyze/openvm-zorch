@@ -25,8 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Sequence
 
-import jax.numpy as jnp
-from jax import Array
+import frx.numpy as jnp
+from frx import Array
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.commit.trace_commit import stacked_commit
@@ -127,7 +127,7 @@ class ProveCarry:
     Unlike sp1-zorch's ``ShardCarry`` this is a plain dataclass, not a
     registered pytree: openvm's stages jit *internally* (the commit tail,
     Stage 4, Stage 5), so the carry is host-side Python that never crosses a
-    ``jax.jit`` boundary and need not flatten. ``pcs_data`` (a ``StackedLayout``
+    ``frx.jit`` boundary and need not flatten. ``pcs_data`` (a ``StackedLayout``
     + Merkle tree) isn't a pytree for the same reason it never needs to be one.
     """
 

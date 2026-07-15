@@ -31,7 +31,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        requirement("jax"),
+        requirement("frx"),
         requirement("zk_dtypes"),
     ],
 )
@@ -46,7 +46,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":fields",
-        requirement("jax"),
+        requirement("frx"),
     ],
 )
 
@@ -62,7 +62,7 @@ py_library(
         "//openvm_zorch/poseidon2:babybear16",
         "@zorch//zorch:transcript",
         "@zorch//zorch/hash/poseidon2",
-        requirement("jax"),
+        requirement("frx"),
         requirement("zk_dtypes"),
     ],
 )
@@ -75,7 +75,7 @@ py_test(
     deps = [
         ":transcript",
         requirement("absl_py"),
-        requirement("jax"),
+        requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
     ],
@@ -103,7 +103,7 @@ py_library(
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/utils:bits",
-        requirement("jax"),
+        requirement("frx"),
         requirement("zk_dtypes"),
     ],
 )
@@ -130,7 +130,7 @@ py_test(
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("absl_py"),
-        requirement("jax"),
+        requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
     ],
@@ -161,7 +161,7 @@ py_library(
         "@zorch//zorch:transcript",
         "@zorch//zorch/hash:compression",
         "@zorch//zorch/hash:sponge",
-        requirement("jax"),
+        requirement("frx"),
     ],
 )
 
@@ -182,7 +182,7 @@ py_test(
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("absl_py"),
-        requirement("jax"),
+        requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
     ],
@@ -190,7 +190,7 @@ py_test(
 
 # Byte-match harness + per-stage wall-clock for the full prover on a
 # production fixture (the openvm sibling of sp1-zorch's verify_prove_shard).
-# A GPU-capable manual tool (deps the cuda plugin, which jax loads at import —
+# A GPU-capable manual tool (deps the cuda plugin, which frx loads at import —
 # so it requires libcuda; it is NOT a CI test) — the way to gate GPU
 # byte-match at scale, where the backend-agnostic prove_test cannot run. Run:
 #   CPU: bazel run //openvm_zorch:verify_prove
@@ -219,10 +219,10 @@ py_binary(
         "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("absl_py"),
-        requirement("jax"),
-        requirement("jax_cuda12_plugin"),
+        requirement("frx"),
+        requirement("frx_cuda12_plugin"),
         requirement("numpy"),
         requirement("zk_dtypes"),
-        requirement("jax_cuda12_pjrt"),
+        requirement("frx_cuda12_pjrt"),
     ],
 )

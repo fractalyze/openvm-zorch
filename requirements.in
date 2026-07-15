@@ -1,16 +1,22 @@
-# zorch runtime dependencies.
+# openvm-zorch runtime dependencies.
 #
 # Pulled from the Fractalyze package index alongside upstream PyPI:
 #   pip install -r requirements.in \
 #     --extra-index-url https://fractalyze.github.io/pypi/simple/
+#
+# frx/frxlib is the Fractalyze JAX distribution (Field, Ring Accelerated).
+# The distribution NAME must track whatever the `zorch` pin in MODULE.bazel
+# depends on; only the versions may skew. `zk-dtypes` moves with frx.
+# Why the name is the load-bearing half: docs/development.md, "Dependency on
+# zorch".
 absl-py
 numpy
-jax==0.10.0.dev20260709073514
-jaxlib==0.10.0.dev20260709073514
-jax-cuda12-pjrt==0.10.0.dev20260709073514
-jax-cuda12-plugin==0.10.0.dev20260709073514
-zk-dtypes==0.0.8
+frx==0.10.0.dev20260714051543
+frxlib==0.10.0.dev20260714051543
+frx-cuda12-pjrt==0.10.0.dev20260714051543
+frx-cuda12-plugin==0.10.0.dev20260714051543
+zk-dtypes==0.0.10
 
 # Benchmark harness (shared across fractalyze repos); used only by the
-# //zorch/...:*bench* py_binary targets, not by the zorch wheel itself.
+# //openvm_zorch/logup_gkr:bench_logup_gkr_phases py_binary, not by any test.
 zkbench==0.4.0

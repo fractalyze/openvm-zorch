@@ -25,8 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-import jax.numpy as jnp
-from jax import Array
+import frx.numpy as jnp
+from frx import Array
 from zorch.poly.univariate import eval_coeffs
 from zorch.transcript import Transcript
 

@@ -25,8 +25,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-import jax.numpy as jnp
-from jax import Array, lax
+import frx.numpy as jnp
+from frx import Array, lax
 
 from openvm_zorch.fields import EF, F, MODULUS, f_const, f_inv_const, f_to_ef
 from zorch.poly.eq import expand_eq_to_hypercube
