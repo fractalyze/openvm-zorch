@@ -19,4 +19,4 @@ zk-dtypes==0.0.10
 
 # Benchmark harness (shared across fractalyze repos); used only by the
 # //openvm_zorch/logup_gkr:bench_logup_gkr_phases py_binary, not by any test.
-zkbench==0.4.0
+zkbench==0.5.0

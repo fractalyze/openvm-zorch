@@ -7,7 +7,7 @@ AIRs), ``frac_sumcheck`` (the fractional-sumcheck round chain), plus ``total``
 report; the three sub-phases are this prover's own ablation.
 
 Structure mirrors sp1-zorch's ``bench_logup_gkr_phases.py`` so the per-stage
-benches read the same across repos. The harness is zkbench's ``JaxBenchmark``:
+benches read the same across repos. The harness is zkbench's ``FrxBenchmark``:
 it runs ``--warmup`` then ``--iterations`` timed runs and reports warm latency
 (GkrStage has no single ``lowered.compile()`` — a host-loop grind plus jit
 islands across a Python round loop — so no ``lower`` thunk is given and the op
@@ -41,7 +41,7 @@ import frx.numpy as jnp
 import numpy as np
 from frx import lax
 from zk_dtypes import babybear_mont as F
-from zkbench import BenchmarkConfig, BenchmarkOp, JaxBenchmark
+from zkbench import BenchmarkConfig, BenchmarkOp, FrxBenchmark
 
 from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import fractional_sumcheck
@@ -138,7 +138,7 @@ def _ef_limbs(x) -> np.ndarray:
     return np.asarray(lax.bitcast_convert_type(jnp.atleast_1d(x), F).astype(jnp.uint32))
 
 
-class LogupGkrPhasesBenchmark(JaxBenchmark):
+class LogupGkrPhasesBenchmark(FrxBenchmark):
     def get_config(self) -> BenchmarkConfig:
         return BenchmarkConfig(
             implementation="openvm-zorch",
