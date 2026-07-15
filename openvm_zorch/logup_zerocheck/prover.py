@@ -570,7 +570,15 @@ class _ZcProfiler:
     pass shows compile+run and a warm pass run-only, per region. Off by default
     so ``verify_prove``'s whole-stage ``_TimedRound`` number stays
     block-distortion-free: coarse region blocks sum coherently, but per-element
-    blocks inflate badly (the #3 41.1s artifact)."""
+    blocks inflate badly (the #3 41.1s artifact).
+
+    The total is split into ``host`` (elapsed before the block — tracing,
+    lowering and dispatch) and ``device`` (the block itself — work that was still
+    pending). Read the split before optimizing a region: ``device≈0`` means the
+    GPU is not the problem and a faster kernel buys nothing. Every region here
+    except ``mle_scan`` is currently ~99% host, and the stage's whole device cost
+    is ~55ms — so the remaining lever is eliminating per-prove tracing and
+    per-scalar dispatch, not arithmetic."""
 
     def __init__(self) -> None:
         self._t = time.monotonic()
@@ -578,9 +586,15 @@ class _ZcProfiler:
     def mark(self, label: str, *outputs: object) -> None:
         if not _ZC_PROFILE:
             return
+        _disp = time.monotonic() - self._t
+        _b = time.monotonic()
         frx.block_until_ready(outputs)
         now = time.monotonic()
-        print(f"  [zc {label}] {now - self._t:.3f}s", flush=True)
+        print(
+            f"  [zc {label}] {now - self._t:.3f}s "
+            f"(host={_disp:.3f} device={now - _b:.3f})",
+            flush=True,
+        )
         self._t = now
 
 
