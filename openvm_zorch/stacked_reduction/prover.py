@@ -31,9 +31,11 @@ from jax import Array, lax
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, f_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
-from openvm_zorch.transcript import EF_LIMBS, sample_ext
-from openvm_zorch._sumcheck_scan import prove as sumcheck_prove
-from zorch.transcript import DuplexTranscript
+from openvm_zorch.transcript import sample_ext
+from zorch.prove import fold_rounds
+from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
+from zorch.sumcheck.prover import RoundMsg, StandardRound
+from zorch.transcript import DuplexTranscript, Transcript, sample_challenge
 
 
 def _rot_prev(table: Array) -> Array:
@@ -144,11 +146,17 @@ def _round0_group_contrib(
 
 @dataclass(frozen=True)
 class _StackingSummand:
-    """Product summand the ``_sumcheck_scan`` scan folds: ``Σ_columns Q·EQW`` per
-    cube point. Degree 2 (``q`` × the eq/κ_rot weight), so each round poly is
+    """Product summand the sumcheck rounds fold: ``Σ_columns Q·EQW`` per cube
+    point. Degree 2 (``q`` × the eq/κ_rot weight), so each round poly is
     quadratic; ``combine`` sums the stacked-column batch axis into the scalar
-    round poly while the driver folds the cube variable (the trailing axis). No
-    loop-invariant scalars — the λ powers are baked into ``EQW``."""
+    round poly while the round folds the cube variable (the trailing axis). No
+    loop-invariant scalars — the λ powers are baked into ``EQW``.
+
+    Deliberately not zorch's ``ProductSummand``: ``summand_evals`` reduces the
+    combine's output on a single axis, which lands on the cube variable only
+    because ``combine`` has already contracted the stacked columns. A plain
+    product would leave both contractions to that one reduction, which cannot do
+    both — it would sum the columns and hand back an unreduced variable axis."""
 
     @property
     def degree(self) -> int:
@@ -163,8 +171,27 @@ class _StackingSummand:
         return jnp.sum(q * eqw, axis=-2)  # contract the columns; keep the variable
 
     def _combine(self, *factors: Array) -> Array:
-        # Required by the SumcheckSummand protocol; the scan path calls `combine`.
+        """The summand bound to its (empty) scalars — the only seam
+        ``summand_evals`` reads, so callers stay summand-generic."""
         return self.combine((), *factors)
+
+
+class _StackingRound(StandardRound):
+    """``StandardRound`` that also surfaces the challenge it sampled.
+
+    ``StandardRound`` returns its round poly alone, but Stage 4's proof carries
+    the sumcheck point ``u`` too, so this emits a ``RoundMsg`` — the seam zorch's
+    own ``LogupSumcheckRound`` exposes for the same reason. Otherwise the base
+    round verbatim, fixed to its extension-challenge path (Stage 4 always folds
+    in ``EF``)."""
+
+    def __call__(
+        self, folded: Array, transcript: Transcript
+    ) -> tuple[Array, Transcript, RoundMsg]:
+        msg = self._round_poly(folded)
+        transcript = transcript.observe(msg)
+        transcript, r = sample_challenge(transcript, self.ext_dtype, self.limbs)
+        return fold(folded, r), transcript, RoundMsg(msg, r)
 
 
 def _eqw_columns(
@@ -220,15 +247,28 @@ def _sumcheck_rounds(
     evals at {1, 2}) folding every stacked column to its opening, then observing
     the openings.
 
-    Driven by the generic ``_sumcheck_scan`` scan (the prover's one
+    Driven by zorch's ``StandardRound`` under ``fold_rounds`` (the prover's one
     runtime-dominated stage; #43): the jagged per-view fold is expressed as two
     homogeneous full-cube factors — the stacked matrices ``Q`` and their λ-batched
-    eq/κ_rot weights ``EQW`` — with the stacked columns batched and the cube
-    variable trailing. The driver runs with ``eval_start=1`` (the reference's
-    compressed {s(1), s(2)} round polys) and an extension-field fold challenge
-    (``sample_ext``'s four base squeezes). The variable axis is bit-reversed so the
-    driver's MSB-first block fold matches the reference's LSB-first stride fold,
-    byte-identical to the reference prover."""
+    eq/κ_rot weights ``EQW`` — stacked into the one ``(factors, columns, cube)``
+    state a round takes, with the stacked columns batched and the cube variable
+    trailing. The round samples its poly on ``{1, 2}`` (the reference's compressed
+    wire form, whose verifier derives ``s(0) = claim − s(1)`` from the running
+    claim) and folds at an extension-field challenge (``sample_ext``'s four base
+    squeezes). The variable axis is bit-reversed so the round's MSB-first block
+    fold matches the reference's LSB-first stride fold, byte-identical to the
+    reference prover.
+
+    ``fold_rounds`` unrolls one round per cube variable. The fold halves the
+    state each round, so the rounds are not fixed-shape and do not fit a
+    ``lax.scan`` without padding every round back to full width and masking the
+    dead lanes — which is what this stage did before it moved onto the shared
+    round. Byte-identical either way (the masked tail was exactly zero), and
+    cheaper here: this stage runs eager, where a ``lax.scan`` re-traces and
+    recompiles its body on every call while the unrolled ops hit the dispatch
+    cache (~8x at the production ``n_stack`` of 16, ~100x at the suite's 8).
+    Jitting the stage would invert that — an unrolled module grows with the
+    round count, where one scan body does not."""
     u = list(u)
     widths = [q.shape[1] for q in q_evals]
 
@@ -259,16 +299,18 @@ def _sumcheck_rounds(
     q_cols = lax.bit_reverse(q_cols, dimensions=(1,))
     eqw_cols = lax.bit_reverse(eqw_cols, dimensions=(1,))
 
-    folded, transcript, msgs = sumcheck_prove(
-        _StackingSummand(),
-        [q_cols, eqw_cols],
+    summand = _StackingSummand()
+    # {1, 2} — the natural {0, 1, 2} domain minus s(0), which the verifier
+    # reconstructs from the running claim rather than reading off the wire.
+    domain = EvalDomain(natural_domain(summand.degree, EF).nodes[1:])
+    folded, transcript, msgs = fold_rounds(
+        _StackingRound(summand, domain, ext_dtype=EF),
+        jnp.stack([q_cols, eqw_cols]),
         transcript,
-        eval_start=1,
-        challenge_dtype=EF,
-        challenge_limbs=EF_LIMBS,
+        n_stack,
     )
-    round_polys = list(msgs.round_poly)
-    u = u + list(msgs.challenge)
+    round_polys = [m.round_poly for m in msgs]
+    u = u + [m.challenge for m in msgs]
 
     # Split the folded stacked columns back per commit and observe the openings.
     folded_q = folded[0][:, 0]  # (Σ width,)
