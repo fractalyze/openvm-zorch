@@ -129,7 +129,7 @@ def _batched_conv(coeffs: Array, kernel: Array) -> Array:
     stack the shifts on a trailing axis, broadcast-multiply by ``kernel`` and
     reduce that last axis. Keeping the contracted axis last avoids the mid-axis
     EF reduce fault, and the shift-and-add avoids ``jnp.dot``/``@`` (both
-    mis-lower on this fork — see docs/development.md). Dispatch-free and jit-fusable,
+    mis-lower on XLA — see docs/development.md). Dispatch-free and jit-fusable,
     unlike a per-scalar coefficient loop. (``conv_test`` pins it against the
     reference scalar convolution.)"""
     la = coeffs.shape[-1]

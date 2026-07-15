@@ -58,7 +58,7 @@ _OPS = ("grind", "input_evals", "frac_sumcheck", "total")
 
 
 def _array_leaves(obj):
-    """Flatten JAX arrays out of a (possibly dataclass) structure, so the
+    """Flatten FRX arrays out of a (possibly dataclass) structure, so the
     harness's ``block_until_ready`` reaches them — stage outputs are plain
     dataclasses, not registered pytrees (block on them is a silent no-op)."""
     if isinstance(obj, frx.Array):

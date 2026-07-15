@@ -17,7 +17,7 @@ two-adic subgroup) varying fastest. The RS message is produced chunk-wise:
 The codeword is the message zero-padded by ``2^log_blowup`` and forward-NTT'd
 — natural order, no coset shift, no bit-reversal (the Rust side's
 ``Radix2DitParallel::dft`` on the resized coefficient vector). Both NTTs are
-``lax.ntt``, the zkx-native NTT, whose subgroup-generator convention matches
+``lax.ntt``, the XLA-native NTT, whose subgroup-generator convention matches
 plonky3's (zorch's RS path byte-matches plonky3-derived provers on the same
 op).
 """
@@ -73,7 +73,7 @@ def _coeffs_to_evals_chunk(coeffs: Array) -> Array:
 def eval_to_coeff_rs_message(l_skip: int, evals: Array) -> Array:
     """Per-column RS message of prismalinear evaluations ``(..., 2^(l_skip+n))``."""
     chunk_len = 1 << l_skip
-    # The zkx-native fft accepts at most 2-D, so the chunk batch flattens
+    # The XLA-native fft accepts at most 2-D, so the chunk batch flattens
     # across all leading axes and reshapes back after the transform.
     chunks = evals.reshape(-1, chunk_len)
     coeffs = lax.ntt(chunks, ntt_type="INTT", ntt_length=chunk_len)

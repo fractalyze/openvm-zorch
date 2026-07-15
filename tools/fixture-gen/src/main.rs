@@ -2,7 +2,7 @@
 //!
 //! Runs the reference prover (openvm-stark-backend v2.0.0, BabyBear +
 //! Poseidon2 width-16) on deterministic inputs and dumps every intermediate as
-//! canonical-u32 `.npy` plus a `meta.json`, so the JAX side can compare each
+//! canonical-u32 `.npy` plus a `meta.json`, so the FRX side can compare each
 //! pipeline step independently.
 //!
 //! Sections (each runs only when its flag is given):
@@ -322,7 +322,7 @@ fn gen_transcript_fixture(out: &Path) {
 
 /// One interaction of a dummy AIR: count is a single (possibly negated)
 /// column, the message is a list of columns. This mirrors exactly what
-/// `DummyInteractionAir` pushes, so the JAX side can evaluate interactions
+/// `DummyInteractionAir` pushes, so the FRX side can evaluate interactions
 /// from raw trace cells without a symbolic-expression evaluator.
 struct IntSpec {
     bus: u16,

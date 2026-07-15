@@ -4,8 +4,14 @@ A lean [OpenVM](https://github.com/openvm-org/openvm) prover built on
 [zorch](https://github.com/fractalyze/zorch)'s scheme-agnostic SNARK blocks.
 
 ```
-JAX → zorch (scheme-/zkVM-agnostic blocks) → openvm-zorch (SWIRL glue)
+FRX → zorch (scheme-/zkVM-agnostic blocks) → openvm-zorch (SWIRL glue)
 ```
+
+FRX is Fractalyze's fork of [JAX](https://github.com/jax-ml/jax), and it
+compiles through Fractalyze's fork of [XLA](https://github.com/openxla/xla).
+Both differ from upstream in the way that matters here: finite fields are
+native dtypes, not emulated. Everywhere below, **FRX** and **XLA** mean those
+forks.
 
 OpenVM proves with **SWIRL** — a sumcheck-based proof system composing
 LogUp-GKR (interactions), a batched ZeroCheck with univariate skip

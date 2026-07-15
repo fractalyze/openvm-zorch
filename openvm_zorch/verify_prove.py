@@ -9,16 +9,16 @@ assertion set as ``prove_test.test_prove_production_params``.
 Unlike that test this is a GPU-capable **runnable**, not a unit test, and
 that is the point: ``prove_test`` is backend-agnostic (no cuda deps, so it
 runs on CPU only) and cannot confirm byte-exactness on GPU at production
-scale -- the zkx CPU backend currently core-dumps at stacked 2^16 in
+scale -- the XLA CPU backend currently core-dumps at stacked 2^16 in
 zerocheck round-0 (#32), and a cuda-dep'd target cannot even import on a
 driverless CI box. This runnable deps the cuda plugin and runs on whatever
-backend JAX selects, so it is the way to gate GPU byte-match at scale.
+backend FRX selects, so it is the way to gate GPU byte-match at scale.
 
 Each Stage is wrapped in a ``_TimedRound`` that prints its wall-clock
 on every run, so the compile-vs-runtime split is visible alongside the
 byte-match (proof messages are plain dataclasses, opaque to
 ``block_until_ready``, so block on their array leaves by hand). Wall-clock is
-dominated by XLA/zkx GPU compiles, not kernel runtime; for the warm split set
+dominated by XLA GPU compiles, not kernel runtime; for the warm split set
 ``JAX_COMPILATION_CACHE_DIR`` to a per-toolchain directory so every run after
 the first skips the compiles (leave it unset for byte-match gates).
 
@@ -124,11 +124,11 @@ def _rounds_through(rounds, stop_label):
 
 
 def _array_leaves(obj):
-    """Flatten the JAX arrays out of an arbitrary nested structure.
+    """Flatten the FRX arrays out of an arbitrary nested structure.
 
     A stage's output (carry, transcript, message) mixes plain ``@dataclass``
     objects -- ``ProveCarry``, the proof messages -- that are not registered
-    JAX pytrees, so ``frx.tree_util`` (and therefore ``frx.block_until_ready``)
+    FRX pytrees, so ``frx.tree_util`` (and therefore ``frx.block_until_ready``)
     cannot see the arrays inside them; blocking on them directly is a silent
     no-op that would stop the timer at dispatch rather than at compute
     completion. Walk the structure by hand instead.
@@ -442,7 +442,7 @@ def main(argv) -> None:
             sys.exit(1)
         print("prove chain byte-match: ALL OK")
 
-    # The first chain run above pays the XLA/zkx compile; for the baseline
+    # The first chain run above pays the XLA compile; for the baseline
     # comparison we want warm per-stage runtime, so run the (now-compiled)
     # chain a second time and capture each stage's wall-clock. --stop_after
     # alone also triggers it (per-stage profiling needs no baseline).
