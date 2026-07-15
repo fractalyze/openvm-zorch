@@ -80,6 +80,23 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   but to stack rows of scalars (a `list[list[Array]]`) into a matrix you must
   inner-stack each row first: `jnp.stack([jnp.stack(row) for row in rows])`.
   `jnp.pad`, by contrast, DOES work on extension dtypes (verified byte-exact).
+- **Profiling a jit on GPU: `nsys` needs `--cuda-graph-trace=node`.** XLA
+  dispatches a jitted executable as a **CUDA graph**, and `nsys profile -t cuda`
+  collapses a graph launch into one entity — so the kernels inside are invisible
+  and the summary silently under-reports (measured: 0.27ms vs 13.48ms, ~50x, on
+  the Stage-1 commit). The tell is a kern_sum that is impossible for the
+  workload; always sanity-check it against a back-of-envelope FLOP/byte
+  estimate. (`nsys stats` also reuses a stale `.sqlite` when the `.nsys-rep` is
+  newer — pass `--force-export=true`.)
+- **When a timed region exceeds the sum of its sub-regions, suspect the
+  instrument before the code.** `verify_prove`'s `_TimedRound` blocks on
+  `array_leaves(out)`, and that walk runs *inside* the timer: walking host-side
+  plans that hold no array (`ConstraintsDag`, `StackedLayout`) added ~13ms to
+  every stage, which read as "commit is ~4x native" for three weeks (#46, #113).
+  Decompose `t_body / t_walk / t_block`; `block ~= 0` means nothing was
+  async-pending and the excess is host bookkeeping. Anything new on the carry
+  that holds no array belongs in `bench_common._NO_ARRAY_TYPES` —
+  `bench_common_test` fails loudly if a skipped type ever gains an array field.
 - **Perf: a host-int weight loop (a `pow()` nest building a constant
   matrix, contracted into field cells with scalar `acc += w*cell` adds) is
   a dispatch storm, not a FLOP cost.** It dominates eagerly. Fix: build the
