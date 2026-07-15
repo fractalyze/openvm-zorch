@@ -51,7 +51,7 @@ from openvm_zorch.transcript import grind, sample_ext
 from openvm_zorch.whir.prover import WhirConfig, WhirProof, prove_whir_opening
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
-from zorch.round import ProveChain, Round
+from zorch.round import ProveChain, Stage
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
@@ -233,7 +233,7 @@ def _commit_cached_mains(
     return cached_by_air, pre_cached
 
 
-class CommitStage(Round):
+class CommitStage(Stage):
     """Stage 1 + prelude: commit the stacked PCS, then absorb the prelude
     stream (vk pre-hash, the commitment, then per AIR in *input* order an
     optional present flag, log height, and public values). The prelude schedule
@@ -333,7 +333,7 @@ class CommitStage(Round):
         return carry, transcript, root
 
 
-class GkrStage(Round):
+class GkrStage(Stage):
     """Stage 2: LogUp-GKR. Grinds the LogUp PoW, samples α/β, builds the GKR
     input layer, and runs the fractional sumcheck. Writes β + the padded point
     ξ onto the carry for ZeroCheck."""
@@ -369,7 +369,7 @@ class GkrStage(Round):
         return carry, transcript, GkrStageMsg(logup_pow_witness, gkr_proof, xi)
 
 
-class ZeroCheckStage(Round):
+class ZeroCheckStage(Stage):
     """Stage 3: batched ZeroCheck + LogUp sumcheck over
     ``prove_batch_constraints``, consuming ξ and β off the carry. Writes the
     sumcheck point ``r`` for the stacking stage."""
@@ -407,7 +407,7 @@ class ZeroCheckStage(Round):
         return carry, transcript, bcp
 
 
-class StackingStage(Round):
+class StackingStage(Stage):
     """Stage 4: stacked opening reduction, consuming the committed matrix/layout
     and the ZeroCheck point off the carry. Writes the opening point ``u`` for
     WHIR."""
@@ -444,7 +444,7 @@ class StackingStage(Round):
         return carry, transcript, stacking_proof
 
 
-class WhirStage(Round):
+class WhirStage(Stage):
     """Stage 5: WHIR opening at ``u_cube``, the Stage-4 → Stage-5 handoff
     ``u_cube = (u₀ squarings over the skip domain) ‖ u[1..]``
     (reference ``prove_openings``). Reads the committed matrix/tree and the
