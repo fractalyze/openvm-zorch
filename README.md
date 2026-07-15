@@ -11,8 +11,8 @@ OpenVM proves with **SWIRL** — a sumcheck-based proof system composing
 LogUp-GKR (interactions), a batched ZeroCheck with univariate skip
 (constraints), a stacked opening reduction, and a WHIR polynomial commitment —
 as implemented by
-[openvm-stark-backend](https://github.com/openvm-org/stark-backend) on the
-`develop-v2` lineage. This repo re-implements that prover on zorch, keeping
+[openvm-stark-backend](https://github.com/openvm-org/stark-backend) at tag
+`v2.0.0`. This repo re-implements that prover on zorch, keeping
 only the SWIRL-specific surface here and pushing every generic block upstream.
 
 ## Quick start
@@ -40,8 +40,7 @@ cargo run --release -- \
 
 `openvm-stark-backend` tag `v2.0.0`
 (`16d60de724c21dcadfde7d8315a1db507e5832d7`) — the same pin the openvm
-`v2.0.0` release consumes. SWIRL lives on stark-backend's `develop-v2`
-lineage, NOT `main` (main is still plonky3/FRI). Config: BabyBear base field,
+`v2.0.0` release consumes. Config: BabyBear base field,
 BabyBear⁴ challenges, Poseidon2 width-16 (`default_babybear_poseidon2_16`,
 plonky3 `=0.4.3`).
 
