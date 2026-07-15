@@ -270,7 +270,7 @@ checks each stage's relation, mirroring `crates/stark-backend/src/verifier`:
 PoW witnesses are *checked*, never re-ground. `verify_test.py` proves the
 production-params instance, accepts the honest proof, and rejects a proof
 tampered in any one stage (GKR `q0`, a Stage-3 opening, a stacking opening,
-the WHIR final poly, a WHIR opened row). Note: `verify` runs in eager JAX
+the WHIR final poly, a WHIR opened row). Note: `verify` runs in eager FRX
 (scalar field ops, Python query loops), so the production-params test is slow
 (~50 min wall) — correctness-first; batching the query-phase hashes is a
 worthwhile follow-up.
@@ -283,7 +283,7 @@ worthwhile follow-up.
 | `PaddingFreeSponge<Perm,16,8,8>` | `zorch.hash.sponge.Sponge(rate=8, out=8)` |
 | `TruncatedPermutation<Perm,2,8,16>` | `zorch.hash.compression.Compression(arity=2, chunk=8)` |
 | `default_babybear_poseidon2_16` | `openvm_zorch.poseidon2.babybear16` |
-| `Radix2Bowers.idft` / `Radix2DitParallel.dft` | `lax.fft(x, "IFFT"/"FFT", n)` (zkx-native NTT) |
+| `Radix2Bowers.idft` / `Radix2DitParallel.dft` | `lax.fft(x, "IFFT"/"FFT", n)` (XLA-native NTT) |
 | `Mle::coeffs_to_evals_inplace` / `evals_to_coeffs_inplace` | `mle_coeffs_to_evals` / `mle_evals_to_coeffs` in `openvm_zorch/commit/rs_message.py` |
 | `evals_mobius_eq_hypercube(u)` (little-endian) | `mobius_eq_table` in `openvm_zorch/whir/prover.py` |
 | `FiatShamirTranscript::grind` / `sample_bits` | `openvm_zorch.transcript.grind` / `sample_bits` |

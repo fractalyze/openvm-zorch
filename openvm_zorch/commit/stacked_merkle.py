@@ -81,7 +81,7 @@ class StackedMerkleTree:
 def _jitted_commit(tree: StridedMerkleTree, matrix: Array):
     """``commit`` under ``frx.jit`` with ``tree`` static. ``StridedMerkleTree``
     hashes/compares by value (built for static jit-zone keys, zorch #214), so
-    JAX's compile cache reuses one lowering per sponge/compressor/stride config."""
+    FRX's compile cache reuses one lowering per sponge/compressor/stride config."""
     return tree.commit(matrix)
 
 
@@ -97,7 +97,7 @@ def stacked_merkle_commit(
     Delegates the strided fold to zorch's scheme-agnostic ``StridedMerkleTree``
     (the query-strided layout is not SWIRL-specific, so it belongs upstream) and
     always commits under ``_jitted_commit``'s cached ``frx.jit``: the tree's
-    ``zorch.merkle_commit`` marker only lowers through zkx's
+    ``zorch.merkle_commit`` marker only lowers through XLA's
     ``ExpandMerkleCommit`` cross-leaf Poseidon2 fusion inside a jit trace, while
     an eager commit decomposes into one composite dispatch per pair — that
     dispatch storm was Stage-1's whole warm cost (~3.2s eager vs ~1ms jitted,

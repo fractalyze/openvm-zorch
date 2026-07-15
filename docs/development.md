@@ -1,6 +1,6 @@
 # Development
 
-Pure Python on JAX + the ZKX PJRT plugin. Bazel 9 (bzlmod). Tests default to
+Pure Python on FRX + the XLA PJRT plugin. Bazel 9 (bzlmod). Tests default to
 `JAX_PLATFORMS=cpu`.
 
 ```sh
@@ -60,7 +60,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
 
 ## Recurring gotchas
 
-- zkx-native `lax.fft` accepts at most **2-D input** on field dtypes —
+- XLA-native `lax.fft` accepts at most **2-D input** on field dtypes —
   flatten all leading batch axes before any NTT call and reshape after
   (first hit in `openvm_zorch/commit/rs_message.py`; Stages 3/5 are
   DFT-heavy and will hit it again).
@@ -68,7 +68,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   extent (e.g. the stacked matrix can end in an all-zero committed column).
   When a byte-match fails at a hash, first suspect a shape/padding delta,
   not the hash params.
-- zkx-native `frx.numpy` is a subset: `jnp.roll` does not exist (first hit
+- `frx.numpy` is a subset of upstream JAX's: `jnp.roll` does not exist (first hit
   in Stage 4's rotation kernel — use
   `jnp.concatenate([a[-1:], a[:-1]])`), and `jnp.arange` iota is
   unsupported for extension dtypes (zorch builds domains via `jnp.stack`
@@ -87,7 +87,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   as a field array) and replace the scalar nest with one broadcast-multiply
   + a **trailing-axis** `.sum` (mid-axis EF reduce faults under jit; keep
   the contracted axis last). This is eager-fast and jit-fusable. Do NOT use
-  `jnp.dot`/`@`/`tensordot` — they mis-lower under `frx.jit` on this fork
+  `jnp.dot`/`@`/`tensordot` — they mis-lower under `frx.jit` on XLA
   (see `zorch/fusion.py`, `zorch/pcs/whir/_math.py`). And do NOT wrap a
   scalar-list polynomial (`_conv` over 0-D coeffs) in `frx.jit` directly —
   hundreds of pytree-leaf scalars regress; vectorize into arrays first.

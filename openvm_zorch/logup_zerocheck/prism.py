@@ -12,7 +12,7 @@ Smallness is structural: every transform here is over ``D`` (or ``d`` cosets
 of it), so interpolation matrices are built host-side from canonical integers
 and applied as unrolled sums — exact field arithmetic, no NTT-convention
 risk. The one ``lax.ntt`` call derives ω so the subgroup generator is pinned
-to the zkx-native NTT convention (== plonky3's, byte-matched in Stage 1).
+to the XLA-native NTT convention (== plonky3's, byte-matched in Stage 1).
 
 The multiplicative-coset generator is plonky3 BabyBear's ``GENERATOR = 31``.
 

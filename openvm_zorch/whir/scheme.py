@@ -58,7 +58,7 @@ def _eval_mobius_eq_mle(u: Sequence[Array], x: Sequence[Array]) -> Array:
 
 def _unstack(point: Array) -> list[Array]:
     """`(n,)` array → list of `n` scalars. The Möbius kernels iterate per
-    coordinate; indexing (vs iterating the array) avoids the ZKX extension-dtype
+    coordinate; indexing (vs iterating the array) avoids the XLA extension-dtype
     `lax.sign` dispatch the eq helpers warn about."""
     return [point[i] for i in range(point.shape[0])]
 

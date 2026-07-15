@@ -39,7 +39,7 @@ from zorch.transcript import DuplexTranscript, Transcript, sample_challenge
 
 
 def _rot_prev(table: Array) -> Array:
-    """``table[rot_prev(x)]`` for all x: cyclic shift by one (the zkx jnp has
+    """``table[rot_prev(x)]`` for all x: cyclic shift by one (the FRX jnp has
     no ``roll``)."""
     if table.shape[0] == 1:
         return table
@@ -116,7 +116,7 @@ def _round0_group_contrib(
     instead of dispatching the field arithmetic op-by-op (the lever that
     turned GKR/WHIR eager dispatch into a compute win); each distinct group
     shape compiles once. ``coset_evals`` is kept eager and passed in as ``ce``
-    — its host-int Lagrange weight construction crashes the zkx backend's
+    — its host-int Lagrange weight construction crashes the XLA backend's
     compiler when traced.
     """
     ind = prism.eval_in_uni(l_skip, n, z_grid)  # (C, S) or scalar 1
@@ -131,7 +131,7 @@ def _round0_group_contrib(
         eq_uni_r0 = jnp.broadcast_to(eq_uni_r0, z_grid.shape)
         eq_uni_r0_rot = jnp.broadcast_to(eq_uni_r0_rot, z_grid.shape)
     # eq / κ_rot cube vectors over the windows axis, transposed so the window
-    # contraction reduces the *trailing* axis (the EF reduce shape the zkx
+    # contraction reduces the *trailing* axis (the EF reduce shape the XLA
     # backend lowers cleanly — a strided mid-axis EF reduce crashes codegen).
     eq_vec = eq_uni_r0[..., None] * eq_rs  # (C, S, windows)
     k_rot_vec = eq_uni_r0_rot[..., None] * eq_rs + (
