@@ -38,6 +38,33 @@ py_library(
 
 # Verifier-side scalar algebra shared by the per-stage duals (poly_common.rs).
 py_library(
+    name = "bench_common",
+    srcs = [
+        "__init__.py",
+        "bench_common.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//openvm_zorch/commit:stacking",
+        "//openvm_zorch/logup_zerocheck:constraints",
+        requirement("frx"),
+    ],
+)
+
+py_test(
+    name = "bench_common_test",
+    srcs = ["bench_common_test.py"],
+    deps = [
+        ":bench_common",
+        "//openvm_zorch/commit:stacking",
+        "//openvm_zorch/logup_zerocheck:constraints",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("zk_dtypes"),
+    ],
+)
+
+py_library(
     name = "poly_common",
     srcs = [
         "__init__.py",
@@ -208,6 +235,7 @@ py_binary(
         "//openvm_zorch/whir:testdata",
     ],
     deps = [
+        ":bench_common",
         ":prove",
         ":transcript",
         "//openvm_zorch/logup_gkr:input_layer",

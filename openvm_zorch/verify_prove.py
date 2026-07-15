@@ -43,6 +43,7 @@ from absl import app, flags
 from frx import lax
 from zk_dtypes import babybear_mont as F
 
+from openvm_zorch.bench_common import array_leaves
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_params
 from openvm_zorch.prove import (
@@ -123,31 +124,6 @@ def _rounds_through(rounds, stop_label):
     )
 
 
-def _array_leaves(obj):
-    """Flatten the FRX arrays out of an arbitrary nested structure.
-
-    A stage's output (carry, transcript, message) mixes plain ``@dataclass``
-    objects -- ``ProveCarry``, the proof messages -- that are not registered
-    FRX pytrees, so ``frx.tree_util`` (and therefore ``frx.block_until_ready``)
-    cannot see the arrays inside them; blocking on them directly is a silent
-    no-op that would stop the timer at dispatch rather than at compute
-    completion. Walk the structure by hand instead.
-    """
-    if isinstance(obj, frx.Array):
-        return [obj]
-    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return [
-            a
-            for f in dataclasses.fields(obj)
-            for a in _array_leaves(getattr(obj, f.name))
-        ]
-    if isinstance(obj, (list, tuple)):
-        return [a for x in obj for a in _array_leaves(x)]
-    if isinstance(obj, dict):
-        return [a for x in obj.values() for a in _array_leaves(x)]
-    return []
-
-
 class _TimedRound(Round):
     """Print each stage's wall-clock so the compile-vs-runtime split is visible
     on every run. Blocking is mandatory -- async dispatch returns before the
@@ -166,7 +142,7 @@ class _TimedRound(Round):
     def __call__(self, carry, transcript):
         t0 = time.monotonic()
         out = self._inner(carry, transcript)
-        frx.block_until_ready(_array_leaves(out))
+        frx.block_until_ready(array_leaves(out))
         dt = time.monotonic() - t0
         label = _STAGE_LABELS.get(type(self._inner), type(self._inner).__name__)
         if self._record is not None:
