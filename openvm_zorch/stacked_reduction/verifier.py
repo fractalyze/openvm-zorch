@@ -1,9 +1,9 @@
-"""Stage-4 verifier: the dual of ``StackingRound`` (verifier/stacked_reduction.rs).
+"""Stage-4 verifier: the dual of ``StackingStage`` (verifier/stacked_reduction.rs).
 
 ``verify_stacked_reduction`` re-derives λ, checks s₀ against the λ-batched
 opening claims, replays the quadratic sumcheck, and closes on the
 stacking-opening claim via the per-column eq/κ_rot prism kernels — the stage
-math only. The chain Round that drives it (``StackingVerifierRound``) lives
+math only. The chain Stage that drives it (``StackingVerifierStage``) lives
 with the other stage duals in ``openvm_zorch/verify.py``.
 """
 

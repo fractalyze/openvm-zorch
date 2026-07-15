@@ -1,10 +1,10 @@
-"""Stage-3 verifier: the dual of ``ZeroCheckRound`` (verifier/zerocheck.rs).
+"""Stage-3 verifier: the dual of ``ZeroCheckStage`` (verifier/zerocheck.rs).
 
 ``verify_zerocheck_stage`` replays the batched ZeroCheck + LogUp sumcheck and
 closes it by re-evaluating the constraint/interaction claim at the folded
 point from the proof's column openings (the ``VerifierConstraintEvaluator``
-analogue) — the stage math only. The chain Round that drives it
-(``ZeroCheckVerifierRound``) lives with the other stage duals in
+analogue) — the stage math only. The chain Stage that drives it
+(``ZeroCheckVerifierStage``) lives with the other stage duals in
 ``openvm_zorch/verify.py``.
 """
 
@@ -62,7 +62,7 @@ def verify_zerocheck_stage(
     p_xi: Array,
     q_xi: Array,
 ) -> tuple[DuplexTranscript, list[Array]]:
-    """Stage 3 verifier — the dual of ``ZeroCheckRound``: the batched ZeroCheck
+    """Stage 3 verifier — the dual of ``ZeroCheckStage``: the batched ZeroCheck
     + LogUp sumcheck. Consumes the Stage-2 outputs off the carry (α/β, the
     padded point ξ, and the GKR claims ``p_xi`` / ``q_xi``), re-evaluates the
     constraint/interaction claim at the folded point from the proof's column

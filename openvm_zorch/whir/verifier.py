@@ -1,11 +1,11 @@
-"""Stage-5 verifier: the dual of ``WhirRound`` over the generic ``WhirVerifier``.
+"""Stage-5 verifier: the dual of ``WhirStage`` over the generic ``WhirVerifier``.
 
 ``verify_whir`` is the inverse of ``openvm_zorch.whir.prover.prove_whir_opening``:
 repackage the reference ``WhirProof`` (per-query lists of opened rows and Merkle
 paths) into the generic ``WhirProof`` (``Opening`` pytrees vmapped over the
 queries), rebuild the same ``WhirVerifier`` the prover drove, and replay one
-``verify`` — the stage math only. The chain Round that drives it
-(``WhirVerifierRound``) lives with the other stage duals in
+``verify`` — the stage math only. The chain Stage that drives it
+(``WhirVerifierStage``) lives with the other stage duals in
 ``openvm_zorch/verify.py``.
 """
 

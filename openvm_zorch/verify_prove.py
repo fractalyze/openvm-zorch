@@ -14,7 +14,7 @@ zerocheck round-0 (#32), and a cuda-dep'd target cannot even import on a
 driverless CI box. This runnable deps the cuda plugin and runs on whatever
 backend JAX selects, so it is the way to gate GPU byte-match at scale.
 
-Each stage Round is wrapped in a ``_TimedRound`` that prints its wall-clock
+Each Stage is wrapped in a ``_TimedRound`` that prints its wall-clock
 on every run, so the compile-vs-runtime split is visible alongside the
 byte-match (proof messages are plain dataclasses, opaque to
 ``block_until_ready``, so block on their array leaves by hand). Wall-clock is
@@ -45,7 +45,17 @@ from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_params
-from openvm_zorch.prove import AirInstance, Proof, SystemParams, prove_chain
+from openvm_zorch.prove import (
+    AirInstance,
+    CommitStage,
+    GkrStage,
+    Proof,
+    StackingStage,
+    SystemParams,
+    WhirStage,
+    ZeroCheckStage,
+    prove_chain,
+)
 from openvm_zorch.transcript import new_transcript
 from openvm_zorch.whir.prover import WhirConfig
 from zorch.hash.compression import Compression, CompressionParams
@@ -83,13 +93,18 @@ _STOP_AFTER = flags.DEFINE_string(
 
 _PROVE = Path(__file__).parent / "testdata" / "prove"
 
-# Friendly per-stage labels, keyed by the stage Round's class name.
+# Friendly per-stage labels, keyed by the stage class itself rather than its
+# name: nothing here is covered by a test (this is a cuda-dep'd runnable, and
+# tests stay backend-agnostic), so a name-keyed map would let a stage rename
+# silently degrade --stop_after to "matched no stage" and drop the timing
+# labels back to class names. Keyed by the class, a rename that misses this
+# map cannot import.
 _STAGE_LABELS = {
-    "CommitRound": "commit",
-    "GkrRound": "GKR",
-    "ZeroCheckRound": "zerocheck",
-    "StackingRound": "stacking",
-    "WhirRound": "WHIR",
+    CommitStage: "commit",
+    GkrStage: "GKR",
+    ZeroCheckStage: "zerocheck",
+    StackingStage: "stacking",
+    WhirStage: "WHIR",
 }
 
 
@@ -100,7 +115,7 @@ def _rounds_through(rounds, stop_label):
     if stop_label is None:
         return list(rounds)
     for i, rnd in enumerate(rounds):
-        if _STAGE_LABELS.get(type(rnd).__name__) == stop_label:
+        if _STAGE_LABELS.get(type(rnd)) == stop_label:
             return list(rounds[: i + 1])
     choices = sorted(set(_STAGE_LABELS.values()))
     raise ValueError(
@@ -153,9 +168,7 @@ class _TimedRound(Round):
         out = self._inner(carry, transcript)
         jax.block_until_ready(_array_leaves(out))
         dt = time.monotonic() - t0
-        label = _STAGE_LABELS.get(
-            type(self._inner).__name__, type(self._inner).__name__
-        )
+        label = _STAGE_LABELS.get(type(self._inner), type(self._inner).__name__)
         if self._record is not None:
             self._record[label] = dt
         print(f"[stage {label}] {dt:.1f}s", flush=True)
@@ -400,7 +413,7 @@ def main(argv) -> None:
     )
 
     # Per-stage timings print as the chain runs (see _TimedRound). The first
-    # (cold) pass carries the reference observation-log so CommitRound diffs the
+    # (cold) pass carries the reference observation-log so CommitStage diffs the
     # prelude element-by-element (issue #59); the warm pass below omits it.
     chain, carry = prove_chain(sponge, comp, params, vk_pre_hash, airs, obs_log=obs_log)
     chain.rounds = [

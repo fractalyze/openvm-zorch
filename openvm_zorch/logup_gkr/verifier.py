@@ -1,8 +1,8 @@
-"""Stage-2 verifier: the dual of ``GkrRound`` (verifier/gkr.rs).
+"""Stage-2 verifier: the dual of ``GkrStage`` (verifier/gkr.rs).
 
 ``verify_gkr_stage`` checks the LogUp PoW witness, re-derives α/β, verifies
 the GKR fractional sumcheck (``verify_gkr``), and pads ξ — the stage math
-only. The chain Round that drives it (``GkrVerifierRound``) lives with the
+only. The chain Stage that drives it (``GkrVerifierStage``) lives with the
 other stage duals in ``openvm_zorch/verify.py``, mirroring sp1-zorch's
 ``verify_shard`` / ``logup_gkr.verifier`` split.
 """
@@ -86,7 +86,7 @@ def verify_gkr_stage(
     gkr_proof: FracSumcheckProof,
     logup_pow_witness: Array,
 ) -> tuple[DuplexTranscript, Array, Array, list[Array], Array, Array]:
-    """Stage 2 verifier — the dual of ``GkrRound``: check the LogUp PoW witness,
+    """Stage 2 verifier — the dual of ``GkrStage``: check the LogUp PoW witness,
     re-derive α/β, verify the GKR fractional sumcheck, and pad ξ to
     ``l_skip + n_global``. Returns α, β, the padded point ξ, and the reduced
     GKR numerator/denominator claims (``p_xi`` / ``q_xi``) the ZeroCheck stage

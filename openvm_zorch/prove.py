@@ -119,8 +119,8 @@ class GkrStageMsg:
 
 @dataclass(frozen=True)
 class ProveCarry:
-    """What flows between the prover's stage Rounds: the witness (set at
-    construction) plus each stage's outputs the next stage reads. Stage Rounds
+    """What flows between the prover's Stages: the witness (set at
+    construction) plus each stage's outputs the next stage reads. Stages
     return it via ``replace`` — a stage writes its own fields and passes the
     rest through untouched.
 
@@ -143,7 +143,7 @@ class ProveCarry:
     # main first). Empty unless a real block carries cached mains (issue #59).
     pre_cached_pcs_data: Sequence[StackedPcsData] = ()
     # Per-AIR cached commitments (keyed by ``id(air)``), precomputed in
-    # ``prove_chain`` so CommitRound only *observes* them in the prelude — native
+    # ``prove_chain`` so CommitStage only *observes* them in the prelude — native
     # commits cached mains in tracegen, outside the timed prove (#46). Empty
     # unless a real block carries cached mains.
     cached_pcs_data_by_air: dict[int, list[StackedPcsData]] = field(
@@ -215,7 +215,7 @@ def _commit_cached_mains(
     the input-order prelude observe) and the flat list in stacking order (read by
     Stage 4/5).
 
-    Hoisted out of ``CommitRound`` into ``prove_chain`` so it lands in
+    Hoisted out of ``CommitStage`` into ``prove_chain`` so it lands in
     build/setup scope, not the timed prove: the native prover commits cached
     mains during tracegen and the prove span only *observes* the precomputed
     ``cd.commit`` (#46). ``stacked_commit`` is a pure hash of the trace — it never
@@ -233,11 +233,11 @@ def _commit_cached_mains(
     return cached_by_air, pre_cached
 
 
-class CommitRound(Round):
+class CommitStage(Round):
     """Stage 1 + prelude: commit the stacked PCS, then absorb the prelude
     stream (vk pre-hash, the commitment, then per AIR in *input* order an
     optional present flag, log height, and public values). The prelude schedule
-    lives here once — folded into the commit Round as sp1-zorch folds its
+    lives here once — folded into the commit stage as sp1-zorch folds its
     ``PreambleRound`` into ``TraceCommitRound`` — so an ordering edit cannot
     land in the prover's Fiat-Shamir stream without the byte-match seeing it.
     The message is the structure-bound commitment."""
@@ -333,7 +333,7 @@ class CommitRound(Round):
         return carry, transcript, root
 
 
-class GkrRound(Round):
+class GkrStage(Round):
     """Stage 2: LogUp-GKR. Grinds the LogUp PoW, samples α/β, builds the GKR
     input layer, and runs the fractional sumcheck. Writes β + the padded point
     ξ onto the carry for ZeroCheck."""
@@ -369,7 +369,7 @@ class GkrRound(Round):
         return carry, transcript, GkrStageMsg(logup_pow_witness, gkr_proof, xi)
 
 
-class ZeroCheckRound(Round):
+class ZeroCheckStage(Round):
     """Stage 3: batched ZeroCheck + LogUp sumcheck over
     ``prove_batch_constraints``, consuming ξ and β off the carry. Writes the
     sumcheck point ``r`` for the stacking stage."""
@@ -407,7 +407,7 @@ class ZeroCheckRound(Round):
         return carry, transcript, bcp
 
 
-class StackingRound(Round):
+class StackingStage(Round):
     """Stage 4: stacked opening reduction, consuming the committed matrix/layout
     and the ZeroCheck point off the carry. Writes the opening point ``u`` for
     WHIR."""
@@ -444,7 +444,7 @@ class StackingRound(Round):
         return carry, transcript, stacking_proof
 
 
-class WhirRound(Round):
+class WhirStage(Round):
     """Stage 5: WHIR opening at ``u_cube``, the Stage-4 → Stage-5 handoff
     ``u_cube = (u₀ squarings over the skip domain) ‖ u[1..]``
     (reference ``prove_openings``). Reads the committed matrix/tree and the
@@ -507,13 +507,13 @@ def prove_chain(
     jit: bool = True,
     obs_log: dict | None = None,
 ) -> tuple[ProveChain, ProveCarry]:
-    """Build the SWIRL prover as one ``ProveChain`` of stage Rounds plus its
+    """Build the SWIRL prover as one ``ProveChain`` of Stages plus its
     initial carry. One definition of the stage wiring so ``prove`` and the
     benchmark cannot drift on it (sp1-zorch's ``prove_shard_chain`` pattern).
 
     The protocol-derived sizes the reference ``Coordinator::prove`` owns
     (stacking order, ``n_logup`` / ``n_max`` / ``n_global``) are computed here
-    and bound onto the Rounds. Returns the carry alongside the chain because the
+    and bound onto the Stages. Returns the carry alongside the chain because the
     stacking order it derives is also the carry's witness — keeping the
     derivation in one place.
     """
@@ -521,7 +521,7 @@ def prove_chain(
     order = sorted(range(len(airs)), key=lambda i: (-airs[i].trace.shape[0], i))
     sorted_airs = [airs[i] for i in order]
 
-    # Commit cached mains here (build scope) rather than inside CommitRound,
+    # Commit cached mains here (build scope) rather than inside CommitStage,
     # matching native's tracegen-time cached commit — the timed prove's commit
     # stage then covers only the common main (#46). Byte-identical: a pure hash,
     # observed in the prelude exactly as before.
@@ -547,7 +547,7 @@ def prove_chain(
 
     chain = ProveChain(
         [
-            CommitRound(
+            CommitStage(
                 sponge,
                 compressor,
                 l_skip=l_skip,
@@ -557,19 +557,19 @@ def prove_chain(
                 vk_pre_hash=vk_pre_hash,
                 obs_log=obs_log,
             ),
-            GkrRound(
+            GkrStage(
                 l_skip=l_skip,
                 n_logup=n_logup,
                 n_global=n_global,
                 logup_pow_bits=params.logup_pow_bits,
             ),
-            ZeroCheckRound(
+            ZeroCheckStage(
                 l_skip=l_skip,
                 n_logup=n_logup,
                 max_constraint_degree=params.max_constraint_degree,
             ),
-            StackingRound(l_skip=l_skip, n_stack=params.n_stack),
-            WhirRound(
+            StackingStage(l_skip=l_skip, n_stack=params.n_stack),
+            WhirStage(
                 sponge,
                 compressor,
                 l_skip=l_skip,

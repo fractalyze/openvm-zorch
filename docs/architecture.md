@@ -12,7 +12,14 @@ cd /path/to/stark-backend && git worktree add \
 
 SWIRL proves a multi-AIR system in five stages, each a Round composition
 threading one Fiat-Shamir transcript (zorch `DuplexTranscript` ↔ Rust
-`DuplexSponge<BabyBear, Poseidon2, 16, 8>`):
+`DuplexSponge<BabyBear, Poseidon2, 16, 8>`).
+
+"Stage" is zorch's granularity, not a local coinage
+([Stage / Bridge / `Round`](https://github.com/fractalyze/zorch#building-blocks)).
+No standalone **Bridge** exists here yet: the LogUp PoW grind and the ξ padding
+are folded into `GkrStage`, the prelude into `CommitStage` — splitting them out
+moves the Fiat-Shamir schedule, so the verifier chain has to mirror it
+round-for-round.
 
 | # | Stage | Rust entry point (crates/stark-backend/src/) | This repo |
 |---|-------|----------------------------------------------|-----------|
@@ -232,8 +239,8 @@ transcript.
 ## Verifier (implemented)
 
 `openvm_zorch/verify.py` is the Python `verify` — a `VerifyChain` of one
-verifier Round per prover stage (the dual of `prove_chain`), each driving its
-stage's `verifier.py`; the commit Round only replays the preamble, its check
+verifier Stage per prover stage (the dual of `prove_chain`), each driving its
+stage's `verifier.py`; the commit Stage only replays the preamble, its check
 deferred to WHIR's Merkle openings. From the proof plus a
 verifying key (per-AIR constraint DAG, log height, common-main width, public
 values — no traces) it re-derives every challenge from the same preamble and

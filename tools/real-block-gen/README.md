@@ -80,7 +80,7 @@ The dumped `meta.json` also carries (under `--ref-prove`) the full vk-prelude
 structure (`vk_prelude`: per vk position `present` / `is_required` /
 `has_preprocessed` / `num_cached_mains` / `n_public_values`) and the raw
 reference observation-log prefix (`obs_log`: canonical-u32 `values` + `samples`
-through the grind boundary), so zorch's `CommitRound` can diff its prelude
+through the grind boundary), so zorch's `CommitStage` can diff its prelude
 transcript element-by-element instead of inferring divergence from cascaded
 `MISMATCH` labels.
 
@@ -161,7 +161,7 @@ enough to serialize the parallel prover and inflate the phase spans themselves.
 
 Note `prover.main_trace_commit` times the **common-main** commit only — native
 commits cached mains during *tracegen* (the span just observes the precomputed
-`cd.commitment`), unlike zorch's `CommitRound`, which recomputes them in-stage.
+`cd.commitment`), unlike zorch's `CommitStage`, which recomputes them in-stage.
 
 ## Fixture format
 

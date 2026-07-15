@@ -1,10 +1,10 @@
 """End-to-end SWIRL verifier — the five stages checked from a proof + vk.
 
 The structural dual of ``prove`` (``openvm_zorch/prove.py``): ``verify_chain``
-builds a ``zorch.round.VerifyChain`` of one verifier Round per prover stage —
-``CommitVerifierRound`` / ``GkrVerifierRound`` / ``ZeroCheckVerifierRound`` /
-``StackingVerifierRound`` / ``WhirVerifierRound``, the duals of ``prove_chain``'s
-``CommitRound`` … ``WhirRound``. Each Round re-derives its stage's Fiat-Shamir
+builds a ``zorch.round.VerifyChain`` of one verifier Stage per prover stage —
+``CommitVerifierStage`` / ``GkrVerifierStage`` / ``ZeroCheckVerifierStage`` /
+``StackingVerifierStage`` / ``WhirVerifierStage``, the duals of ``prove_chain``'s
+``CommitStage`` … ``WhirStage``. Each Stage re-derives its own Fiat-Shamir
 challenges and checks the stage's algebraic relation, threading a witness-free
 ``VerifyCarry`` (the dual of ``ProveCarry``); the chain consumes the prover's
 one-message-per-round proof, so a stage present on one side and not the other is
@@ -15,7 +15,7 @@ accepted.
 
 The stage math lives with each stage, mirroring sp1-zorch's ``verify_shard`` /
 per-stage ``verifier.py`` split (the shared scalar algebra is
-``openvm_zorch/poly_common.py``); this module holds only the Rounds, the carry,
+``openvm_zorch/poly_common.py``); this module holds only the Stages, the carry,
 and the driver. The stage duals follow the reference verifier
 (crates/stark-backend/src/verifier):
 
@@ -31,7 +31,7 @@ and the driver. The stage duals follow the reference verifier
   OOD, the query phase (Merkle-path verification + k-fold codeword
   consistency), and the final WHIR polynomial constraint.
 
-A verifier Round raises ``VerificationError`` on its stage's check rather than
+A verifier Stage raises ``VerificationError`` on its stage's check rather than
 threading an ``ok`` (openvm's verifier checks were raise-based before the chain,
 and keeping that is a pure refactor); each returns ``ok = True`` and the chain's
 structural AND is the honest path's verdict.
@@ -81,10 +81,10 @@ class AirVk:
 
 @dataclass(frozen=True)
 class VerifyCarry:
-    """What flows between the verifier's stage Rounds: the verifying keys (set
+    """What flows between the verifier's Stages: the verifying keys (set
     at construction) plus each stage's outputs the next stage reads — the
-    witness-free dual of ``prove.ProveCarry``. Stage Rounds return it via
-    ``replace`` — a Round writes its own fields and passes the rest through.
+    witness-free dual of ``prove.ProveCarry``. Stages return it via
+    ``replace`` — a stage writes its own fields and passes the rest through.
 
     Like ``ProveCarry`` (and for the same reason) this is a plain dataclass, not
     a registered pytree: the verifier's stages jit *internally* (Stage 5's WHIR
@@ -120,8 +120,8 @@ class VerifyCarry:
     stacking_openings: Sequence[Sequence[Array]] | None = None
 
 
-class CommitVerifierRound(Round):
-    """Stage 1 dual of ``CommitRound``: replays the preamble absorb stream (vk
+class CommitVerifierStage(Round):
+    """Stage 1 dual of ``CommitStage``: replays the preamble absorb stream (vk
     pre-hash, the commitment, then per AIR in *input* order an optional present
     flag, log height, and public values) with the proof's commitment message,
     and writes it onto the carry for the WHIR dual. No local check: the
@@ -145,8 +145,8 @@ class CommitVerifierRound(Round):
         return carry, transcript, jnp.bool_(True)
 
 
-class GkrVerifierRound(Round):
-    """Stage 2 dual of ``GkrRound`` over ``verify_gkr_stage``: writes α/β, the
+class GkrVerifierStage(Round):
+    """Stage 2 dual of ``GkrStage`` over ``verify_gkr_stage``: writes α/β, the
     padded point ξ, and the GKR claims onto the carry for ZeroCheck. The message
     is the GKR stage's proof contribution (``GkrStageMsg``); its ``xi`` field is
     the prover's record — the verifier re-derives ξ rather than trusting it,
@@ -184,8 +184,8 @@ class GkrVerifierRound(Round):
         return carry, transcript, jnp.bool_(True)
 
 
-class ZeroCheckVerifierRound(Round):
-    """Stage 3 dual of ``ZeroCheckRound`` over ``verify_zerocheck_stage``:
+class ZeroCheckVerifierStage(Round):
+    """Stage 3 dual of ``ZeroCheckStage`` over ``verify_zerocheck_stage``:
     consumes the Stage-2 outputs off the carry, verifies the batched ZeroCheck +
     LogUp sumcheck, and writes the sumcheck point ``r`` plus the proof's column
     openings (Stage 4 batches them) onto the carry."""
@@ -219,8 +219,8 @@ class ZeroCheckVerifierRound(Round):
         return carry, transcript, jnp.bool_(True)
 
 
-class StackingVerifierRound(Round):
-    """Stage 4 dual of ``StackingRound`` over ``verify_stacked_reduction``:
+class StackingVerifierStage(Round):
+    """Stage 4 dual of ``StackingStage`` over ``verify_stacked_reduction``:
     rebuilds the stacked layout from the verifying keys, batches the column
     openings off the carry, and verifies the stacked opening reduction. Writes
     the opening point ``u`` and the proof's stacking openings (WHIR's running
@@ -253,8 +253,8 @@ class StackingVerifierRound(Round):
         return carry, transcript, jnp.bool_(True)
 
 
-class WhirVerifierRound(Round):
-    """Stage 5 dual of ``WhirRound`` over ``verify_whir``: forms ``u_cube`` from
+class WhirVerifierStage(Round):
+    """Stage 5 dual of ``WhirStage`` over ``verify_whir``: forms ``u_cube`` from
     the opening point on the carry (the same Stage-4 → Stage-5 handoff
     ``u_cube = (u₀ squarings over the skip domain) ‖ u[1..]`` the prover does),
     then checks WHIR against the carry's commitment and stacking openings."""
@@ -297,14 +297,14 @@ def verify_chain(
     vk_pre_hash: Sequence[int],
     air_vks: Sequence[AirVk],
 ) -> tuple[VerifyChain, VerifyCarry]:
-    """Build the SWIRL verifier as one ``VerifyChain`` of stage Rounds plus its
+    """Build the SWIRL verifier as one ``VerifyChain`` of Stages plus its
     initial carry — the dual of ``prove.prove_chain``. One definition of the
     stage wiring so ``verify`` and any future per-stage verify-timing harness
     cannot drift on it (sp1-zorch's ``verify_shard_chain`` pattern).
 
     The protocol-derived sizes (stacking order, ``n_logup`` / ``n_max`` /
     ``n_global``) are computed here from the verifying keys — the same values
-    ``prove_chain`` derives from the traces — and bound onto the Rounds. Returns
+    ``prove_chain`` derives from the traces — and bound onto the Stages. Returns
     the carry alongside the chain because the stacking order it derives is also
     the carry's statement.
     """
@@ -323,16 +323,16 @@ def verify_chain(
 
     chain = VerifyChain(
         [
-            CommitVerifierRound(vk_pre_hash=vk_pre_hash),
-            GkrVerifierRound(
+            CommitVerifierStage(vk_pre_hash=vk_pre_hash),
+            GkrVerifierStage(
                 params=params,
                 total_interactions=total_interactions,
                 n_logup=n_logup,
                 n_global=n_global,
             ),
-            ZeroCheckVerifierRound(params=params, n_logup=n_logup, n_max=n_max),
-            StackingVerifierRound(params=params),
-            WhirVerifierRound(sponge, compressor, params=params),
+            ZeroCheckVerifierStage(params=params, n_logup=n_logup, n_max=n_max),
+            StackingVerifierStage(params=params),
+            WhirVerifierStage(sponge, compressor, params=params),
         ]
     )
     return chain, VerifyCarry(air_vks=air_vks, sorted_vks=sorted_vks)
@@ -354,9 +354,9 @@ def verify(
     A thin driver over ``verify_chain`` (the dual of ``prove``): deconstruct the
     ``Proof`` into the per-round message list — the inverse of ``prove``'s
     assembly, ``[commit, gkr, bcp, stacking, whir]`` — and replay the chain.
-    Each verifier Round raises ``VerificationError`` on its stage's failed
+    Each verifier Stage raises ``VerificationError`` on its stage's failed
     check, so rejection flows through exactly as the flat verifier's did; ``ok``
-    is the chain's structural AND of the rounds, guarded here so a future
+    is the chain's structural AND of the stages, guarded here so a future
     ok-returning check cannot silently pass.
     """
     chain, carry = verify_chain(sponge, compressor, params, vk_pre_hash, air_vks)
