@@ -207,6 +207,17 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     return [[f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)]
 
 
+# Round-0 kernels, keyed by the identity of the AIR's DAG plus every other
+# static input the kernels close over. `frx.jit` caches per wrapped callable,
+# so handing it a freshly-built closure on each prove defeats that cache: every
+# prove would re-trace and re-lower all 19 AIRs' node walks (~4.9k nodes), which
+# costs far more than the kernels themselves take to run. `ConstraintsDag`
+# holds `dict` nodes, so it is unhashable by value and cannot key a plain
+# `lru_cache`; the entry therefore keys on `id(dag)` and stores `dag` itself, so
+# the DAG stays alive and its address can never be recycled into a stale hit.
+_ROUND0_FNS: dict[tuple, tuple[ConstraintsDag, tuple]] = {}
+
+
 def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_degree):
     """jitted per-trace round-0 constraint evaluators (#45).
 
@@ -227,7 +238,18 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     ``lax.scan`` jits, pure EF arithmetic, contracted (row) axis kept LAST per
     docs/development.md ⇒ byte-exact. One compile per AIR (distinct DAGs); warm/GPU reaps
     the fusion.
+
+    Build the kernels once per AIR and reuse them across proves (see
+    ``_ROUND0_FNS``). Round 0's device work is small — the whole real block is
+    ~4M trace cells and its node values ~5GB, single-digit ms of GPU traffic —
+    so a per-prove rebuild is not a rounding error but the dominant cost:
+    caching cuts warm round 0 on the real block from ~16.7s to ~0.36s.
     """
+    key = (id(dag), needs_next, public_values, l_skip, constraint_degree)
+    cached = _ROUND0_FNS.get(key)
+    if cached is not None:
+        return cached[1]
+
     num_cosets_zc = constraint_degree - 1
 
     if num_cosets_zc > 0:
@@ -269,6 +291,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
         q = (denom * eq_xi[None, None, :]).sum(axis=2)
         return p, q  # each (num_cosets, size)
 
+    _ROUND0_FNS[key] = (dag, (zc_eval, lu_eval))
     return zc_eval, lu_eval
 
 
