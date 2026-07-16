@@ -34,13 +34,6 @@ one-line `MODULE.bazel` change. (To validate the pin the way CI resolves it,
 temporarily disable the `.bazelrc.user` `--override_module=zorch` line —
 otherwise the build silently uses your local checkout, not the pinned commit.)
 
-An frx wheel bump must move `zk-dtypes` in lockstep: each wheel imports a
-specific `zk_dtypes` ABI (e.g. `efinfo.modulus_low_coeffs` from 0.0.6,
-`pallas_sf` from 0.0.7, the binary-field dtypes from 0.0.10), and frx's
-metadata does not floor the version, so the lock keeps the old `zk-dtypes` and
-every target dies at `import frx`. Bump the `zk-dtypes` pin in
-`requirements.in` alongside the frx pins and re-lock.
-
 ## Running on GPU
 
 `//openvm_zorch:verify_prove` is the entry point — the byte-match +
