@@ -304,6 +304,16 @@ def prewarm_coset_weights(l_skip: int, num_cosets: int) -> None:
     _coset_from_evals_weight(l_skip, num_cosets)
 
 
+def prewarm_geom_weights(l_skip: int, num_cosets: int) -> None:
+    """Eagerly build (and lru-cache) the geometric-coset interpolation weights so
+    a later JITTED ``geometric_cosets_to_coeffs`` hits the cache instead of
+    running its host-int ``pow`` / Lagrange-basis construction under trace.
+    Companion to ``prewarm_coset_weights``: the whole-stage jit (#45) traces the
+    ``geometric_cosets_to_coeffs`` path too, and ``_geom_weights`` is a distinct
+    cache the coset prewarm does not cover."""
+    _geom_weights(l_skip, num_cosets)
+
+
 def geometric_cosets_to_coeffs(
     l_skip: int, evals: Array, num_cosets: int
 ) -> list[Array]:

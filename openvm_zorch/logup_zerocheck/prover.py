@@ -809,7 +809,35 @@ class _ZcProfiler:
         self._t = now
 
 
-def prove_batch_constraints(
+class _NullProfiler:
+    """Profiler that does nothing — passed into the jitted stage body, where the
+    per-region ``block_until_ready`` is impossible (its outputs are traces). The
+    eager path uses ``_ZcProfiler``; ``OPENVM_ZC_PROFILE=1`` still exercises the
+    per-region split by routing the prove through the eager body."""
+
+    def mark(self, label: str, *outputs: object) -> None:
+        pass
+
+
+_NULL_PROFILER = _NullProfiler()
+
+
+def _prewarm_prism(l_skip: int, airs: list[AirData]) -> None:
+    """Eagerly build the host-int prism weight caches this stage touches, so that
+    tracing ``_stage_body`` (the whole-stage jit) hits warm ``lru_cache``s instead
+    of running the ``omega_int`` / ``pow`` constructions under trace, which fault
+    (``ConcretizationTypeError``, #45). Coset counts: ``constraint_degree`` (logup)
+    and ``constraint_degree - 1`` (zerocheck). Must run eagerly, never under
+    trace — call it before ``_stage_body`` on the eager path and before ``frx.jit``
+    on the cached path."""
+    for cd in {air.constraint_degree for air in airs}:
+        for nc in (cd, cd - 1):
+            if nc > 0:
+                prism.prewarm_coset_weights(l_skip, nc)
+                prism.prewarm_geom_weights(l_skip, nc)
+
+
+def _stage_body(
     transcript: DuplexTranscript,
     l_skip: int,
     n_logup: int,
@@ -817,10 +845,13 @@ def prove_batch_constraints(
     xi: list[Array],
     beta: Array,
     max_constraint_degree: int,
-) -> tuple[DuplexTranscript, BatchConstraintProof]:
-    """Drive Stage 3 from the post-ξ transcript state; byte-matches
-    ``prove_zerocheck_and_logup`` after the ξ padding."""
-    _zc = _ZcProfiler()
+    profiler: _ZcProfiler | _NullProfiler,
+) -> tuple[DuplexTranscript, tuple]:
+    """The Stage-3 compute, factored out of ``prove_batch_constraints`` so it can
+    run eagerly (real per-region ``profiler``) or wrapped in one cached jit (null
+    profiler). Returns the transcript plus the raw proof arrays; the caller
+    assembles ``BatchConstraintProof`` from them — its Python-list fields would
+    otherwise bloat the jit's return pytree with per-scalar leaves."""
     num_traces = len(airs)
     n_per_trace = [log2_strict_usize(air.trace.shape[0]) - l_skip for air in airs]
     n_max = max(max(n_per_trace), 0)
@@ -860,15 +891,7 @@ def prove_batch_constraints(
     max_num_constraints = max((len(air.dag.constraint_idx) for air in airs), default=0)
     lambda_pows = _powers(lam, max(max_num_constraints, 1))
 
-    # Pre-build the host-int prism coset weights eagerly so the jitted round-0
-    # evaluators below hit the lru_cache instead of faulting on the construction
-    # under trace (#45). Coset counts: constraint_degree (logup) and
-    # constraint_degree - 1 (zerocheck).
-    for cd in {air.constraint_degree for air in airs}:
-        for nc in (cd, cd - 1):
-            if nc > 0:
-                prism.prewarm_coset_weights(l_skip, nc)
-    _zc.mark("setup", mats, sels, eq_3bs, beta_pows, lambda_pows)
+    profiler.mark("setup", mats, sels, eq_3bs, beta_pows, lambda_pows)
 
     # --- Round 0: per-trace s'_0 polynomials on geometric cosets ---
     sp_zc: list[list[Array]] = []
@@ -914,7 +937,7 @@ def prove_batch_constraints(
             l_skip, q_evals, air.constraint_degree
         )
         sp_logup.append(([c * norm for c in p_coeffs], q_coeffs))
-    _zc.mark("round0", sp_zc, sp_logup)
+    profiler.mark("round0", sp_zc, sp_logup)
 
     # --- eq♯/eq univariate factors, μ batching, sum claims, s_0 ---
     # The per-trace s'_p/s'_q · eq♯ products and the μ-batched s_0 are degree
@@ -963,11 +986,9 @@ def prove_batch_constraints(
         zc_prod + (p_prods.T * mu_p).sum(axis=-1) + (q_prods.T * mu_q).sum(axis=-1)
     )
     transcript = transcript.observe(s_0_arr)
-    s_0 = list(s_0_arr)  # the proof field wants list[Array]
-    _zc.mark("s0_assembly", s_0_arr, p_prods, q_prods)
+    profiler.mark("s0_assembly", s_0_arr, p_prods, q_prods)
 
     transcript, r_0 = sample_ext(transcript)
-    r = [r_0]
     prev_s_eval = eval_coeffs(s_0_arr, r_0)
 
     # --- Fold the prism at r_0 ---
@@ -978,7 +999,7 @@ def prove_batch_constraints(
     sels = [prism.fold_ple_evals(l_skip, s, r_0) for s in sels]
     eq_ns = [prism.eval_eq_uni(l_skip, xi[0], r_0)]
     eq_sharp_ns = [prism.eval_eq_sharp_uni(l_skip, xi[:l_skip], r_0)]
-    _zc.mark("r0_fold", mats, sels, eq_ns, eq_sharp_ns, prev_s_eval)
+    profiler.mark("r0_fold", mats, sels, eq_ns, eq_sharp_ns, prev_s_eval)
 
     # --- MLE rounds 1..=n_max, built once per AIR set (see `_mle_scan_fn`) ----
     n_lifts = [max(n, 0) for n in n_per_trace]
@@ -1008,7 +1029,7 @@ def prove_batch_constraints(
         if n_max >= 1
         else jnp.zeros((0,), EF)
     )
-    _zc.mark("scan_setup", eq_xi_xs, xi_cur_xs)
+    profiler.mark("scan_setup", eq_xi_xs, xi_cur_xs)
 
     mats, transcript, round_polys, r_rounds = _mle_scan_fn(
         airs, tuple(n_per_trace), s_deg, n_max
@@ -1027,9 +1048,7 @@ def prove_batch_constraints(
         eq_xi_xs,
         xi_cur_xs,
     )
-    sumcheck_round_polys = list(round_polys)
-    r = [r_0] + list(r_rounds)
-    _zc.mark("mle_scan", round_polys, mats, sumcheck_round_polys)
+    profiler.mark("mle_scan", round_polys, mats)
 
     # --- Column openings: per AIR ``[common, *cached]`` ---
     # Reference ``into_column_openings`` pops the common main to the front; the
@@ -1071,16 +1090,169 @@ def prove_batch_constraints(
     for air, openings in zip(airs, column_openings):
         for part in openings[1:]:
             transcript = _observe_opening(transcript, part, air.needs_next)
-    _zc.mark("openings", column_openings)
+    profiler.mark("openings", column_openings)
 
-    proof = BatchConstraintProof(
-        numerator_term_per_air=numerator_term_per_air,
-        denominator_term_per_air=denominator_term_per_air,
-        univariate_round_coeffs=s_0,
-        sumcheck_round_polys=sumcheck_round_polys,
+    return transcript, (
+        numerator_term_per_air,
+        denominator_term_per_air,
+        s_0_arr,
+        round_polys,
+        column_openings,
+        lam,
+        mu,
+        r_0,
+        r_rounds,
+    )
+
+
+# The whole stage as one cached jit (#45). The eager ``_stage_body`` above is
+# ~99% host: with round 0 and the MLE scan already jitted, the residual ~1s is
+# the per-scalar dispatch of the glue *between* them — ``geometric_cosets_to_coeffs``,
+# the coefficient assembly, the prism folds, the batched convs, the opening
+# observes. Folding the whole body into one jit collapses that host dispatch to a
+# single executable launch (the stage's device work is ~55ms). Fiat–Shamir is no
+# barrier: ``observe``/``sample_ext`` already jit inside the MLE scan.
+#
+# Cached per AIR set, module-global and keyed on ``id(dag)`` — the same discipline
+# as ``_ROUND0_FNS`` / ``_MLE_SCAN_FNS`` (which this jit subsumes), so a freshly
+# assembled chain over the same verifying key reuses the executable. That reuse is
+# load-bearing: ``verify_prove``'s warm pass rebuilds the whole chain, and a
+# per-stage-instance cache would miss it and re-trace the stage (~26s vs 0.2s). The
+# DAGs are held WEAKLY and the per-AIR device arrays (``trace`` + ``cached_mains``)
+# ride in as operands, never closed over, so a cached entry pins neither the traces
+# nor (past a weakref) the DAGs.
+_STAGE_FNS: dict[tuple, object] = {}
+
+
+def _stage_cache_key(
+    l_skip: int, n_logup: int, max_constraint_degree: int, airs: list[AirData]
+) -> tuple:
+    # Trace shapes are part of the key: ``_build_stage_jit`` eagerly pre-builds the
+    # inner MLE-scan kernel for these heights, and ``_MLE_SCAN_FNS`` keys on the
+    # per-trace heights too. Reusing an entry across a height change would let
+    # ``_stage_body`` build that kernel lazily under the outer trace — the tracer
+    # leak the eager pre-build exists to prevent.
+    return (
+        tuple(
+            (id(a.dag), a.public_values, a.constraint_degree, a.needs_next, a.trace.shape)
+            for a in airs
+        ),
+        l_skip,
+        n_logup,
+        max_constraint_degree,
+    )
+
+
+def _build_stage_jit(
+    l_skip: int, n_logup: int, max_constraint_degree: int, airs: list[AirData]
+):
+    """Prewarm the prism host-int caches, then jit ``_stage_body`` for this AIR
+    set: the AIR structure is closed over statically (DAGs held weakly) and the
+    device arrays are threaded through ``run`` as operands."""
+    _prewarm_prism(l_skip, airs)
+    # Build the round-0 and MLE-scan kernels EAGERLY, before the outer trace.
+    # ``_stage_body`` calls their builders (``_ROUND0_FNS`` / ``_MLE_SCAN_FNS``);
+    # built lazily under the outer trace instead, their module-cached closures
+    # would capture that trace's tracers and — persisting across proves — leak
+    # them into the next prove's trace (``UnexpectedTracerError`` on the warm
+    # pass). Pre-building here forces eager constants, the same discipline as the
+    # prism prewarm above.
+    n_per_trace = [log2_strict_usize(a.trace.shape[0]) - l_skip for a in airs]
+    n_max = max(max(n_per_trace), 0)
+    s_deg = max_constraint_degree + 1
+    for a in airs:
+        _round0_constraint_fns(
+            a.dag, a.needs_next, a.public_values, l_skip, a.constraint_degree
+        )
+    _mle_scan_fn(airs, tuple(n_per_trace), s_deg, n_max)
+    meta = [
+        (weakref.ref(a.dag), a.public_values, a.constraint_degree, a.needs_next)
+        for a in airs
+    ]
+
+    @frx.jit
+    def run(transcript, xi, beta, traces, cached_mains):
+        airs_ = [
+            AirData(
+                trace=traces[t],
+                dag=dag_ref(),
+                public_values=pubs,
+                constraint_degree=cd,
+                needs_next=nxt,
+                cached_mains=tuple(cached_mains[t]),
+            )
+            for t, (dag_ref, pubs, cd, nxt) in enumerate(meta)
+        ]
+        return _stage_body(
+            transcript,
+            l_skip,
+            n_logup,
+            airs_,
+            xi,
+            beta,
+            max_constraint_degree,
+            _NULL_PROFILER,
+        )
+
+    return run
+
+
+def _assemble_proof(arrays: tuple) -> BatchConstraintProof:
+    (num, den, s_0_arr, round_polys, column_openings, lam, mu, r_0, r_rounds) = arrays
+    return BatchConstraintProof(
+        numerator_term_per_air=num,
+        denominator_term_per_air=den,
+        univariate_round_coeffs=list(s_0_arr),
+        sumcheck_round_polys=list(round_polys),
         column_openings=column_openings,
         lambda_=lam,
         mu=mu,
-        r=r,
+        r=[r_0] + list(r_rounds),
     )
-    return transcript, proof
+
+
+def prove_batch_constraints(
+    transcript: DuplexTranscript,
+    l_skip: int,
+    n_logup: int,
+    airs: list[AirData],
+    xi: list[Array],
+    beta: Array,
+    max_constraint_degree: int,
+) -> tuple[DuplexTranscript, BatchConstraintProof]:
+    """Drive Stage 3 from the post-ξ transcript state; byte-matches
+    ``prove_zerocheck_and_logup`` after the ξ padding.
+
+    Runs the whole stage as one cached jit, built once per AIR set and reused
+    across proves via the module-global ``_STAGE_FNS`` (keyed on ``id(dag)``, so a
+    freshly assembled chain over the same verifying key reuses it — the reuse that
+    ``verify_prove``'s warm pass and repeated proves both depend on).
+    ``OPENVM_ZC_PROFILE=1`` routes through the eager body instead, for the
+    per-region host/device split (the jit erases the region boundaries)."""
+    if _ZC_PROFILE:
+        _prewarm_prism(l_skip, airs)
+        transcript, arrays = _stage_body(
+            transcript,
+            l_skip,
+            n_logup,
+            airs,
+            xi,
+            beta,
+            max_constraint_degree,
+            _ZcProfiler(),
+        )
+        return transcript, _assemble_proof(arrays)
+
+    key = _stage_cache_key(l_skip, n_logup, max_constraint_degree, airs)
+    run = _STAGE_FNS.get(key)
+    if run is None:
+        run = _build_stage_jit(l_skip, n_logup, max_constraint_degree, airs)
+        _STAGE_FNS[key] = run
+        # Evict when any AIR's DAG is collected (a later pop of the same key
+        # no-ops), so a cached executable never leaks nor serves a recycled id().
+        for a in airs:
+            weakref.finalize(a.dag, _STAGE_FNS.pop, key, None)
+    traces = [a.trace for a in airs]
+    cached_mains = [list(a.cached_mains) for a in airs]
+    transcript, arrays = run(transcript, xi, beta, traces, cached_mains)
+    return transcript, _assemble_proof(arrays)
