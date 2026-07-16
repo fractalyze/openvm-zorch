@@ -1,7 +1,7 @@
 # Development
 
 Pure Python on FRX + the XLA PJRT plugin. Bazel 9 (bzlmod). Tests default to
-`JAX_PLATFORMS=cpu`.
+`FRX_PLATFORMS=cpu`.
 
 ```sh
 bazel test //...                 # hermetic, sandboxed
@@ -48,7 +48,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
 
 - A target only sees the GPU if it deps **both** `requirement("frx_cuda12_plugin")`
   and `requirement("frx_cuda12_pjrt")`; without them frx **silently falls back to
-  CPU**. Run with `JAX_PLATFORMS=cuda` (not `gpu`, which also inits rocm and
+  CPU**. Run with `FRX_PLATFORMS=cuda` (not `gpu`, which also inits rocm and
   dies) so a missing plugin hard-errors instead of silently using CPU.
 - Those plugin `.so`s require **`libcuda` at import**, so a cuda-dep'd target
   cannot even import on a driverless machine. Therefore tests stay
@@ -151,8 +151,8 @@ production-scale fixture with a production baseline:
 ( cd tools/fixture-gen && FIB_LOG_HEIGHT=20 N_STACK=16 \
     cargo run --release -- --prove-out /tmp/prove_prod )
 
-# 2. Compare (GPU; drop JAX_PLATFORMS for CPU):
-JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+# 2. Compare (GPU; drop FRX_PLATFORMS for CPU):
+FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
   bazel run //openvm_zorch:verify_prove -- \
     --fixture_dir /tmp/prove_prod \
     --baseline openvm_zorch/testdata/baseline/native_prod_gpu.json
@@ -169,7 +169,7 @@ check of the wiring.
 - **The first GPU `prove()` is compile-dominated, not kernel-dominated**: the
   zerocheck constraint DAG unrolls into one giant `jit_scan` kernel that ptxas
   optimizes for minutes. Two levers (#70):
-  - `JAX_COMPILATION_CACHE_DIR=<dir>` persists compiled modules across process
+  - `FRX_COMPILATION_CACHE_DIR=<dir>` persists compiled modules across process
     runs, so every run after the first skips the compile. Leave it unset for
     byte-match gates — a true cold compile is part of the gate.
   - `XLA_FLAGS=--xla_gpu_force_compilation_parallelism=<cores>` compiles the

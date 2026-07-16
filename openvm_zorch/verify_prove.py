@@ -19,11 +19,11 @@ on every run, so the compile-vs-runtime split is visible alongside the
 byte-match (proof messages are plain dataclasses, opaque to
 ``block_until_ready``, so block on their array leaves by hand). Wall-clock is
 dominated by XLA GPU compiles, not kernel runtime; for the warm split set
-``JAX_COMPILATION_CACHE_DIR`` to a per-toolchain directory so every run after
+``FRX_COMPILATION_CACHE_DIR`` to a per-toolchain directory so every run after
 the first skips the compiles (leave it unset for byte-match gates).
 
     bazel run //openvm_zorch:verify_prove
-    JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
         bazel run //openvm_zorch:verify_prove -- --fixture_dir /path/to/fixture
 
 Exits non-zero on any mismatch.
