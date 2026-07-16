@@ -37,7 +37,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import frx
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from frx import lax
 from zk_dtypes import babybear_mont as F
@@ -73,7 +73,7 @@ def _load_instance(prove_dir):
     airs = []
     for air in meta["airs"]:
         air_idx = air["air_idx"]
-        trace = jnp.array(
+        trace = fnp.array(
             np.load(prove_dir / "inputs" / f"trace_{air_idx}.npy"), dtype=F
         )
         dag = ConstraintsDag.from_json(
@@ -82,7 +82,7 @@ def _load_instance(prove_dir):
             )
         )
         cached_mains = tuple(
-            jnp.array(
+            fnp.array(
                 np.load(prove_dir / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F
             )
             for k in range(air.get("num_cached_mains", 0))
@@ -117,7 +117,7 @@ def _load_instance(prove_dir):
 
 
 def _ef_limbs(x) -> np.ndarray:
-    return np.asarray(lax.bitcast_convert_type(jnp.atleast_1d(x), F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(fnp.atleast_1d(x), F).astype(fnp.uint32))
 
 
 class LogupGkrPhasesBenchmark(FrxBenchmark):

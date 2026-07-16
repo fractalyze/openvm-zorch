@@ -45,7 +45,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 
 from openvm_zorch.commit.stacking import StackedLayout
@@ -134,15 +134,15 @@ class CommitVerifierStage(Stage):
     def __call__(
         self, carry: VerifyCarry, msg: Array, transcript: DuplexTranscript
     ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
-        transcript = transcript.observe(jnp.array(list(self._vk_pre_hash), dtype=F))
+        transcript = transcript.observe(fnp.array(list(self._vk_pre_hash), dtype=F))
         transcript = transcript.observe(msg)
         for vk in carry.air_vks:
             meta: list[int] = [] if vk.is_required else [1]
             meta.append(vk.log_height)
             meta.extend(vk.public_values)
-            transcript = transcript.observe(jnp.array(meta, dtype=F))
+            transcript = transcript.observe(fnp.array(meta, dtype=F))
         carry = replace(carry, common_main_commit=msg)
-        return carry, transcript, jnp.bool_(True)
+        return carry, transcript, fnp.bool_(True)
 
 
 class GkrVerifierStage(Stage):
@@ -181,7 +181,7 @@ class GkrVerifierStage(Stage):
         carry = replace(
             carry, alpha=alpha, beta=beta, xi=xi, gkr_numer=p_xi, gkr_denom=q_xi
         )
-        return carry, transcript, jnp.bool_(True)
+        return carry, transcript, fnp.bool_(True)
 
 
 class ZeroCheckVerifierStage(Stage):
@@ -216,7 +216,7 @@ class ZeroCheckVerifierStage(Stage):
             carry.gkr_denom,
         )
         carry = replace(carry, r=r, column_openings=msg.column_openings)
-        return carry, transcript, jnp.bool_(True)
+        return carry, transcript, fnp.bool_(True)
 
 
 class StackingVerifierStage(Stage):
@@ -250,7 +250,7 @@ class StackingVerifierStage(Stage):
             carry.r,
         )
         carry = replace(carry, u=u, stacking_openings=msg.stacking_openings)
-        return carry, transcript, jnp.bool_(True)
+        return carry, transcript, fnp.bool_(True)
 
 
 class WhirVerifierStage(Stage):
@@ -287,7 +287,7 @@ class WhirVerifierStage(Stage):
             [carry.common_main_commit],
             u_cube,
         )
-        return carry, transcript, jnp.bool_(True)
+        return carry, transcript, fnp.bool_(True)
 
 
 def verify_chain(

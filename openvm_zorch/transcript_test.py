@@ -12,7 +12,7 @@ equality, no tolerances.
 import json
 from pathlib import Path
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 from zk_dtypes import babybear_mont as F
@@ -32,14 +32,14 @@ class TranscriptByteMatchTest(absltest.TestCase):
         for value, sampled in zip(values.tolist(), is_sample.tolist()):
             if sampled:
                 t, got = t.sample(1)
-                self.assertEqual(int(got[0].astype(jnp.uint32)), value)
+                self.assertEqual(int(got[0].astype(fnp.uint32)), value)
             else:
-                t = t.observe(jnp.array(value, dtype=F))
+                t = t.observe(fnp.array(value, dtype=F))
 
         # The sponge state after the final permutation must match the
         # reference recorder's last snapshot (the recorder also logs the
         # initial all-zero state, so >= 2 entries are guaranteed here).
-        got_state = np.asarray(t.state.sponge_state.astype(jnp.uint32))
+        got_state = np.asarray(t.state.sponge_state.astype(fnp.uint32))
         np.testing.assert_array_equal(got_state, perms[-1])
 
     def test_check_witness_matches_reference_grind(self) -> None:
@@ -57,13 +57,13 @@ class TranscriptByteMatchTest(absltest.TestCase):
             if sampled:
                 t, _ = t.sample(1)
             else:
-                t = t.observe(jnp.array(value, dtype=F))
+                t = t.observe(fnp.array(value, dtype=F))
 
         self.assertEqual(int(values[cut]), witness)
-        t, ok = check_witness(t, pow_bits, jnp.array(witness, dtype=F))
+        t, ok = check_witness(t, pow_bits, fnp.array(witness, dtype=F))
         self.assertTrue(bool(ok))
         t, final = t.sample(1)
-        self.assertEqual(int(final[0].astype(jnp.uint32)), int(values[-1]))
+        self.assertEqual(int(final[0].astype(fnp.uint32)), int(values[-1]))
 
 
 if __name__ == "__main__":

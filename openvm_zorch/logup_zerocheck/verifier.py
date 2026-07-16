@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 
 from openvm_zorch.fields import MODULUS, f_const, f_inv_const, f_to_ef
@@ -75,7 +75,7 @@ def verify_zerocheck_stage(
     for sum_p, sum_q in zip(bcp.numerator_term_per_air, bcp.denominator_term_per_air):
         p_xi = p_xi - sum_p
         q_xi = q_xi - sum_q
-        transcript = transcript.observe(jnp.stack([sum_p, sum_q]))
+        transcript = transcript.observe(fnp.stack([sum_p, sum_q]))
     if not eq_u32(p_xi, ZERO):
         raise VerificationError("GKR numerator claim mismatch")
     if not eq_u32(q_xi, alpha):
@@ -92,7 +92,7 @@ def verify_zerocheck_stage(
 
     # 5. Univariate round 0.
     s0 = bcp.univariate_round_coeffs
-    transcript = transcript.observe(jnp.stack(list(s0)))
+    transcript = transcript.observe(fnp.stack(list(s0)))
     s_deg = max_constraint_degree + 1
     transcript, r_0 = sample_ext(transcript)
     size = 1 << l_skip
@@ -102,7 +102,7 @@ def verify_zerocheck_stage(
     s0_sum = s0_sum * f_to_ef(f_const(size))
     if not eq_u32(sum_claim, s0_sum):
         raise VerificationError("Stage-3 s0 sum mismatch")
-    cur_sum = eval_coeffs(jnp.stack(list(s0)), r_0)
+    cur_sum = eval_coeffs(fnp.stack(list(s0)), r_0)
     rs = [r_0]
 
     # 6. Multilinear rounds.
@@ -121,7 +121,7 @@ def verify_zerocheck_stage(
     # closing observes so Stage 4 continues from the same transcript state.
     for trace_idx, vk in enumerate(sorted_vks):
         pairs = by_rot(bcp.column_openings[trace_idx][0], vk.needs_next)
-        flat = jnp.stack([v for pair in pairs for v in pair])
+        flat = fnp.stack([v for pair in pairs for v in pair])
         transcript = transcript.observe(flat)
 
     # 7. eq_3b per trace (matches the prover's eq_3bs).
@@ -177,8 +177,8 @@ def verify_zerocheck_stage(
         n = n_per_trace[trace_idx]
         n_lift = max(n, 0)
         pairs = by_rot(bcp.column_openings[trace_idx][0], vk.needs_next)
-        local = jnp.stack([c for c, _ in pairs])
-        nxt = jnp.stack([c_rot for _, c_rot in pairs])
+        local = fnp.stack([c for c, _ in pairs])
+        nxt = fnp.stack([c_rot for _, c_rot in pairs])
         parts = [(local, nxt)]
 
         if n < 0:
@@ -198,7 +198,7 @@ def verify_zerocheck_stage(
             prod_hi = prod_hi * x
         is_first = inv * progression_exp_2(rs_n[0], l_eff) * prod_lo
         is_last = inv * progression_exp_2(rs_n[0] * omega, l_eff) * prod_hi
-        sels = jnp.stack([is_first, ONE - is_last, is_last])
+        sels = fnp.stack([is_first, ONE - is_last, is_last])
 
         node_vals = eval_nodes(vk.dag, sels, parts, vk.public_values)
         expr = acc_constraints(vk.dag, node_vals, lambda_pows)

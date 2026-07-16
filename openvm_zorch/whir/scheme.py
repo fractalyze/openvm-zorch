@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 from zorch.poly.univariate import eval_coeffs
 from zorch.transcript import Transcript
@@ -38,10 +38,10 @@ def _mobius_eq_table(u: Sequence[Array]) -> Array:
     """``mobius_eq(u, b)`` over the hypercube, LSB-first (index bit ``i`` ↔
     ``u[i]``); per-coordinate kernel ``K(0) = 1 − 2u_i``, ``K(1) = u_i`` — the
     reference ``evals_mobius_eq_hypercube`` (and openvm ``mobius_eq_table``)."""
-    table = jnp.ones((1,), EF)
-    one = jnp.ones((), EF)
+    table = fnp.ones((1,), EF)
+    one = fnp.ones((), EF)
     for u_i in u:
-        table = jnp.concatenate([table * (one - u_i - u_i), table * u_i])
+        table = fnp.concatenate([table * (one - u_i - u_i), table * u_i])
     return table
 
 
@@ -49,8 +49,8 @@ def _eval_mobius_eq_mle(u: Sequence[Array], x: Sequence[Array]) -> Array:
     """The Möbius-eq multilinear ``Π_i (1−2u_i)(1−x_i) + u_i·x_i`` — the closed
     form of ``_mobius_eq_table(u)`` at a bound point ``x``. ``u`` and ``x`` pair
     directly (reference ``_eval_mobius_eq_mle``)."""
-    acc = jnp.ones((), EF)
-    one = jnp.ones((), EF)
+    acc = fnp.ones((), EF)
+    one = fnp.ones((), EF)
     for u_i, x_i in zip(u, x):
         acc = acc * ((one - u_i - u_i) * (one - x_i) + u_i * x_i)
     return acc

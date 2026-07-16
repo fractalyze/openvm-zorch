@@ -24,7 +24,7 @@ import functools
 from dataclasses import dataclass
 
 import frx
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 
 from zorch.commit.strided_merkle import StridedMerkleTree
@@ -74,7 +74,7 @@ class StackedMerkleTree:
         for layer in self.digest_layers[:-1]:
             siblings.append(layer[index ^ 1])
             index >>= 1
-        return jnp.stack(siblings)
+        return fnp.stack(siblings)
 
 
 @functools.partial(frx.jit, static_argnums=0)

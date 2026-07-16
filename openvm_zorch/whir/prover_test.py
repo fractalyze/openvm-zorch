@@ -14,7 +14,7 @@ log exactly. Canonical-u32 equality, no tolerances.
 import json
 from pathlib import Path
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 from frx import lax
@@ -33,11 +33,11 @@ _FIXTURE = Path(__file__).parent / "testdata" / "whir"
 
 def _ef_limbs(x) -> np.ndarray:
     """Canonical-u32 limbs of a BabyBear⁴ array, shape (..., 4)."""
-    return np.asarray(lax.bitcast_convert_type(jnp.atleast_1d(x), F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(fnp.atleast_1d(x), F).astype(fnp.uint32))
 
 
 def _to_u32(x) -> np.ndarray:
-    return np.asarray(lax.bitcast_convert_type(x, F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(x, F).astype(fnp.uint32))
 
 
 def _replay_log(values: np.ndarray, is_sample: np.ndarray, end: int):
@@ -48,14 +48,14 @@ def _replay_log(values: np.ndarray, is_sample: np.ndarray, end: int):
     while idx < end:
         if is_sample[idx]:
             t, got = t.sample(1)
-            got = int(np.asarray(lax.bitcast_convert_type(got, F).astype(jnp.uint32))[0])
+            got = int(np.asarray(lax.bitcast_convert_type(got, F).astype(fnp.uint32))[0])
             assert got == int(values[idx]), f"sample mismatch at {idx}"
             idx += 1
         else:
             run = idx
             while run < end and not is_sample[run]:
                 run += 1
-            t = t.observe(jnp.array(values[idx:run], dtype=F))
+            t = t.observe(fnp.array(values[idx:run], dtype=F))
             idx = run
     return t
 
@@ -79,7 +79,7 @@ class WhirByteMatchTest(absltest.TestCase):
         sponge = Sponge(perm, SpongeParams(rate=8, out=8))
         comp = Compression(perm, CompressionParams(arity=2, chunk=8))
         traces = [
-            jnp.array(np.load(_FIXTURE / "inputs" / f"trace_{air_idx}.npy"), dtype=F)
+            fnp.array(np.load(_FIXTURE / "inputs" / f"trace_{air_idx}.npy"), dtype=F)
             for air_idx in meta["sorted_airs"]
         ]
         root, data = stacked_commit(
@@ -94,7 +94,7 @@ class WhirByteMatchTest(absltest.TestCase):
         np.testing.assert_array_equal(_to_u32(root), self.values[8:16])
 
         u_cube = [
-            ef_from_limbs(jnp.array(row, jnp.uint32))
+            ef_from_limbs(fnp.array(row, fnp.uint32))
             for row in np.load(_FIXTURE / "inputs" / "u_cube.npy")
         ]
         config = WhirConfig(
@@ -120,7 +120,7 @@ class WhirByteMatchTest(absltest.TestCase):
 
         out = _FIXTURE / "outputs"
         np.testing.assert_array_equal(
-            _to_u32(jnp.atleast_1d(proof.mu_pow_witness)),
+            _to_u32(fnp.atleast_1d(proof.mu_pow_witness)),
             np.load(out / "mu_pow_witness.npy"),
         )
         np.testing.assert_array_equal(_ef_limbs(proof.mu)[0], np.load(out / "mu.npy"))
@@ -131,18 +131,18 @@ class WhirByteMatchTest(absltest.TestCase):
                 _ef_limbs(evals), want_sumcheck[j], err_msg=f"sumcheck round {j}"
             )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(proof.codeword_commits)),
+            _to_u32(fnp.stack(proof.codeword_commits)),
             np.load(out / "codeword_commits.npy"),
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(proof.ood_values)), np.load(out / "ood_values.npy")
+            _ef_limbs(fnp.stack(proof.ood_values)), np.load(out / "ood_values.npy")
         )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(proof.folding_pow_witnesses)),
+            _to_u32(fnp.stack(proof.folding_pow_witnesses)),
             np.load(out / "folding_pow_witnesses.npy"),
         )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(proof.query_phase_pow_witnesses)),
+            _to_u32(fnp.stack(proof.query_phase_pow_witnesses)),
             np.load(out / "query_phase_pow_witnesses.npy"),
         )
         np.testing.assert_array_equal(

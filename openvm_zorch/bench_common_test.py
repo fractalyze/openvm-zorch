@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from absl.testing import absltest
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.bench_common import _NO_ARRAY_TYPES, array_leaves
@@ -34,7 +34,7 @@ def _dag() -> ConstraintsDag:
 
 class ArrayLeavesTest(absltest.TestCase):
     def test_finds_arrays_through_containers(self):
-        a, b, c = jnp.zeros((2,), F), jnp.zeros((3,), F), jnp.zeros((4,), F)
+        a, b, c = fnp.zeros((2,), F), fnp.zeros((3,), F), fnp.zeros((4,), F)
         self.assertLen(array_leaves([a, (b,), {"k": c}]), 3)
 
     def test_skipped_types_contribute_no_leaf(self):
@@ -45,7 +45,7 @@ class ArrayLeavesTest(absltest.TestCase):
     def test_skip_does_not_hide_a_sibling_array(self):
         """The skip must drop only the skipped object, never its neighbours —
         the walk still has to reach every array a stage left un-materialized."""
-        trace = jnp.zeros((4, 2), F)
+        trace = fnp.zeros((4, 2), F)
         leaves = array_leaves({"dag": _dag(), "trace": trace})
         self.assertLen(leaves, 1)
 

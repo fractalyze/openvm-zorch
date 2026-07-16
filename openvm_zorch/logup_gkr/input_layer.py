@@ -31,7 +31,7 @@ import weakref
 from typing import Any, Callable, Sequence
 
 import frx
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from zk_dtypes import babybear_mont as F
@@ -73,9 +73,9 @@ def _sels(height: int) -> Array:
     """[is_first_row, is_transition, is_last_row] over the full trace height
     (the GKR input layer reads the unfolded trace, so no l_skip lift here —
     cf. ZeroCheck's ``_sels`` which lifts to ``2^l_skip``)."""
-    rows = jnp.arange(height)
-    table = jnp.stack([rows == 0, rows != height - 1, rows == height - 1], axis=-1)
-    return table.astype(jnp.uint32).astype(F)
+    rows = fnp.arange(height)
+    table = fnp.stack([rows == 0, rows != height - 1, rows == height - 1], axis=-1)
+    return table.astype(fnp.uint32).astype(F)
 
 
 def _parts(
@@ -88,7 +88,7 @@ def _parts(
     rotation only when the AIR rotates."""
     parts: list[tuple[Array, Array | None]] = []
     for m in (*cached_mains, trace):
-        nxt = jnp.concatenate([m[1:], m[:1]], axis=0) if needs_next else None
+        nxt = fnp.concatenate([m[1:], m[:1]], axis=0) if needs_next else None
         parts.append((m, nxt))
     return parts
 
@@ -156,7 +156,7 @@ def gkr_input_evals(
     max_msg_len = max(
         (len(i.message) for dag in dags for i in dag.interactions), default=0
     )
-    one = jnp.ones((), EF)
+    one = fnp.ones((), EF)
     beta_pows = [one]
     for _ in range(max_msg_len):
         beta_pows.append(beta_pows[-1] * beta)
@@ -208,14 +208,14 @@ def gkr_input_evals(
         # same on every row, so broadcast it to the row axis before the cyclic
         # lift below (which assumes a per-row ``(height,)`` vector).
         if count.ndim == 0:
-            count = jnp.broadcast_to(count, (height,))
+            count = fnp.broadcast_to(count, (height,))
         if denom.ndim == 0:
-            denom = jnp.broadcast_to(denom, (height,))
+            denom = fnp.broadcast_to(denom, (height,))
         reps = length // height
         if length != height:
             # Lifting repeats the rows cyclically; the numerator carries the
             # inverse lift factor so the fraction-sum is unchanged.
-            norm = f_to_ef(jnp.array(pow(reps, modulus - 2, modulus), F))
+            norm = f_to_ef(fnp.array(pow(reps, modulus - 2, modulus), F))
             count = count * norm
 
         counts.append(count)
@@ -226,12 +226,12 @@ def gkr_input_evals(
 
     # Append the zero sentinel at index ``base`` (the total source height) and
     # route every off-image slot to it.
-    zero = jnp.zeros((1,), EF)
-    count_flat = jnp.concatenate([*counts, zero])
-    denom_flat = jnp.concatenate([*denoms, zero])
+    zero = fnp.zeros((1,), EF)
+    count_flat = fnp.concatenate([*counts, zero])
+    denom_flat = fnp.concatenate([*denoms, zero])
     gather_idx[gather_idx < 0] = base
 
-    idx = jnp.asarray(gather_idx)
-    num = jnp.take(count_flat, idx, axis=0)
-    den = jnp.take(denom_flat, idx, axis=0)
+    idx = fnp.asarray(gather_idx)
+    num = fnp.take(count_flat, idx, axis=0)
+    den = fnp.take(denom_flat, idx, axis=0)
     return num, den + alpha

@@ -18,7 +18,7 @@ tolerances.
 import json
 from pathlib import Path
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 from frx import lax
@@ -51,11 +51,11 @@ def _poseidon2():
 
 def _ef_limbs(x) -> np.ndarray:
     """Canonical-u32 limbs of a BabyBear⁴ array, shape (..., 4)."""
-    return np.asarray(lax.bitcast_convert_type(jnp.atleast_1d(x), F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(fnp.atleast_1d(x), F).astype(fnp.uint32))
 
 
 def _to_u32(x) -> np.ndarray:
-    return np.asarray(lax.bitcast_convert_type(x, F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(x, F).astype(fnp.uint32))
 
 
 class ProveEndToEndTest(absltest.TestCase):
@@ -69,7 +69,7 @@ class ProveEndToEndTest(absltest.TestCase):
         for air_idx, (g_air, z_air) in enumerate(
             zip(gkr_meta["airs"], zc_meta["airs"])
         ):
-            trace = jnp.array(
+            trace = fnp.array(
                 np.load(_GKR / "inputs" / f"trace_{air_idx}.npy"), dtype=F
             )
             dag = ConstraintsDag.from_json(
@@ -78,7 +78,7 @@ class ProveEndToEndTest(absltest.TestCase):
                 )
             )
             cached_mains = tuple(
-                jnp.array(
+                fnp.array(
                     np.load(_GKR / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F
                 )
                 for k in range(g_air.get("num_cached_mains", 0))
@@ -131,14 +131,14 @@ class ProveEndToEndTest(absltest.TestCase):
             np.asarray(gkr_meta["common_main_commit"], np.uint32),
         )
         self.assertEqual(
-            int(_to_u32(jnp.atleast_1d(proof.logup_pow_witness))[0]),
+            int(_to_u32(fnp.atleast_1d(proof.logup_pow_witness))[0]),
             gkr_meta["logup_pow_witness"],
         )
         np.testing.assert_array_equal(
             _ef_limbs(proof.gkr_proof.q0_claim)[0], np.load(_GKR / "outputs" / "q0_claim.npy")
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(proof.xi)), np.load(_GKR / "outputs" / "xi.npy")
+            _ef_limbs(fnp.stack(proof.xi)), np.load(_GKR / "outputs" / "xi.npy")
         )
 
     def _check_stage3(self, proof: Proof) -> None:
@@ -147,11 +147,11 @@ class ProveEndToEndTest(absltest.TestCase):
             _ef_limbs(bcp.lambda_)[0], np.load(_ZEROCHECK / "outputs" / "lambda.npy")
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(bcp.univariate_round_coeffs)),
+            _ef_limbs(fnp.stack(bcp.univariate_round_coeffs)),
             np.load(_ZEROCHECK / "outputs" / "s0_coeffs.npy"),
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(bcp.r)), np.load(_ZEROCHECK / "outputs" / "r.npy")
+            _ef_limbs(fnp.stack(bcp.r)), np.load(_ZEROCHECK / "outputs" / "r.npy")
         )
 
     def _check_stage4(self, proof: Proof) -> None:
@@ -160,7 +160,7 @@ class ProveEndToEndTest(absltest.TestCase):
             _ef_limbs(sp.lambda_)[0], np.load(_STACKING / "outputs" / "lambda.npy")
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(sp.u)), np.load(_STACKING / "outputs" / "u.npy")
+            _ef_limbs(fnp.stack(sp.u)), np.load(_STACKING / "outputs" / "u.npy")
         )
         np.testing.assert_array_equal(
             _ef_limbs(sp.stacking_openings[0]),
@@ -171,7 +171,7 @@ class ProveEndToEndTest(absltest.TestCase):
         wp = proof.whir_proof
         out = _WHIR / "outputs"
         np.testing.assert_array_equal(
-            _to_u32(jnp.atleast_1d(wp.mu_pow_witness)),
+            _to_u32(fnp.atleast_1d(wp.mu_pow_witness)),
             np.load(out / "mu_pow_witness.npy"),
         )
         np.testing.assert_array_equal(_ef_limbs(wp.mu)[0], np.load(out / "mu.npy"))
@@ -181,18 +181,18 @@ class ProveEndToEndTest(absltest.TestCase):
                 _ef_limbs(evals), want_sumcheck[j], err_msg=f"sumcheck round {j}"
             )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(wp.codeword_commits)),
+            _to_u32(fnp.stack(wp.codeword_commits)),
             np.load(out / "codeword_commits.npy"),
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(wp.ood_values)), np.load(out / "ood_values.npy")
+            _ef_limbs(fnp.stack(wp.ood_values)), np.load(out / "ood_values.npy")
         )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(wp.folding_pow_witnesses)),
+            _to_u32(fnp.stack(wp.folding_pow_witnesses)),
             np.load(out / "folding_pow_witnesses.npy"),
         )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(wp.query_phase_pow_witnesses)),
+            _to_u32(fnp.stack(wp.query_phase_pow_witnesses)),
             np.load(out / "query_phase_pow_witnesses.npy"),
         )
         np.testing.assert_array_equal(
@@ -223,7 +223,7 @@ class ProveEndToEndTest(absltest.TestCase):
         airs = []
         for air in meta["airs"]:
             air_idx = air["air_idx"]
-            trace = jnp.array(
+            trace = fnp.array(
                 np.load(_PROVE / "inputs" / f"trace_{air_idx}.npy"), dtype=F
             )
             dag = ConstraintsDag.from_json(
@@ -232,7 +232,7 @@ class ProveEndToEndTest(absltest.TestCase):
                 )
             )
             cached_mains = tuple(
-                jnp.array(
+                fnp.array(
                     np.load(_PROVE / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F
                 )
                 for k in range(air.get("num_cached_mains", 0))
@@ -278,39 +278,39 @@ class ProveEndToEndTest(absltest.TestCase):
             _to_u32(proof.common_main_commit), np.load(out / "common_main_commit.npy")
         )
         self.assertEqual(
-            int(_to_u32(jnp.atleast_1d(proof.logup_pow_witness))[0]),
+            int(_to_u32(fnp.atleast_1d(proof.logup_pow_witness))[0]),
             int(np.load(out / "logup_pow_witness.npy")[0]),
         )
         np.testing.assert_array_equal(
             _ef_limbs(proof.gkr_proof.q0_claim)[0], np.load(out / "q0_claim.npy")
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(proof.xi)), np.load(out / "xi.npy")
+            _ef_limbs(fnp.stack(proof.xi)), np.load(out / "xi.npy")
         )
         # Stage 3.
         np.testing.assert_array_equal(
             _ef_limbs(bcp.lambda_)[0], np.load(out / "zc_lambda.npy")
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(bcp.univariate_round_coeffs)),
+            _ef_limbs(fnp.stack(bcp.univariate_round_coeffs)),
             np.load(out / "zc_s0_coeffs.npy"),
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(bcp.r)), np.load(out / "zc_r.npy")
+            _ef_limbs(fnp.stack(bcp.r)), np.load(out / "zc_r.npy")
         )
         # Stage 4.
         np.testing.assert_array_equal(
             _ef_limbs(sp.lambda_)[0], np.load(out / "st_lambda.npy")
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(sp.u)), np.load(out / "st_u.npy")
+            _ef_limbs(fnp.stack(sp.u)), np.load(out / "st_u.npy")
         )
         np.testing.assert_array_equal(
             _ef_limbs(sp.stacking_openings[0]), np.load(out / "st_openings_c0.npy")
         )
         # Stage 5.
         np.testing.assert_array_equal(
-            _to_u32(jnp.atleast_1d(wp.mu_pow_witness)),
+            _to_u32(fnp.atleast_1d(wp.mu_pow_witness)),
             np.load(out / "whir_mu_pow_witness.npy"),
         )
         np.testing.assert_array_equal(_ef_limbs(wp.mu)[0], np.load(out / "whir_mu.npy"))
@@ -320,18 +320,18 @@ class ProveEndToEndTest(absltest.TestCase):
                 _ef_limbs(evals), want_sumcheck[j], err_msg=f"whir sumcheck {j}"
             )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(wp.codeword_commits)),
+            _to_u32(fnp.stack(wp.codeword_commits)),
             np.load(out / "whir_codeword_commits.npy"),
         )
         np.testing.assert_array_equal(
-            _ef_limbs(jnp.stack(wp.ood_values)), np.load(out / "whir_ood_values.npy")
+            _ef_limbs(fnp.stack(wp.ood_values)), np.load(out / "whir_ood_values.npy")
         )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(wp.folding_pow_witnesses)),
+            _to_u32(fnp.stack(wp.folding_pow_witnesses)),
             np.load(out / "whir_folding_pow_witnesses.npy"),
         )
         np.testing.assert_array_equal(
-            _to_u32(jnp.stack(wp.query_phase_pow_witnesses)),
+            _to_u32(fnp.stack(wp.query_phase_pow_witnesses)),
             np.load(out / "whir_query_phase_pow_witnesses.npy"),
         )
         np.testing.assert_array_equal(

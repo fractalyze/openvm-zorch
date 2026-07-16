@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import frx
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array, lax
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
@@ -39,11 +39,11 @@ from zorch.transcript import DuplexTranscript, Transcript, sample_challenge
 
 
 def _rot_prev(table: Array) -> Array:
-    """``table[rot_prev(x)]`` for all x: cyclic shift by one (the FRX jnp has
+    """``table[rot_prev(x)]`` for all x: cyclic shift by one (the FRX fnp has
     no ``roll``)."""
     if table.shape[0] == 1:
         return table
-    return jnp.concatenate([table[-1:], table[:-1]])
+    return fnp.concatenate([table[-1:], table[:-1]])
 
 
 @dataclass(frozen=True)
@@ -128,8 +128,8 @@ def _round0_group_contrib(
         # subgroup is the constant 1). Restore the (coset, z) grid shape the
         # window broadcast below needs — the value is already correct. l_eff
         # is static, so this never enters the synthetic l_eff>0 kernels.
-        eq_uni_r0 = jnp.broadcast_to(eq_uni_r0, z_grid.shape)
-        eq_uni_r0_rot = jnp.broadcast_to(eq_uni_r0_rot, z_grid.shape)
+        eq_uni_r0 = fnp.broadcast_to(eq_uni_r0, z_grid.shape)
+        eq_uni_r0_rot = fnp.broadcast_to(eq_uni_r0_rot, z_grid.shape)
     # eq / κ_rot cube vectors over the windows axis, transposed so the window
     # contraction reduces the *trailing* axis (the EF reduce shape the XLA
     # backend lowers cleanly — a strided mid-axis EF reduce crashes codegen).
@@ -137,7 +137,7 @@ def _round0_group_contrib(
     k_rot_vec = eq_uni_r0_rot[..., None] * eq_rs + (
         eq_const * eq_uni_1_grid[..., None] * (k_rot_rs - eq_rs)
     )
-    ce_t = jnp.moveaxis(ce, 2, -1)  # (C, S, columns, windows)
+    ce_t = fnp.moveaxis(ce, 2, -1)  # (C, S, columns, windows)
     eq_per_col = (ce_t * eq_vec[:, :, None, :]).sum(axis=-1)  # (C, S, columns)
     rot_per_col = (ce_t * k_rot_vec[:, :, None, :]).sum(axis=-1)
     contrib = (lam_eq_w * eq_per_col + lam_rot_w * rot_per_col).sum(axis=-1)
@@ -168,7 +168,7 @@ class _StackingSummand:
     def combine(self, scalars: Sequence[Array], *factors: Array) -> Array:
         del scalars  # λ rides inside EQW, not as a loop-invariant scalar
         q, eqw = factors
-        return jnp.sum(q * eqw, axis=-2)  # contract the columns; keep the variable
+        return fnp.sum(q * eqw, axis=-2)  # contract the columns; keep the variable
 
     def _combine(self, *factors: Array) -> Array:
         """The summand bound to its (empty) scalars — the only seam
@@ -225,12 +225,12 @@ def _eqw_columns(
         parts = segments[c]
         used = sum(p.shape[0] for p in parts)
         if used < height:
-            parts = parts + [jnp.zeros((height - used,), EF)]
+            parts = parts + [fnp.zeros((height - used,), EF)]
         # `parts` is always non-empty here: an empty column has used == 0 < height
         # (height = 2^n_stack ≥ 2 past the n_stack == 0 guard), so the pad above
         # fills it. Mirrors `stacked_matrix`'s `concatenate(parts)` (commit/stacking.py).
-        cols.append(jnp.concatenate(parts))
-    return jnp.stack(cols, axis=1)
+        cols.append(fnp.concatenate(parts))
+    return fnp.stack(cols, axis=1)
 
 
 def _sumcheck_rounds(
@@ -281,8 +281,8 @@ def _sumcheck_rounds(
         return transcript, [], u, openings
 
     height = 1 << n_stack
-    q_cols = jnp.concatenate([q.T for q in q_evals], axis=0)  # (Σ width, 2^n_stack)
-    eqw_cols = jnp.concatenate(
+    q_cols = fnp.concatenate([q.T for q in q_evals], axis=0)  # (Σ width, 2^n_stack)
+    eqw_cols = fnp.concatenate(
         [
             _eqw_columns(
                 [v for v in views if v.com_idx == c],
@@ -305,7 +305,7 @@ def _sumcheck_rounds(
     domain = EvalDomain(natural_domain(summand.degree, EF).nodes[1:])
     folded, transcript, msgs = fold_rounds(
         _StackingRound(summand, domain, ext_dtype=EF),
-        jnp.stack([q_cols, eqw_cols]),
+        fnp.stack([q_cols, eqw_cols]),
         transcript,
         n_stack,
     )
@@ -363,7 +363,7 @@ def prove_stacked_opening_reduction(
             start = i
 
     transcript, lam = sample_ext(transcript)
-    lam_pows = [jnp.ones((), EF)]
+    lam_pows = [fnp.ones((), EF)]
     for _ in range(lam_count - 1):
         lam_pows.append(lam_pows[-1] * lam)
 
@@ -391,9 +391,9 @@ def prove_stacked_opening_reduction(
     num_cosets = 2  # q · (eq or κ_rot) is degree 2 per variable
     size = 1 << l_skip
     # z[c, k] = g^{c+1}·ω^k, the z-index of coset c (host ints → one EF grid).
-    z_grid = jnp.stack(
+    z_grid = fnp.stack(
         [
-            jnp.stack(
+            fnp.stack(
                 [
                     _ef_const(
                         pow(prism.GENERATOR, c + 1, MODULUS)
@@ -407,7 +407,7 @@ def prove_stacked_opening_reduction(
         ]
     )  # (num_cosets, size) EF
     eq_uni_1_grid = prism.eval_eq_uni_at_one(l_skip, z_grid)  # group-invariant
-    s_evals = jnp.zeros((num_cosets, size), EF)
+    s_evals = fnp.zeros((num_cosets, size), EF)
     for g_start, g_end in groups:
         g_views = views[g_start:g_end]
         lht = g_views[0].slice.log_height
@@ -415,7 +415,7 @@ def prove_stacked_opening_reduction(
         eq_rs = eq_tables[lht]
         # κ_rot's cube factor is eq at the rotated-back point: index x − 1.
         k_rot_rs = _rot_prev(eq_rs)
-        q_cols = jnp.stack(
+        q_cols = fnp.stack(
             [
                 stacked_per_commit[v.com_idx][0][
                     v.slice.row_idx : v.slice.row_idx + v.slice.lifted_len(l_skip),
@@ -425,10 +425,10 @@ def prove_stacked_opening_reduction(
             ],
             axis=1,
         )
-        lam_eq_w = jnp.stack([lam_pows[v.lam_eq] for v in g_views])
-        lam_rot_w = jnp.stack(
+        lam_eq_w = fnp.stack([lam_pows[v.lam_eq] for v in g_views])
+        lam_rot_w = fnp.stack(
             [
-                lam_pows[v.lam_rot] if v.lam_rot is not None else jnp.zeros((), EF)
+                lam_pows[v.lam_rot] if v.lam_rot is not None else fnp.zeros((), EF)
                 for v in g_views
             ]
         )
@@ -452,7 +452,7 @@ def prove_stacked_opening_reduction(
             lam_rot_w,
         )  # (C, S)
     s_0_deg = num_cosets * (size - 1)
-    s_0 = jnp.stack(
+    s_0 = fnp.stack(
         prism.geometric_cosets_to_coeffs(l_skip, s_evals, num_cosets)[: s_0_deg + 1]
     )
     transcript = transcript.observe(s_0)

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array, lax
 
 from openvm_zorch.fields import EF, F, MODULUS, f_const, f_inv_const, f_to_ef
@@ -40,10 +40,10 @@ def omega_int(l_skip: int) -> int:
     """Canonical generator of the order-``2^l_skip`` subgroup, extracted from
     ``lax.ntt`` (evaluating the polynomial ``Z`` on ``D``) so it can never
     drift from the NTT the rest of the prover stands on."""
-    coeffs = jnp.zeros((1, 1 << l_skip), F).at[0, 1].set(jnp.ones((), F))
+    coeffs = fnp.zeros((1, 1 << l_skip), F).at[0, 1].set(fnp.ones((), F))
     evals = lax.ntt(coeffs, ntt_type="NTT", ntt_length=1 << l_skip)[0]
     omega = int(
-        jnp.asarray(lax.bitcast_convert_type(evals[1:2], F).astype(jnp.uint32))[0]
+        fnp.asarray(lax.bitcast_convert_type(evals[1:2], F).astype(fnp.uint32))[0]
     )
     assert pow(omega, 1 << l_skip, MODULUS) == 1
     assert pow(omega, 1 << (l_skip - 1), MODULUS) != 1
@@ -53,7 +53,7 @@ def omega_int(l_skip: int) -> int:
 def omega_pows_f(l_skip: int) -> Array:
     """``[1, ω, ..., ω^{2^l_skip - 1}]`` as base-field constants."""
     w = omega_int(l_skip)
-    return jnp.array([pow(w, k, MODULUS) for k in range(1 << l_skip)], F)
+    return fnp.array([pow(w, k, MODULUS) for k in range(1 << l_skip)], F)
 
 
 @lru_cache(maxsize=None)
@@ -64,7 +64,7 @@ def _idft_weight(l_skip: int) -> Array:
     size = 1 << l_skip
     w = omega_int(l_skip)
     inv_n = pow(size, MODULUS - 2, MODULUS)
-    return jnp.array(
+    return fnp.array(
         [
             [(inv_n * pow(w, (-t * k) % size, MODULUS)) % MODULUS for k in range(size)]
             for t in range(size)
@@ -96,7 +96,7 @@ def _idft_rows(l_skip: int, chunks: Array) -> list[Array]:
 def eval_eq_uni(l_skip: int, x: Array, y: Array) -> Array:
     """``eq_D(x, y)`` — the Lagrange-kernel of the skip domain
     (poly_common.rs ``eval_eq_uni``)."""
-    one = jnp.ones((), x.dtype)
+    one = fnp.ones((), x.dtype)
     res = one
     xp, yp = x, y
     for _ in range(l_skip):
@@ -109,7 +109,7 @@ def eval_eq_uni(l_skip: int, x: Array, y: Array) -> Array:
 
 def eval_eq_uni_at_one(l_skip: int, x: Array) -> Array:
     """``eq_D(x, 1)`` (poly_common.rs ``eval_eq_uni_at_one``)."""
-    one = jnp.ones((), x.dtype)
+    one = fnp.ones((), x.dtype)
     res = one
     xp = x
     for _ in range(l_skip):
@@ -124,7 +124,7 @@ def eval_in_uni(l_skip: int, n: int, z: Array) -> Array:
     ``eval_in_uni``): 1 for ``n >= 0``; for ``n < 0`` it is ``eq_{D'}(z', 1)``
     over the order-``2^{-n}`` subgroup with ``z' = z^{2^{l_skip + n}}``."""
     if n >= 0:
-        return jnp.ones((), z.dtype)
+        return fnp.ones((), z.dtype)
     if n < -l_skip:
         raise ValueError(f"n ({n}) < -l_skip ({l_skip})")
     zp = z
@@ -136,9 +136,9 @@ def eval_in_uni(l_skip: int, n: int, z: Array) -> Array:
 def eval_eq_mle(x: list[Array], y: list[Array]) -> Array:
     """``∏_i (1 − y_i − x_i + 2·x_i·y_i)`` — the multilinear equality kernel
     evaluated at two points (poly_common.rs ``eval_eq_mle``)."""
-    acc = jnp.ones((), EF)
+    acc = fnp.ones((), EF)
     for x_i, y_i in zip(x, y):
-        acc = acc * (jnp.ones((), EF) - y_i - x_i + (x_i * y_i) * 2)
+        acc = acc * (fnp.ones((), EF) - y_i - x_i + (x_i * y_i) * 2)
     return acc
 
 
@@ -152,7 +152,7 @@ def eval_eq_rot_cube(x: list[Array], y: list[Array]) -> tuple[Array, Array]:
     """The (eq, rot) cube kernels (poly_common.rs ``eval_eq_rot_cube``):
     ``eq`` is the multilinear equality, ``rot`` the cyclic-rotation MLE, both
     on ``{0,1}^len(x)``."""
-    one = jnp.ones((), EF)
+    one = fnp.ones((), EF)
     rot = one
     eq = one
     for x_i, y_i in zip(reversed(x), reversed(y)):
@@ -176,15 +176,15 @@ def eq_cube_table(point: list[Array]) -> Array:
     """eq(point, y) for y on the hypercube, LSB-first in ``point`` (index bit
     i ↔ point[i]) — the reference's ``evals_eq_hypercube_serial`` layout."""
     if not point:
-        return jnp.ones((1,), EF)
-    return expand_eq_to_hypercube(jnp.stack(point[::-1]), jnp.ones((), point[0].dtype))
+        return fnp.ones((1,), EF)
+    return expand_eq_to_hypercube(fnp.stack(point[::-1]), fnp.ones((), point[0].dtype))
 
 
 def eval_eq_sharp_uni(l_skip: int, xi_1: list[Array], z: Array) -> Array:
     """``eq♯_D(ξ_1, z)`` (poly_common.rs ``eval_eq_sharp_uni``)."""
     eq_evals = eq_cube_table(xi_1)
     omega = omega_pows_f(l_skip)
-    acc = jnp.zeros((), EF)
+    acc = fnp.zeros((), EF)
     for k in range(1 << l_skip):
         acc = acc + eval_eq_uni(l_skip, z, f_to_ef(omega[k])) * eq_evals[k]
     return acc
@@ -195,7 +195,7 @@ def eq_uni_poly(l_skip: int, x: Array) -> list[Array]:
     ``coeff_0 = 1/N``, ``coeff_j = x^{N-j}/N``."""
     size = 1 << l_skip
     inv_n = f_to_ef(f_inv_const(size))
-    x_pows = [jnp.ones((), x.dtype)]
+    x_pows = [fnp.ones((), x.dtype)]
     for _ in range(size):
         x_pows.append(x_pows[-1] * x)
     return [inv_n] + [x_pows[size - j] * inv_n for j in range(1, size)]
@@ -218,7 +218,7 @@ def fold_ple_evals(l_skip: int, mat: Array, r: Array) -> Array:
     """
     height, width = mat.shape
     chunks = mat.reshape(height >> l_skip, 1 << l_skip, width)
-    coeffs = _idft_rows(l_skip, jnp.moveaxis(chunks, 1, -1))
+    coeffs = _idft_rows(l_skip, fnp.moveaxis(chunks, 1, -1))
     acc = f_to_ef(coeffs[0])
     r_pow = r
     for c in coeffs[1:]:
@@ -240,7 +240,7 @@ def coset_evals(l_skip: int, mat: Array, num_cosets: int) -> Array:
     size = 1 << l_skip
     height, width = mat.shape
     # (rows, size_kin, width) -> (rows, width, size_kin): kin is the D-eval index.
-    chunks = jnp.moveaxis(mat.reshape(height >> l_skip, size, width), 1, -1)
+    chunks = fnp.moveaxis(mat.reshape(height >> l_skip, size, width), 1, -1)
     # One fused contraction D-evals -> coset evals: M[c, k, kin] folds the iDFT
     # and the coset-DFT into a single constant matrix per coset, so the
     # intermediate coefficients never materialize. Trailing-axis sum over kin.
@@ -259,7 +259,7 @@ def _coset_weight(l_skip: int, num_cosets: int) -> Array:
     ``(num_cosets, 2^l_skip, 2^l_skip)``."""
     size = 1 << l_skip
     w = omega_int(l_skip)
-    return jnp.array(
+    return fnp.array(
         [
             [
                 [
@@ -331,7 +331,7 @@ def geometric_cosets_to_coeffs(
     size = 1 << l_skip
     # Q_t(s_c^N) for all cosets at once: iDFT over the trailing z-axis, then
     # unshift by g^{-(c+1)t}. ``idft[t, c]`` is the t-th iDFT coefficient.
-    idft = jnp.stack(_idft_rows(l_skip, evals))  # (size_t, num_cosets)
+    idft = fnp.stack(_idft_rows(l_skip, evals))  # (size_t, num_cosets)
     unshift, basis = _geom_weights(l_skip, num_cosets)  # (size_t, c), (m, c)
     if idft.dtype != F:
         unshift, basis = f_to_ef(unshift), f_to_ef(basis)
@@ -351,7 +351,7 @@ def _geom_weights(l_skip: int, num_cosets: int) -> tuple[Array, Array]:
     size = 1 << l_skip
     shifts = [pow(GENERATOR, c + 1, MODULUS) for c in range(num_cosets)]
     inv_shifts = [pow(s, MODULUS - 2, MODULUS) for s in shifts]
-    unshift = jnp.array(
+    unshift = fnp.array(
         [[pow(inv_s, t, MODULUS) for inv_s in inv_shifts] for t in range(size)], F
     )
     points = [pow(s, size, MODULUS) for s in shifts]
@@ -368,7 +368,7 @@ def _geom_weights(l_skip: int, num_cosets: int) -> tuple[Array, Array]:
             denom = denom * (points[i] - points[j]) % MODULUS
         inv_denom = pow(denom, MODULUS - 2, MODULUS)
         basis_cols.append([c * inv_denom % MODULUS for c in coeffs])
-    basis = jnp.array(
+    basis = fnp.array(
         [[basis_cols[c][m] for c in range(num_cosets)] for m in range(num_cosets)], F
     )
     return unshift, basis

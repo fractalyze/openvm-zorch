@@ -68,18 +68,18 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   extent (e.g. the stacked matrix can end in an all-zero committed column).
   When a byte-match fails at a hash, first suspect a shape/padding delta,
   not the hash params.
-- `frx.numpy` is a subset of upstream JAX's: `jnp.roll` does not exist (first hit
+- `frx.numpy` is a subset of upstream JAX's: `fnp.roll` does not exist (first hit
   in Stage 4's rotation kernel — use
-  `jnp.concatenate([a[-1:], a[:-1]])`), and `jnp.arange` iota is
-  unsupported for extension dtypes (zorch builds domains via `jnp.stack`
-  of scalars). When an attribute error names a jnp function, reach for a
-  concat/stack equivalent before suspecting your logic. Also: `jnp.stack`
-  (and `jnp.concatenate`) require each element to ALREADY be an array — they
+  `fnp.concatenate([a[-1:], a[:-1]])`), and `fnp.arange` iota is
+  unsupported for extension dtypes (zorch builds domains via `fnp.stack`
+  of scalars). When an attribute error names a fnp function, reach for a
+  concat/stack equivalent before suspecting your logic. Also: `fnp.stack`
+  (and `fnp.concatenate`) require each element to ALREADY be an array — they
   do NOT `asarray` a nested Python list (`stack requires ndarray or scalar
   arguments, got list`). A flat `list[Array]` of 0-D scalars stacks directly,
   but to stack rows of scalars (a `list[list[Array]]`) into a matrix you must
-  inner-stack each row first: `jnp.stack([jnp.stack(row) for row in rows])`.
-  `jnp.pad`, by contrast, DOES work on extension dtypes (verified byte-exact).
+  inner-stack each row first: `fnp.stack([fnp.stack(row) for row in rows])`.
+  `fnp.pad`, by contrast, DOES work on extension dtypes (verified byte-exact).
 - **Perf: a host-int weight loop (a `pow()` nest building a constant
   matrix, contracted into field cells with scalar `acc += w*cell` adds) is
   a dispatch storm, not a FLOP cost.** It dominates eagerly. Fix: build the
@@ -87,7 +87,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   as a field array) and replace the scalar nest with one broadcast-multiply
   + a **trailing-axis** `.sum` (mid-axis EF reduce faults under jit; keep
   the contracted axis last). This is eager-fast and jit-fusable. Do NOT use
-  `jnp.dot`/`@`/`tensordot` — they mis-lower under `frx.jit` on XLA
+  `fnp.dot`/`@`/`tensordot` — they mis-lower under `frx.jit` on XLA
   (see `zorch/fusion.py`, `zorch/pcs/whir/_math.py`). And do NOT wrap a
   scalar-list polynomial (`_conv` over 0-D coeffs) in `frx.jit` directly —
   hundreds of pytree-leaf scalars regress; vectorize into arrays first.

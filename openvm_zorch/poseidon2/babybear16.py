@@ -20,7 +20,7 @@ https://github.com/Plonky3/Plonky3/blob/v0.4.3/baby-bear/src/poseidon2.rs
 
 from __future__ import annotations
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from zk_dtypes import babybear_mont as F
 
@@ -112,8 +112,8 @@ def babybear16_params() -> Poseidon2Params:
         alpha=_ALPHA,
         external_rounds=_ER,
         internal_rounds=_IR,
-        external_constants_initial=jnp.array(_EXTERNAL_INITIAL, dtype=F),
-        external_constants_terminal=jnp.array(_EXTERNAL_TERMINAL, dtype=F),
-        internal_constants=jnp.array(internal_rc, dtype=F),
-        internal_diag=jnp.array(_INTERNAL_DIAG, dtype=F),
+        external_constants_initial=fnp.array(_EXTERNAL_INITIAL, dtype=F),
+        external_constants_terminal=fnp.array(_EXTERNAL_TERMINAL, dtype=F),
+        internal_constants=fnp.array(internal_rc, dtype=F),
+        internal_diag=fnp.array(_INTERNAL_DIAG, dtype=F),
     )

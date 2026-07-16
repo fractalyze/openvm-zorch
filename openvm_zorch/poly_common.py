@@ -13,7 +13,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array, lax
 
 from openvm_zorch.fields import EF, F, MODULUS, f_const, f_inv_const, f_to_ef
@@ -23,8 +23,8 @@ class VerificationError(Exception):
     """Raised when any verifier check fails."""
 
 
-ZERO = jnp.zeros((), EF)
-ONE = jnp.ones((), EF)
+ZERO = fnp.zeros((), EF)
+ONE = fnp.ones((), EF)
 _HALF = f_to_ef(f_inv_const(2))
 _INV6 = f_to_ef(f_inv_const(6))
 _THREE = f_to_ef(f_const(3))
@@ -33,9 +33,9 @@ _THREE = f_to_ef(f_const(3))
 def eq_u32(a: Array, b: Array) -> bool:
     """Canonical-u32 equality of two field elements (base or extension),
     independent of any custom-dtype ``__eq__``."""
-    au = lax.bitcast_convert_type(jnp.atleast_1d(a), F)
-    bu = lax.bitcast_convert_type(jnp.atleast_1d(b), F)
-    return bool(jnp.array_equal(au, bu))
+    au = lax.bitcast_convert_type(fnp.atleast_1d(a), F)
+    bu = lax.bitcast_convert_type(fnp.atleast_1d(b), F)
+    return bool(fnp.array_equal(au, bu))
 
 
 def interp_linear_01(evals: Sequence[Array], x: Array) -> Array:
