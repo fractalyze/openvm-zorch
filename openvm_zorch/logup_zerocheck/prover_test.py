@@ -146,5 +146,51 @@ class ZerocheckByteMatchTest(absltest.TestCase):
         self.assertEqual(got, int(self.values[end]))
 
 
+class KernelCacheLifetimeTest(absltest.TestCase):
+    """The id(dag)-keyed kernel caches must release their entries — and never
+    pin a prove's trace arrays — once the AIR set is collected (#116 review)."""
+
+    def test_round0_cache_evicts_when_dag_collected(self) -> None:
+        import gc
+
+        from openvm_zorch.logup_zerocheck.prover import (
+            _ROUND0_FNS,
+            _round0_constraint_fns,
+        )
+
+        dag = ConstraintsDag(nodes=(), constraint_idx=(), interactions=())
+        before = len(_ROUND0_FNS)
+        _round0_constraint_fns(dag, False, (), 2, 2)
+        self.assertEqual(len(_ROUND0_FNS), before + 1)
+        key_id = id(dag)
+        del dag
+        gc.collect()
+        self.assertFalse(
+            any(k[0] == key_id for k in _ROUND0_FNS),
+            "round-0 cache entry survived its DAG's collection",
+        )
+
+    def test_mle_scan_cache_does_not_pin_trace(self) -> None:
+        import gc
+        import weakref
+
+        from openvm_zorch.logup_zerocheck.prover import AirData, _mle_scan_fn
+
+        dag = ConstraintsDag(nodes=(), constraint_idx=(), interactions=())
+        trace = jnp.zeros((2, 1), F)
+        trace_ref = weakref.ref(trace)
+        air = AirData(
+            trace=trace,
+            dag=dag,
+            public_values=(),
+            constraint_degree=2,
+            needs_next=False,
+        )
+        _mle_scan_fn([air], [1], 2, 1)
+        del air, trace, dag
+        gc.collect()
+        self.assertIsNone(trace_ref(), "MLE-scan cache pinned the trace array")
+
+
 if __name__ == "__main__":
     absltest.main()

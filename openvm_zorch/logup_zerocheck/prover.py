@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import time
+import weakref
 from dataclasses import dataclass
 
 import frx
@@ -211,11 +212,15 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
 # static input the kernels close over. `frx.jit` caches per wrapped callable,
 # so handing it a freshly-built closure on each prove defeats that cache: every
 # prove would re-trace and re-lower all 19 AIRs' node walks (~4.9k nodes), which
-# costs far more than the kernels themselves take to run. `ConstraintsDag`
-# holds `dict` nodes, so it is unhashable by value and cannot key a plain
-# `lru_cache`; the entry therefore keys on `id(dag)` and stores `dag` itself, so
-# the DAG stays alive and its address can never be recycled into a stale hit.
-_ROUND0_FNS: dict[tuple, tuple[ConstraintsDag, tuple]] = {}
+# costs far more than the kernels themselves take to run. `ConstraintsDag` holds
+# `dict` nodes, so it is unhashable by value and cannot key a plain `lru_cache`;
+# the entry keys on `id(dag)`. The kernels hold the DAG *weakly* (deref'd under
+# trace, always live then — the caller holds it to invoke them), and a
+# `weakref.finalize` drops the entry when the DAG is collected, so the cache
+# neither leaks the DAG's kernels for the process lifetime nor returns a stale
+# kernel for a recycled `id()`. Same pattern as the GKR input-layer cache
+# (`logup_gkr/input_layer.py` `_air_eval_cache`).
+_ROUND0_FNS: dict[tuple, tuple] = {}
 
 
 def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_degree):
@@ -248,9 +253,10 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     key = (id(dag), needs_next, public_values, l_skip, constraint_degree)
     cached = _ROUND0_FNS.get(key)
     if cached is not None:
-        return cached[1]
+        return cached
 
     num_cosets_zc = constraint_degree - 1
+    dag_ref = weakref.ref(dag)  # held weakly; deref'd under trace (always live then)
 
     if num_cosets_zc > 0:
         inv_zerofiers = jnp.stack(
@@ -266,13 +272,14 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
 
         @frx.jit
         def zc_eval(trace_sels, trace_mats, lambda_pows, eq_xi):
+            dag_ = dag_ref()
             sels_cells = prism.coset_evals(l_skip, trace_sels, num_cosets_zc)
             mat_cells = [
                 prism.coset_evals(l_skip, m, num_cosets_zc) for m in trace_mats
             ]
             parts = _dag_parts(mat_cells, needs_next)
-            node_vals = eval_nodes(dag, sels_cells, parts, public_values)
-            acc = acc_constraints(dag, node_vals, lambda_pows)
+            node_vals = eval_nodes(dag_, sels_cells, parts, public_values)
+            acc = acc_constraints(dag_, node_vals, lambda_pows)
             weighted = acc * eq_xi[None, None, :]
             return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
     else:
@@ -280,22 +287,24 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
 
     @frx.jit
     def lu_eval(trace_sels, trace_mats, beta_pows, eq_3bs_t, eq_xi):
+        dag_ = dag_ref()
         sels_cells = prism.coset_evals(l_skip, trace_sels, constraint_degree)
         mat_cells = [
             prism.coset_evals(l_skip, m, constraint_degree) for m in trace_mats
         ]
         parts = _dag_parts(mat_cells, needs_next)
-        node_vals = eval_nodes(dag, sels_cells, parts, public_values)
-        numer, denom = acc_interactions(dag, node_vals, beta_pows, eq_3bs_t)
+        node_vals = eval_nodes(dag_, sels_cells, parts, public_values)
+        numer, denom = acc_interactions(dag_, node_vals, beta_pows, eq_3bs_t)
         p = (numer * eq_xi[None, None, :]).sum(axis=2)
         q = (denom * eq_xi[None, None, :]).sum(axis=2)
         return p, q  # each (num_cosets, size)
 
-    _ROUND0_FNS[key] = (dag, (zc_eval, lu_eval))
+    _ROUND0_FNS[key] = (zc_eval, lu_eval)
+    weakref.finalize(dag, _ROUND0_FNS.pop, key, None)
     return zc_eval, lu_eval
 
 
-_MLE_SCAN_FNS: dict[tuple, tuple[tuple[ConstraintsDag, ...], object]] = {}
+_MLE_SCAN_FNS: dict[tuple, object] = {}
 
 
 def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
@@ -321,11 +330,11 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
     Reuse demands the body close over statics ONLY: the per-prove challenges
     (``lambda_pows``/``beta_pows``/``eq_3bs``/``mu_pows``) are arguments, not
     captures, or a cached body would replay the first prove's challenges and
-    silently break byte-match. What it does capture is `airs` — for `dag`,
-    `needs_next` and `public_values`, all keyed on below. It must not read
-    `air.trace`: traces arrive as the ``sels``/``mats`` arguments, and a capture
-    would pin the first prove's data. Same shape (and same `id`-keying rationale)
-    as ``_ROUND0_FNS``.
+    silently break byte-match. It captures ``air_statics`` — a per-AIR
+    ``(weakref(dag), needs_next, public_values)`` — NOT the ``AirData`` objects:
+    those hold the ``trace`` / ``cached_mains`` device arrays, which a
+    module-cached closure would pin for the process lifetime. Same weak-DAG
+    +`weakref.finalize` eviction and `id`-keying as ``_ROUND0_FNS``.
     """
     key = (
         tuple((id(a.dag), a.needs_next, a.public_values) for a in airs),
@@ -335,9 +344,13 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
     )
     cached = _MLE_SCAN_FNS.get(key)
     if cached is not None:
-        return cached[1]
+        return cached
 
     num_traces = len(airs)
+    # Capture only lightweight static per-AIR data (the DAG held weakly), never
+    # the `AirData` objects — those carry `trace` / `cached_mains` device arrays,
+    # which a module-cached closure would pin for the process lifetime.
+    air_statics = [(weakref.ref(a.dag), a.needs_next, a.public_values) for a in airs]
     zero = jnp.zeros((), EF)
     one_ef = f_to_ef(jnp.ones((), F))
     inv_vdm = _inv_vandermonde_rows(s_deg - 1)
@@ -387,7 +400,10 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
             new_tilde_p = list(tilde_p)
             new_tilde_q = list(tilde_q)
 
-            for t, (air, n_lift) in enumerate(zip(airs, n_lifts)):
+            for t, ((dag_ref, nxt, pubs), n_lift) in enumerate(
+                zip(air_statics, n_lifts)
+            ):
+                dag = dag_ref()
                 norm = norms[t]
                 mu_zc = mu_pows[2 * num_traces + t]
                 mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
@@ -404,17 +420,17 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                         round_dom.sample(m[0::2], m[1::2]) for m in bufs_mats[t]
                     ]
                     node_vals = eval_nodes(
-                        air.dag,
+                        dag,
                         sels_dom,
-                        _dag_parts(mats_dom, air.needs_next),
-                        air.public_values,
+                        _dag_parts(mats_dom, nxt),
+                        pubs,
                     )
-                    acc = acc_constraints(air.dag, node_vals, lambda_pows)
+                    acc = acc_constraints(dag, node_vals, lambda_pows)
                     zc = (acc * eq_xi[None, :]).sum(axis=1)
                     zc0 = eq_n * _row0(acc)
-                    if air.dag.interactions:
+                    if dag.interactions:
                         numer, denom = acc_interactions(
-                            air.dag, node_vals, beta_pows, eq_3bs[t]
+                            dag, node_vals, beta_pows, eq_3bs[t]
                         )
                         p = (numer * eq_xi[None, :]).sum(axis=1) * norm
                         q = (denom * eq_xi[None, :]).sum(axis=1)
@@ -435,15 +451,15 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                 else:
                     # Pure-tilde trace (height 1): eval over its single row.
                     node0 = eval_nodes(
-                        air.dag,
+                        dag,
                         bufs_sels[t][0],
-                        _dag_parts([m[0] for m in bufs_mats[t]], air.needs_next),
-                        air.public_values,
+                        _dag_parts([m[0] for m in bufs_mats[t]], nxt),
+                        pubs,
                     )
-                    zc0 = eq_n * acc_constraints(air.dag, node0, lambda_pows)
-                    if air.dag.interactions:
+                    zc0 = eq_n * acc_constraints(dag, node0, lambda_pows)
+                    if dag.interactions:
                         numer0, denom0 = acc_interactions(
-                            air.dag, node0, beta_pows, eq_3bs[t]
+                            dag, node0, beta_pows, eq_3bs[t]
                         )
                         p0t = eq_sharp_n * numer0 * norm
                         q0t = eq_sharp_n * denom0
@@ -555,7 +571,11 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
         )
         return final_carry[1], final_carry[8], round_polys, r_rounds
 
-    _MLE_SCAN_FNS[key] = (tuple(a.dag for a in airs), run)
+    _MLE_SCAN_FNS[key] = run
+    # The key embeds every AIR's id(dag); collecting any one invalidates it, so
+    # evict when the first is finalized (a later pop of the same key no-ops).
+    for a in airs:
+        weakref.finalize(a.dag, _MLE_SCAN_FNS.pop, key, None)
     return run
 
 
@@ -586,13 +606,12 @@ class _ZcProfiler:
     def mark(self, label: str, *outputs: object) -> None:
         if not _ZC_PROFILE:
             return
-        _disp = time.monotonic() - self._t
-        _b = time.monotonic()
+        dispatched = time.monotonic()  # host work done; device tail still pending
         frx.block_until_ready(outputs)
         now = time.monotonic()
+        host, device = dispatched - self._t, now - dispatched
         print(
-            f"  [zc {label}] {now - self._t:.3f}s "
-            f"(host={_disp:.3f} device={now - _b:.3f})",
+            f"  [zc {label}] {now - self._t:.3f}s (host={host:.3f} device={device:.3f})",
             flush=True,
         )
         self._t = now
