@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import time
+import weakref
 from dataclasses import dataclass
 
 import frx
@@ -207,6 +208,21 @@ def _inv_vandermonde_rows(degree: int) -> list[list[Array]]:
     return [[f_to_ef(m[i, j]) for j in range(degree + 1)] for i in range(degree + 1)]
 
 
+# Round-0 kernels, keyed by the identity of the AIR's DAG plus every other
+# static input the kernels close over. `frx.jit` caches per wrapped callable,
+# so handing it a freshly-built closure on each prove defeats that cache: every
+# prove would re-trace and re-lower all 19 AIRs' node walks (~4.9k nodes), which
+# costs far more than the kernels themselves take to run. `ConstraintsDag` holds
+# `dict` nodes, so it is unhashable by value and cannot key a plain `lru_cache`;
+# the entry keys on `id(dag)`. The kernels hold the DAG *weakly* (deref'd under
+# trace, always live then — the caller holds it to invoke them), and a
+# `weakref.finalize` drops the entry when the DAG is collected, so the cache
+# neither leaks the DAG's kernels for the process lifetime nor returns a stale
+# kernel for a recycled `id()`. Same pattern as the GKR input-layer cache
+# (`logup_gkr/input_layer.py` `_air_eval_cache`).
+_ROUND0_FNS: dict[tuple, tuple] = {}
+
+
 def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_degree):
     """jitted per-trace round-0 constraint evaluators (#45).
 
@@ -227,8 +243,20 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     ``lax.scan`` jits, pure EF arithmetic, contracted (row) axis kept LAST per
     docs/development.md ⇒ byte-exact. One compile per AIR (distinct DAGs); warm/GPU reaps
     the fusion.
+
+    Build the kernels once per AIR and reuse them across proves (see
+    ``_ROUND0_FNS``). Round 0's device work is small — the whole real block is
+    ~4M trace cells and its node values ~5GB, single-digit ms of GPU traffic —
+    so a per-prove rebuild is not a rounding error but the dominant cost:
+    caching cuts warm round 0 on the real block from ~16.7s to ~0.36s.
     """
+    key = (id(dag), needs_next, public_values, l_skip, constraint_degree)
+    cached = _ROUND0_FNS.get(key)
+    if cached is not None:
+        return cached
+
     num_cosets_zc = constraint_degree - 1
+    dag_ref = weakref.ref(dag)  # held weakly; deref'd under trace (always live then)
 
     if num_cosets_zc > 0:
         inv_zerofiers = jnp.stack(
@@ -244,13 +272,14 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
 
         @frx.jit
         def zc_eval(trace_sels, trace_mats, lambda_pows, eq_xi):
+            dag_ = dag_ref()
             sels_cells = prism.coset_evals(l_skip, trace_sels, num_cosets_zc)
             mat_cells = [
                 prism.coset_evals(l_skip, m, num_cosets_zc) for m in trace_mats
             ]
             parts = _dag_parts(mat_cells, needs_next)
-            node_vals = eval_nodes(dag, sels_cells, parts, public_values)
-            acc = acc_constraints(dag, node_vals, lambda_pows)
+            node_vals = eval_nodes(dag_, sels_cells, parts, public_values)
+            acc = acc_constraints(dag_, node_vals, lambda_pows)
             weighted = acc * eq_xi[None, None, :]
             return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
     else:
@@ -258,18 +287,296 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
 
     @frx.jit
     def lu_eval(trace_sels, trace_mats, beta_pows, eq_3bs_t, eq_xi):
+        dag_ = dag_ref()
         sels_cells = prism.coset_evals(l_skip, trace_sels, constraint_degree)
         mat_cells = [
             prism.coset_evals(l_skip, m, constraint_degree) for m in trace_mats
         ]
         parts = _dag_parts(mat_cells, needs_next)
-        node_vals = eval_nodes(dag, sels_cells, parts, public_values)
-        numer, denom = acc_interactions(dag, node_vals, beta_pows, eq_3bs_t)
+        node_vals = eval_nodes(dag_, sels_cells, parts, public_values)
+        numer, denom = acc_interactions(dag_, node_vals, beta_pows, eq_3bs_t)
         p = (numer * eq_xi[None, None, :]).sum(axis=2)
         q = (denom * eq_xi[None, None, :]).sum(axis=2)
         return p, q  # each (num_cosets, size)
 
+    _ROUND0_FNS[key] = (zc_eval, lu_eval)
+    weakref.finalize(dag, _ROUND0_FNS.pop, key, None)
     return zc_eval, lu_eval
+
+
+_MLE_SCAN_FNS: dict[tuple, object] = {}
+
+
+def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
+    """The MLE rounds 1..=n_max as one jitted ``lax.scan``, built once per AIR set.
+
+    Eager, the round loop folds the hypercube to half its size each round, so
+    every round is a fresh XLA shape → ~726 one-shot recompiles at 2^16 (#26).
+    Wrapping the unrolled loop in one jit instead *regressed* compile time (one
+    giant module; #33). The fix is a `lax.scan` whose body compiles once,
+    independent of n_max: each trace keeps a fixed-width buffer and stride-pair
+    folds in place, re-padding the dead tail with zeros — pairing LSB-stride as
+    the reference's MLE fold does, not high/low halves. Front-load exhaustion
+    (round > ñ_t, ñ_t static) becomes a per-trace `jnp.where` on the dynamic scan
+    index instead of a Python branch. The round math is unchanged from the eager
+    body — only the loop carrier moved into the scan carry.
+
+    The scan compiles once, but *tracing* it is not free: the body walks every
+    AIR's constraint DAG (~4.9k nodes on the real block), and an eagerly-invoked
+    `lax.scan` re-traces its body on every call. That cost dominated the stage —
+    warm `mle_scan` split as dispatch 1.537s vs block 0.043s, i.e. 97% host — so
+    the scan is built here, behind a cache, and reused across proves.
+
+    Reuse demands the body close over statics ONLY: the per-prove challenges
+    (``lambda_pows``/``beta_pows``/``eq_3bs``/``mu_pows``) are arguments, not
+    captures, or a cached body would replay the first prove's challenges and
+    silently break byte-match. It captures ``air_statics`` — a per-AIR
+    ``(weakref(dag), needs_next, public_values)`` — NOT the ``AirData`` objects:
+    those hold the ``trace`` / ``cached_mains`` device arrays, which a
+    module-cached closure would pin for the process lifetime. Same weak-DAG
+    +`weakref.finalize` eviction and `id`-keying as ``_ROUND0_FNS``.
+    """
+    key = (
+        tuple((id(a.dag), a.needs_next, a.public_values) for a in airs),
+        tuple(n_per_trace),
+        s_deg,
+        n_max,
+    )
+    cached = _MLE_SCAN_FNS.get(key)
+    if cached is not None:
+        return cached
+
+    num_traces = len(airs)
+    # Capture only lightweight static per-AIR data (the DAG held weakly), never
+    # the `AirData` objects — those carry `trace` / `cached_mains` device arrays,
+    # which a module-cached closure would pin for the process lifetime.
+    air_statics = [(weakref.ref(a.dag), a.needs_next, a.public_values) for a in airs]
+    zero = jnp.zeros((), EF)
+    one_ef = f_to_ef(jnp.ones((), F))
+    inv_vdm = _inv_vandermonde_rows(s_deg - 1)
+    domain_pts = jnp.stack(
+        [f_to_ef(f_const(i)) for i in range(1, s_deg + 1)]
+    )  # the {1..s_deg} round-poly sample points
+    round_dom = natural_domain(s_deg - 1, EF)  # {0..s_deg-1}, the lifted MLE evals
+    n_lifts = [max(n, 0) for n in n_per_trace]
+    norms = [f_to_ef(f_inv_const(1 << max(-n, 0))) for n in n_per_trace]
+
+    @frx.jit
+    def run(
+        sels,
+        mats,
+        eq_n_0,
+        eq_sharp_n_0,
+        r_0,
+        transcript,
+        prev_s_eval,
+        lambda_pows,
+        beta_pows,
+        eq_3bs,
+        mu_pows,
+        eq_xi_xs,
+        xi_cur_xs,
+    ):
+        def step(carry, xs):
+            (
+                bufs_sels,
+                bufs_mats,
+                tilde_zc,
+                tilde_p,
+                tilde_q,
+                eq_n,
+                eq_sharp_n,
+                r_prev,
+                transcript,
+                prev_s_eval,
+                round_idx,
+            ) = carry
+            eq_xi_row, xi_cur = xs
+
+            sp_head_zc = [zero] * (s_deg - 1)
+            sp_head_logup = [zero] * (s_deg - 1)
+            sp_tail = zero
+            new_tilde_zc = list(tilde_zc)
+            new_tilde_p = list(tilde_p)
+            new_tilde_q = list(tilde_q)
+
+            for t, ((dag_ref, nxt, pubs), n_lift) in enumerate(
+                zip(air_statics, n_lifts)
+            ):
+                dag = dag_ref()
+                norm = norms[t]
+                mu_zc = mu_pows[2 * num_traces + t]
+                mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
+                is_head = round_idx <= n_lift  # live this round ⇔ in the head
+
+                if n_lift >= 1:
+                    # Live evals on {1..s_deg-1}; the body runs every round but its
+                    # head contribution is gated to round ≤ ñ_t. The fully-folded
+                    # f̂(r⃗) lands at acc[0,0] once the buffer is frozen (below), so
+                    # the tilde base reuses it — no second eval_nodes.
+                    eq_xi = eq_xi_row[t]
+                    sels_dom = round_dom.sample(bufs_sels[t][0::2], bufs_sels[t][1::2])
+                    mats_dom = [
+                        round_dom.sample(m[0::2], m[1::2]) for m in bufs_mats[t]
+                    ]
+                    node_vals = eval_nodes(
+                        dag,
+                        sels_dom,
+                        _dag_parts(mats_dom, nxt),
+                        pubs,
+                    )
+                    acc = acc_constraints(dag, node_vals, lambda_pows)
+                    zc = (acc * eq_xi[None, :]).sum(axis=1)
+                    zc0 = eq_n * _row0(acc)
+                    if dag.interactions:
+                        numer, denom = acc_interactions(
+                            dag, node_vals, beta_pows, eq_3bs[t]
+                        )
+                        p = (numer * eq_xi[None, :]).sum(axis=1) * norm
+                        q = (denom * eq_xi[None, :]).sum(axis=1)
+                        p0t = eq_sharp_n * _row0(numer) * norm
+                        q0t = eq_sharp_n * _row0(denom)
+                    else:
+                        p = jnp.zeros((s_deg,), EF)
+                        q = jnp.zeros((s_deg,), EF)
+                        p0t = zero
+                        q0t = zero
+                    for i in range(s_deg - 1):
+                        sp_head_zc[i] = sp_head_zc[i] + jnp.where(
+                            is_head, mu_zc * zc[i + 1], zero
+                        )
+                        sp_head_logup[i] = sp_head_logup[i] + jnp.where(
+                            is_head, mu_p * p[i + 1] + mu_q * q[i + 1], zero
+                        )
+                else:
+                    # Pure-tilde trace (height 1): eval over its single row.
+                    node0 = eval_nodes(
+                        dag,
+                        bufs_sels[t][0],
+                        _dag_parts([m[0] for m in bufs_mats[t]], nxt),
+                        pubs,
+                    )
+                    zc0 = eq_n * acc_constraints(dag, node0, lambda_pows)
+                    if dag.interactions:
+                        numer0, denom0 = acc_interactions(
+                            dag, node0, beta_pows, eq_3bs[t]
+                        )
+                        p0t = eq_sharp_n * numer0 * norm
+                        q0t = eq_sharp_n * denom0
+                    else:
+                        p0t = zero
+                        q0t = zero
+
+                # tilde carry: init f̂-term at round ñ_t+1, then ×r each later round.
+                is_init = round_idx == n_lift + 1
+                is_accum = round_idx > n_lift + 1
+                new_tilde_zc[t] = jnp.where(
+                    is_init, zc0, jnp.where(is_accum, tilde_zc[t] * r_prev, tilde_zc[t])
+                )
+                new_tilde_p[t] = jnp.where(
+                    is_init, p0t, jnp.where(is_accum, tilde_p[t] * r_prev, tilde_p[t])
+                )
+                new_tilde_q[t] = jnp.where(
+                    is_init, q0t, jnp.where(is_accum, tilde_q[t] * r_prev, tilde_q[t])
+                )
+                tail_term = (
+                    mu_zc * new_tilde_zc[t]
+                    + mu_p * new_tilde_p[t]
+                    + mu_q * new_tilde_q[t]
+                )
+                sp_tail = sp_tail + jnp.where(is_head, zero, tail_term)
+
+            # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
+            sp_head_evals = [zero] * s_deg
+            for i in range(s_deg - 1):
+                sp_head_evals[i + 1] = (
+                    eq_n * sp_head_zc[i] + eq_sharp_n * sp_head_logup[i]
+                )
+            eq_xi_0 = one_ef - xi_cur
+            sp_head_evals[0] = (
+                prev_s_eval - xi_cur * sp_head_evals[1] - sp_tail
+            ) / eq_xi_0
+
+            sp_head = [
+                sum((row[j] * sp_head_evals[j] for j in range(s_deg)), start=zero)
+                for row in inv_vdm
+            ]
+            # batch_s = eq(ξ_cur, X)·s'_head(X) + s'_tail·X, in coefficient form.
+            coeffs = sp_head + [zero]
+            b = one_ef - xi_cur
+            a = xi_cur - b
+            for i in reversed(range(s_deg)):
+                coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1]
+            coeffs[0] = coeffs[0] * b
+            coeffs[1] = coeffs[1] + sp_tail
+
+            coeffs_arr = jnp.stack(coeffs)
+            batch_s_evals = eval_coeffs(coeffs_arr, domain_pts)
+            transcript = transcript.observe(batch_s_evals)
+            transcript, r_round = sample_ext(transcript)
+            new_prev_s_eval = eval_coeffs(coeffs_arr, r_round)
+
+            # Fold MLEs (LSB pairing, re-pad zeros), frozen once the trace exhausts
+            # so the fully-folded f̂(r⃗) at index 0 survives for the tilde reads and
+            # the column openings.
+            new_bufs_sels = []
+            new_bufs_mats = []
+            for t, n_lift in enumerate(n_lifts):
+                if n_lift >= 1:
+                    live = round_idx <= n_lift
+                    fs = _fold_pair(bufs_sels[t][0::2], bufs_sels[t][1::2], r_round)
+                    fs = jnp.concatenate([fs, jnp.zeros_like(fs)], axis=0)
+                    new_bufs_sels.append(jnp.where(live, fs, bufs_sels[t]))
+                    folded_m = []
+                    for m in bufs_mats[t]:
+                        fm = _fold_pair(m[0::2], m[1::2], r_round)
+                        fm = jnp.concatenate([fm, jnp.zeros_like(fm)], axis=0)
+                        folded_m.append(jnp.where(live, fm, m))
+                    new_bufs_mats.append(folded_m)
+                else:
+                    new_bufs_sels.append(bufs_sels[t])
+                    new_bufs_mats.append(list(bufs_mats[t]))
+
+            eq_r = xi_cur * r_round + (one_ef - xi_cur) * (one_ef - r_round)
+            new_carry = (
+                new_bufs_sels,
+                new_bufs_mats,
+                new_tilde_zc,
+                new_tilde_p,
+                new_tilde_q,
+                eq_n * eq_r,
+                eq_sharp_n * eq_r,
+                r_round,
+                transcript,
+                new_prev_s_eval,
+                round_idx + 1,
+            )
+            return new_carry, (batch_s_evals, r_round)
+
+        init_carry = (
+            sels,
+            mats,
+            [zero] * num_traces,
+            [zero] * num_traces,
+            [zero] * num_traces,
+            eq_n_0,
+            eq_sharp_n_0,
+            r_0,
+            transcript,
+            prev_s_eval,
+            jnp.int32(1),
+        )
+        final_carry, (round_polys, r_rounds) = lax.scan(
+            step, init_carry, (eq_xi_xs, xi_cur_xs), length=n_max
+        )
+        return final_carry[1], final_carry[8], round_polys, r_rounds
+
+    _MLE_SCAN_FNS[key] = run
+    # The key embeds every AIR's id(dag); collecting any one invalidates it, so
+    # evict when the first is finalized (a later pop of the same key no-ops).
+    for a in airs:
+        weakref.finalize(a.dag, _MLE_SCAN_FNS.pop, key, None)
+    return run
 
 
 _ZC_PROFILE = os.environ.get("OPENVM_ZC_PROFILE") == "1"
@@ -283,7 +590,15 @@ class _ZcProfiler:
     pass shows compile+run and a warm pass run-only, per region. Off by default
     so ``verify_prove``'s whole-stage ``_TimedRound`` number stays
     block-distortion-free: coarse region blocks sum coherently, but per-element
-    blocks inflate badly (the #3 41.1s artifact)."""
+    blocks inflate badly (the #3 41.1s artifact).
+
+    The total is split into ``host`` (elapsed before the block — tracing,
+    lowering and dispatch) and ``device`` (the block itself — work that was still
+    pending). Read the split before optimizing a region: ``device≈0`` means the
+    GPU is not the problem and a faster kernel buys nothing. Every region here
+    except ``mle_scan`` is currently ~99% host, and the stage's whole device cost
+    is ~55ms — so the remaining lever is eliminating per-prove tracing and
+    per-scalar dispatch, not arithmetic."""
 
     def __init__(self) -> None:
         self._t = time.monotonic()
@@ -291,9 +606,14 @@ class _ZcProfiler:
     def mark(self, label: str, *outputs: object) -> None:
         if not _ZC_PROFILE:
             return
+        dispatched = time.monotonic()  # host work done; device tail still pending
         frx.block_until_ready(outputs)
         now = time.monotonic()
-        print(f"  [zc {label}] {now - self._t:.3f}s", flush=True)
+        host, device = dispatched - self._t, now - dispatched
+        print(
+            f"  [zc {label}] {now - self._t:.3f}s (host={host:.3f} device={device:.3f})",
+            flush=True,
+        )
         self._t = now
 
 
@@ -468,24 +788,8 @@ def prove_batch_constraints(
     eq_sharp_ns = [prism.eval_eq_sharp_uni(l_skip, xi[:l_skip], r_0)]
     _zc.mark("r0_fold", mats, sels, eq_ns, eq_sharp_ns, prev_s_eval)
 
-    # --- MLE rounds 1..=n_max, as one lax.scan (issue #33) -------------------
-    # Eager, the round loop folds the hypercube to half its size each round, so
-    # every round is a fresh XLA shape → ~726 one-shot recompiles at 2^16 (#26).
-    # Wrapping the unrolled loop in one jit instead *regressed* compile time (one
-    # giant module; #33). The fix is a `lax.scan` whose body compiles once,
-    # independent of n_max: each trace keeps a fixed-width buffer and stride-pair
-    # folds in place, re-padding the dead tail with zeros — pairing LSB-stride as
-    # the reference's MLE fold does, not high/low halves. Front-load
-    # exhaustion (round > ñ_t, ñ_t static) becomes a per-trace `jnp.where` on the
-    # dynamic scan index instead of a Python branch. The round math is unchanged
-    # from the eager body — only the loop carrier moved into the scan carry.
-    inv_vdm = _inv_vandermonde_rows(s_deg - 1)
-    domain_pts = jnp.stack(
-        [f_to_ef(f_const(i)) for i in range(1, s_deg + 1)]
-    )  # the {1..s_deg} round-poly sample points
-    round_dom = natural_domain(s_deg - 1, EF)  # {0..s_deg-1}, the lifted MLE evals
+    # --- MLE rounds 1..=n_max, built once per AIR set (see `_mle_scan_fn`) ----
     n_lifts = [max(n, 0) for n in n_per_trace]
-    norms = [f_to_ef(f_inv_const(1 << max(-n, 0))) for n in n_per_trace]
 
     # Per-round, per-trace eq(ξ, ·) weight tables, padded to H_t/2 = 2^(ñ_t-1)
     # and stacked over the n_max scan steps; the live sum `(acc·eq_xi).sum` reads
@@ -512,191 +816,25 @@ def prove_batch_constraints(
         if n_max >= 1
         else jnp.zeros((0,), EF)
     )
-    _zc.mark("scan_setup", eq_xi_xs, xi_cur_xs, domain_pts)
+    _zc.mark("scan_setup", eq_xi_xs, xi_cur_xs)
 
-    def step(carry, xs):
-        (
-            bufs_sels,
-            bufs_mats,
-            tilde_zc,
-            tilde_p,
-            tilde_q,
-            eq_n,
-            eq_sharp_n,
-            r_prev,
-            transcript,
-            prev_s_eval,
-            round_idx,
-        ) = carry
-        eq_xi_row, xi_cur = xs
-
-        sp_head_zc = [zero] * (s_deg - 1)
-        sp_head_logup = [zero] * (s_deg - 1)
-        sp_tail = zero
-        new_tilde_zc = list(tilde_zc)
-        new_tilde_p = list(tilde_p)
-        new_tilde_q = list(tilde_q)
-
-        for t, (air, n_lift) in enumerate(zip(airs, n_lifts)):
-            norm = norms[t]
-            mu_zc = mu_pows[2 * num_traces + t]
-            mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
-            is_head = round_idx <= n_lift  # live this round ⇔ in the head
-
-            if n_lift >= 1:
-                # Live evals on {1..s_deg-1}; the body runs every round but its
-                # head contribution is gated to round ≤ ñ_t. The fully-folded
-                # f̂(r⃗) lands at acc[0,0] once the buffer is frozen (below), so
-                # the tilde base reuses it — no second eval_nodes.
-                eq_xi = eq_xi_row[t]
-                sels_dom = round_dom.sample(bufs_sels[t][0::2], bufs_sels[t][1::2])
-                mats_dom = [round_dom.sample(m[0::2], m[1::2]) for m in bufs_mats[t]]
-                node_vals = eval_nodes(
-                    air.dag,
-                    sels_dom,
-                    _dag_parts(mats_dom, air.needs_next),
-                    air.public_values,
-                )
-                acc = acc_constraints(air.dag, node_vals, lambda_pows)
-                zc = (acc * eq_xi[None, :]).sum(axis=1)
-                zc0 = eq_n * _row0(acc)
-                if air.dag.interactions:
-                    numer, denom = acc_interactions(
-                        air.dag, node_vals, beta_pows, eq_3bs[t]
-                    )
-                    p = (numer * eq_xi[None, :]).sum(axis=1) * norm
-                    q = (denom * eq_xi[None, :]).sum(axis=1)
-                    p0t = eq_sharp_n * _row0(numer) * norm
-                    q0t = eq_sharp_n * _row0(denom)
-                else:
-                    p = jnp.zeros((s_deg,), EF)
-                    q = jnp.zeros((s_deg,), EF)
-                    p0t = zero
-                    q0t = zero
-                for i in range(s_deg - 1):
-                    sp_head_zc[i] = sp_head_zc[i] + jnp.where(
-                        is_head, mu_zc * zc[i + 1], zero
-                    )
-                    sp_head_logup[i] = sp_head_logup[i] + jnp.where(
-                        is_head, mu_p * p[i + 1] + mu_q * q[i + 1], zero
-                    )
-            else:
-                # Pure-tilde trace (height 1): eval over its single row.
-                node0 = eval_nodes(
-                    air.dag,
-                    bufs_sels[t][0],
-                    _dag_parts([m[0] for m in bufs_mats[t]], air.needs_next),
-                    air.public_values,
-                )
-                zc0 = eq_n * acc_constraints(air.dag, node0, lambda_pows)
-                if air.dag.interactions:
-                    numer0, denom0 = acc_interactions(
-                        air.dag, node0, beta_pows, eq_3bs[t]
-                    )
-                    p0t = eq_sharp_n * numer0 * norm
-                    q0t = eq_sharp_n * denom0
-                else:
-                    p0t = zero
-                    q0t = zero
-
-            # tilde carry: init f̂-term at round ñ_t+1, then ×r each later round.
-            is_init = round_idx == n_lift + 1
-            is_accum = round_idx > n_lift + 1
-            new_tilde_zc[t] = jnp.where(
-                is_init, zc0, jnp.where(is_accum, tilde_zc[t] * r_prev, tilde_zc[t])
-            )
-            new_tilde_p[t] = jnp.where(
-                is_init, p0t, jnp.where(is_accum, tilde_p[t] * r_prev, tilde_p[t])
-            )
-            new_tilde_q[t] = jnp.where(
-                is_init, q0t, jnp.where(is_accum, tilde_q[t] * r_prev, tilde_q[t])
-            )
-            tail_term = (
-                mu_zc * new_tilde_zc[t] + mu_p * new_tilde_p[t] + mu_q * new_tilde_q[t]
-            )
-            sp_tail = sp_tail + jnp.where(is_head, zero, tail_term)
-
-        # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
-        sp_head_evals = [zero] * s_deg
-        for i in range(s_deg - 1):
-            sp_head_evals[i + 1] = eq_n * sp_head_zc[i] + eq_sharp_n * sp_head_logup[i]
-        eq_xi_0 = one_ef - xi_cur
-        sp_head_evals[0] = (prev_s_eval - xi_cur * sp_head_evals[1] - sp_tail) / eq_xi_0
-
-        sp_head = [
-            sum((row[j] * sp_head_evals[j] for j in range(s_deg)), start=zero)
-            for row in inv_vdm
-        ]
-        # batch_s = eq(ξ_cur, X)·s'_head(X) + s'_tail·X, in coefficient form.
-        coeffs = sp_head + [zero]
-        b = one_ef - xi_cur
-        a = xi_cur - b
-        for i in reversed(range(s_deg)):
-            coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1]
-        coeffs[0] = coeffs[0] * b
-        coeffs[1] = coeffs[1] + sp_tail
-
-        coeffs_arr = jnp.stack(coeffs)
-        batch_s_evals = eval_coeffs(coeffs_arr, domain_pts)
-        transcript = transcript.observe(batch_s_evals)
-        transcript, r_round = sample_ext(transcript)
-        new_prev_s_eval = eval_coeffs(coeffs_arr, r_round)
-
-        # Fold MLEs (LSB pairing, re-pad zeros), frozen once the trace exhausts
-        # so the fully-folded f̂(r⃗) at index 0 survives for the tilde reads and
-        # the column openings.
-        new_bufs_sels = []
-        new_bufs_mats = []
-        for t, n_lift in enumerate(n_lifts):
-            if n_lift >= 1:
-                live = round_idx <= n_lift
-                fs = _fold_pair(bufs_sels[t][0::2], bufs_sels[t][1::2], r_round)
-                fs = jnp.concatenate([fs, jnp.zeros_like(fs)], axis=0)
-                new_bufs_sels.append(jnp.where(live, fs, bufs_sels[t]))
-                folded_m = []
-                for m in bufs_mats[t]:
-                    fm = _fold_pair(m[0::2], m[1::2], r_round)
-                    fm = jnp.concatenate([fm, jnp.zeros_like(fm)], axis=0)
-                    folded_m.append(jnp.where(live, fm, m))
-                new_bufs_mats.append(folded_m)
-            else:
-                new_bufs_sels.append(bufs_sels[t])
-                new_bufs_mats.append(list(bufs_mats[t]))
-
-        eq_r = xi_cur * r_round + (one_ef - xi_cur) * (one_ef - r_round)
-        new_carry = (
-            new_bufs_sels,
-            new_bufs_mats,
-            new_tilde_zc,
-            new_tilde_p,
-            new_tilde_q,
-            eq_n * eq_r,
-            eq_sharp_n * eq_r,
-            r_round,
-            transcript,
-            new_prev_s_eval,
-            round_idx + 1,
-        )
-        return new_carry, (batch_s_evals, r_round)
-
-    init_carry = (
+    mats, transcript, round_polys, r_rounds = _mle_scan_fn(
+        airs, tuple(n_per_trace), s_deg, n_max
+    )(
         sels,
         mats,
-        [zero] * num_traces,
-        [zero] * num_traces,
-        [zero] * num_traces,
         eq_ns[0],
         eq_sharp_ns[0],
         r_0,
         transcript,
         prev_s_eval,
-        jnp.int32(1),
+        lambda_pows,
+        beta_pows,
+        eq_3bs,
+        mu_pows,
+        eq_xi_xs,
+        xi_cur_xs,
     )
-    final_carry, (round_polys, r_rounds) = lax.scan(
-        step, init_carry, (eq_xi_xs, xi_cur_xs), length=n_max
-    )
-    mats = final_carry[1]
-    transcript = final_carry[8]
     sumcheck_round_polys = list(round_polys)
     r = [r_0] + list(r_rounds)
     _zc.mark("mle_scan", round_polys, mats, sumcheck_round_polys)
