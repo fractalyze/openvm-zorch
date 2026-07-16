@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array, lax
 
 from openvm_zorch.fields import F
@@ -35,15 +35,15 @@ def _stack_paths(paths: Sequence[Array]) -> list[Array]:
     """Per-query reference Merkle paths (``Q`` × ``(depth, digest_elems)``) → the
     generic ``Opening.path``: a list over levels, each ``(Q, digest_elems)``. The
     inverse of the prover adapter's ``_per_query_paths``."""
-    stacked = jnp.stack(list(paths))  # (Q, depth, digest_elems)
-    return list(jnp.moveaxis(stacked, 1, 0))  # depth × (Q, digest_elems)
+    stacked = fnp.stack(list(paths))  # (Q, depth, digest_elems)
+    return list(fnp.moveaxis(stacked, 1, 0))  # depth × (Q, digest_elems)
 
 
 def _opening_from_rows(rows: Sequence[Array], paths: Sequence[Array]) -> Opening:
     """Round-0 strided opening from per-query base-field rows (``Q`` × ``(2^k, W)``)
     and Merkle paths — the inverse of the prover's ``_per_query_rows`` /
     ``_per_query_paths``."""
-    return Opening(row=jnp.stack(list(rows)), path=_stack_paths(paths))
+    return Opening(row=fnp.stack(list(rows)), path=_stack_paths(paths))
 
 
 def _opening_from_ef_values(values: Sequence[Array], paths: Sequence[Array]) -> Opening:
@@ -51,7 +51,7 @@ def _opening_from_ef_values(values: Sequence[Array], paths: Sequence[Array]) -> 
     EF values (``(2^k,)`` each); the generic ``Opening.row`` is their base-field
     limbs (``(Q, 2^k, limbs)``), so bitcast back — the inverse of the prover's
     ``ef_from_limbs``."""
-    row = lax.bitcast_convert_type(jnp.stack(list(values)), F)  # (Q, 2^k, limbs)
+    row = lax.bitcast_convert_type(fnp.stack(list(values)), F)  # (Q, 2^k, limbs)
     return Opening(row=row, path=_stack_paths(paths))
 
 
@@ -99,10 +99,10 @@ def verify_whir(
     )
     verifier = WhirVerifier(code, strided, wparams, SwirlWhirScheme(l_skip))
 
-    z = jnp.stack(list(u))  # the opening point (m,) — == u_cube on the cube
+    z = fnp.stack(list(u))  # the opening point (m,) — == u_cube on the cube
     # The running claim is the μ-power combine of the per-column opening claims
     # (the generic verifier's ``eval_coeffs(values, μ)``); pass them as that vector.
-    values = jnp.stack(list(stacking_openings[0]))  # (W,) EF
+    values = fnp.stack(list(stacking_openings[0]))  # (W,) EF
 
     gproof = GenericWhirProof(
         mu_pow_witness=proof.mu_pow_witness,

@@ -221,7 +221,7 @@ py_test(
 # so it requires libcuda; it is NOT a CI test) — the way to gate GPU
 # byte-match at scale, where the backend-agnostic prove_test cannot run. Run:
 #   CPU: bazel run //openvm_zorch:verify_prove
-#   GPU: JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+#   GPU: FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 #        bazel run //openvm_zorch:verify_prove -- --fixture_dir /path/to/fixture
 py_binary(
     name = "verify_prove",

@@ -89,7 +89,7 @@ py_test(
 # so the per-phase split can be measured on the GPU bar, not just CPU. Run:
 #   CPU: bazel run //openvm_zorch/logup_gkr:bench_logup_gkr_phases \
 #          -- --fixture_dir /path/to/fixture
-#   GPU: JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+#   GPU: FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 #        bazel run //openvm_zorch/logup_gkr:bench_logup_gkr_phases \
 #          -- --fixture_dir /path/to/fixture
 py_binary(

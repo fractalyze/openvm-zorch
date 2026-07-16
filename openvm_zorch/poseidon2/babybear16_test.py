@@ -9,7 +9,7 @@ a tree-structure mistake before any commit test runs.
 
 from pathlib import Path
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 from zk_dtypes import babybear_mont as F
@@ -24,29 +24,29 @@ _FIXTURE = (
 )
 
 
-def _golden(name: str) -> jnp.ndarray:
-    return jnp.array(np.load(_FIXTURE / name), dtype=F)
+def _golden(name: str) -> fnp.ndarray:
+    return fnp.array(np.load(_FIXTURE / name), dtype=F)
 
 
 class BabyBear16Test(absltest.TestCase):
     def test_permutation_matches_reference(self) -> None:
         perm = Poseidon2(babybear16_params())
-        out = perm.permute(jnp.arange(16, dtype=F))
-        self.assertTrue(bool(jnp.array_equal(out, _golden("perm_0_15.npy"))))
+        out = perm.permute(fnp.arange(16, dtype=F))
+        self.assertTrue(bool(fnp.array_equal(out, _golden("perm_0_15.npy"))))
 
     def test_sponge_matches_reference(self) -> None:
         sponge = Sponge(Poseidon2(babybear16_params()), SpongeParams(rate=8, out=8))
-        out = sponge.hash(jnp.arange(32, dtype=F))
-        self.assertTrue(bool(jnp.array_equal(out, _golden("sponge_0_31.npy"))))
+        out = sponge.hash(fnp.arange(32, dtype=F))
+        self.assertTrue(bool(fnp.array_equal(out, _golden("sponge_0_31.npy"))))
 
     def test_compress_matches_reference(self) -> None:
         comp = Compression(
             Poseidon2(babybear16_params()), CompressionParams(arity=2, chunk=8)
         )
-        left = jnp.arange(8, dtype=F)
-        right = jnp.arange(100, 108, dtype=F)
-        out = comp.compress(jnp.stack([left, right]))
-        self.assertTrue(bool(jnp.array_equal(out, _golden("compress_pair.npy"))))
+        left = fnp.arange(8, dtype=F)
+        right = fnp.arange(100, 108, dtype=F)
+        out = comp.compress(fnp.stack([left, right]))
+        self.assertTrue(bool(fnp.array_equal(out, _golden("compress_pair.npy"))))
 
 
 if __name__ == "__main__":

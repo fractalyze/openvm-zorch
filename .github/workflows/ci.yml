@@ -26,8 +26,8 @@ jobs:
         # Strict `cuda` (no CPU fallback) on the GPU leg so a green run means
         # it really ran on GPU.
         run: |
-          cpu='{"backend":"cpu","runs_on":["self-hosted","cpu"],"jax_platforms":"cpu"}'
-          gpu='{"backend":"gpu","runs_on":["self-hosted","gpu"],"jax_platforms":"cuda"}'
+          cpu='{"backend":"cpu","runs_on":["self-hosted","cpu"],"frx_platforms":"cpu"}'
+          gpu='{"backend":"gpu","runs_on":["self-hosted","gpu"],"frx_platforms":"cuda"}'
           include="${cpu}"
           if [ "${{ vars.HAS_GPU_RUNNER }}" = "true" ]; then
             include="${cpu},${gpu}"
@@ -43,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run bazel test
-        run: bazel test --test_env=JAX_PLATFORMS=${{ matrix.jax_platforms }} -- //...
+        run: bazel test --test_env=FRX_PLATFORMS=${{ matrix.frx_platforms }} -- //...
 
       - name: Upload bazel test logs
         if: ${{ failure() }}

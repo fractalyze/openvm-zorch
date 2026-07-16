@@ -21,13 +21,13 @@ from the fixture's ``outputs/q0_claim.npy``, so the phases cannot silently
 diverge from what the real prove sees.
 
     # warm runtime (the standard report):
-    JAX_PLATFORMS=cpu bazel run //openvm_zorch/logup_gkr:bench_logup_gkr_phases \
+    FRX_PLATFORMS=cpu bazel run //openvm_zorch/logup_gkr:bench_logup_gkr_phases \
         -- --fixture_dir /tmp/real_fib
 
     # compile (out of band): zkbench discards warmup, so run a COLD-cache
     # process at --warmup 0 --iterations 1 (each op's one timed call then
     # includes its compile), and subtract the warm latency above. Keep
-    # JAX_COMPILATION_CACHE_DIR unset for the cold run.
+    # FRX_COMPILATION_CACHE_DIR unset for the cold run.
 """
 
 import argparse
@@ -37,7 +37,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import frx
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from frx import lax
 from zk_dtypes import babybear_mont as F
@@ -73,7 +73,7 @@ def _load_instance(prove_dir):
     airs = []
     for air in meta["airs"]:
         air_idx = air["air_idx"]
-        trace = jnp.array(
+        trace = fnp.array(
             np.load(prove_dir / "inputs" / f"trace_{air_idx}.npy"), dtype=F
         )
         dag = ConstraintsDag.from_json(
@@ -82,7 +82,7 @@ def _load_instance(prove_dir):
             )
         )
         cached_mains = tuple(
-            jnp.array(
+            fnp.array(
                 np.load(prove_dir / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F
             )
             for k in range(air.get("num_cached_mains", 0))
@@ -117,7 +117,7 @@ def _load_instance(prove_dir):
 
 
 def _ef_limbs(x) -> np.ndarray:
-    return np.asarray(lax.bitcast_convert_type(jnp.atleast_1d(x), F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(fnp.atleast_1d(x), F).astype(fnp.uint32))
 
 
 class LogupGkrPhasesBenchmark(FrxBenchmark):

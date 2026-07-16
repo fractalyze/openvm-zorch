@@ -10,7 +10,7 @@ Canonical-u32 equality, no tolerances.
 import json
 from pathlib import Path
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 from zk_dtypes import babybear_mont as F
@@ -26,8 +26,8 @@ from zorch.hash.sponge import Sponge, SpongeParams
 _FIXTURE = Path(__file__).parent / "testdata" / "stacked_commit"
 
 
-def _load(rel: str) -> jnp.ndarray:
-    return jnp.array(np.load(_FIXTURE / rel), dtype=F)
+def _load(rel: str) -> fnp.ndarray:
+    return fnp.array(np.load(_FIXTURE / rel), dtype=F)
 
 
 class TraceCommitByteMatchTest(absltest.TestCase):
@@ -43,14 +43,14 @@ class TraceCommitByteMatchTest(absltest.TestCase):
     def test_stacked_matrix_matches(self) -> None:
         mat, _ = stacked_matrix(self.meta["l_skip"], self.meta["n_stack"], self.traces)
         self.assertTrue(
-            bool(jnp.array_equal(mat, _load("outputs/stacked_matrix.npy")))
+            bool(fnp.array_equal(mat, _load("outputs/stacked_matrix.npy")))
         )
 
     def test_codeword_matches(self) -> None:
         mat = _load("outputs/stacked_matrix.npy")
         codeword = rs_code_matrix(self.meta["l_skip"], self.meta["log_blowup"], mat)
         self.assertTrue(
-            bool(jnp.array_equal(codeword, _load("outputs/codeword.npy")))
+            bool(fnp.array_equal(codeword, _load("outputs/codeword.npy")))
         )
 
     def test_commit_matches(self) -> None:
@@ -69,13 +69,13 @@ class TraceCommitByteMatchTest(absltest.TestCase):
         for level, layer in enumerate(data.tree.digest_layers):
             self.assertTrue(
                 bool(
-                    jnp.array_equal(
+                    fnp.array_equal(
                         layer, _load(f"outputs/digest_layer_{level}.npy")
                     )
                 ),
                 msg=f"digest layer {level} diverges",
             )
-        self.assertTrue(bool(jnp.array_equal(root, _load("outputs/root.npy"))))
+        self.assertTrue(bool(fnp.array_equal(root, _load("outputs/root.npy"))))
 
 
 if __name__ == "__main__":

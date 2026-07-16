@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import frx
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 
 from openvm_zorch.transcript import sample_ext
@@ -60,9 +60,9 @@ def _lift_sent(lo: Array, hi: Array) -> Array:
     """Lift a split pair to the SENT eval domain ``{1,2,3}`` (skips u=0).
 
     ``f[u] = lo + u*(hi - lo)``, shape ``(3, *lo.shape)``. ``us`` uses
-    ``jnp.stack`` (not ``jnp.arange``, whose iota is unsupported for extension
+    ``fnp.stack`` (not ``fnp.arange``, whose iota is unsupported for extension
     dtypes)."""
-    us = jnp.stack([jnp.array(u, dtype=lo.dtype) for u in _SENT_US])
+    us = fnp.stack([fnp.array(u, dtype=lo.dtype) for u in _SENT_US])
     return lo + us.reshape((-1,) + (1,) * lo.ndim) * (hi - lo)
 
 
@@ -113,7 +113,7 @@ def _round_poly(state: list[Array], lam: Array) -> Array:
     logup_combine. Binds the LSB: pairs adjacent entries (the reference's MLE
     fold). No transcript: only this cheap arithmetic re-lowers per layer width."""
     eq, p0, q0, p1, q1 = (_lift_sent(a[0::2], a[1::2]) for a in state)
-    return jnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
+    return fnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
 
 
 @frx.jit
@@ -139,8 +139,8 @@ class FracSumcheckProof:
 @frx.jit
 def _eq_table(xi: list[Array]) -> Array:
     """eq(ξ, y) for y on the hypercube, little-endian in ξ (ξ[0] ↔ bit 0)."""
-    point = jnp.stack(xi[::-1])
-    return expand_eq_to_hypercube(point, jnp.ones((), point.dtype))
+    point = fnp.stack(xi[::-1])
+    return expand_eq_to_hypercube(point, fnp.ones((), point.dtype))
 
 
 def fractional_sumcheck(
@@ -173,13 +173,13 @@ def fractional_sumcheck(
     floor = layers[-1]
     p_root = floor.numerator_0 * floor.denominator_1 + floor.numerator_1 * floor.denominator_0
     q_root = floor.denominator_0 * floor.denominator_1
-    if int(jnp.sum(p_root != 0)) != 0:
+    if int(fnp.sum(p_root != 0)) != 0:
         raise ValueError("non-zero root sum: interactions do not balance")
     transcript = _observe(transcript, q_root)
 
     def layer_claims(layer: GkrLayer) -> Array:
         # Wire order (p_xi_0, q_xi_0, p_xi_1, q_xi_1); each MLE is length 1.
-        return jnp.stack(
+        return fnp.stack(
             [
                 layer.numerator_0[0],
                 layer.denominator_0[0],
@@ -232,7 +232,7 @@ def fractional_sumcheck(
         xi = [mu] + rho
 
         claims_per_layer.append(claims)
-        sumcheck_polys.append(jnp.stack(round_polys))
+        sumcheck_polys.append(fnp.stack(round_polys))
         mus.append(mu)
         rhos.append(rho)
 

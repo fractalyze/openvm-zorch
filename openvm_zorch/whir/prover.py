@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 from zorch.coding.reed_solomon import ReedSolomon
 from zorch.commit.merkle import Opening
@@ -94,7 +94,7 @@ def _per_query_paths(opening: Opening) -> list[Array]:
     stores ``(depth, digest_elems)`` per query, so stack the levels into a
     ``(Q, depth, digest_elems)`` array once and unstack the leading query axis
     (one batched ``stack`` rather than one per query)."""
-    return list(jnp.stack(opening.path, axis=1))
+    return list(fnp.stack(opening.path, axis=1))
 
 
 def prove_whir_opening(
@@ -156,7 +156,7 @@ def prove_whir_opening(
         for matrix, tree in committed
     ]
 
-    z = jnp.stack(list(u_cube))  # the opening point (m,) — == u_cube on the cube
+    z = fnp.stack(list(u_cube))  # the opening point (m,) — == u_cube on the cube
     # The reference proof also carries μ (its verifier re-derives it). The scheme
     # binds nothing at WHIR entry, so μ depends only on the entry transcript and
     # the grind — replay grind(mu_pow_bits) → sample on a copy of the transcript

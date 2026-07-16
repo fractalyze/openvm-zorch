@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import frx
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array, lax
 
 from openvm_zorch.fields import EF, F, f_const, f_inv_const, f_to_ef
@@ -110,7 +110,7 @@ class BatchConstraintProof:
 
 
 def _powers(x: Array, n: int) -> list[Array]:
-    out = [f_to_ef(jnp.ones((), F))]
+    out = [f_to_ef(fnp.ones((), F))]
     for _ in range(n - 1):
         out.append(out[-1] * x)
     return out
@@ -132,7 +132,7 @@ def _batched_conv(coeffs: Array, kernel: Array) -> Array:
     short kernel: shift the rows by each kernel tap (static loop over ``Lb``),
     stack the shifts on a trailing axis, broadcast-multiply by ``kernel`` and
     reduce that last axis. Keeping the contracted axis last avoids the mid-axis
-    EF reduce fault, and the shift-and-add avoids ``jnp.dot``/``@`` (both
+    EF reduce fault, and the shift-and-add avoids ``fnp.dot``/``@`` (both
     mis-lower on XLA — see docs/development.md). Dispatch-free and jit-fusable,
     unlike a per-scalar coefficient loop. (``conv_test`` pins it against the
     reference scalar convolution.)"""
@@ -141,9 +141,9 @@ def _batched_conv(coeffs: Array, kernel: Array) -> Array:
     lo = la + lb - 1
     lead = coeffs.shape[:-1]
     shifts = [
-        jnp.pad(coeffs, ((0, 0),) * len(lead) + ((j, lo - la - j),)) for j in range(lb)
+        fnp.pad(coeffs, ((0, 0),) * len(lead) + ((j, lo - la - j),)) for j in range(lb)
     ]
-    stacked = jnp.stack(shifts, axis=-1)  # (..., lo, lb)
+    stacked = fnp.stack(shifts, axis=-1)  # (..., lo, lb)
     return (stacked * kernel).sum(axis=-1)
 
 
@@ -152,7 +152,7 @@ def _pad(coeffs: list[Array], n: int) -> list[Array]:
     `unwrap_or(ZERO)` reads; trailing real coefficients past n are zero)."""
     out = list(coeffs[:n])
     while len(out) < n:
-        out.append(jnp.zeros((), EF))
+        out.append(fnp.zeros((), EF))
     return out
 
 
@@ -160,8 +160,8 @@ def _eq_table(xi: list[Array]) -> Array:
     """eq(ξ, y) on the hypercube, LSB-first in ξ (Stage-2 convention: the
     MSB-first expand gets the slice reversed)."""
     if not xi:
-        return jnp.ones((1,), EF)
-    return expand_eq_to_hypercube(jnp.stack(xi[::-1]), jnp.ones((), EF))
+        return fnp.ones((1,), EF)
+    return expand_eq_to_hypercube(fnp.stack(xi[::-1]), fnp.ones((), EF))
 
 
 def _lift(mat: Array, l_skip: int) -> Array:
@@ -170,16 +170,16 @@ def _lift(mat: Array, l_skip: int) -> Array:
     height = mat.shape[0]
     if height >= 1 << l_skip:
         return mat
-    return jnp.tile(mat, ((1 << l_skip) // height, 1))
+    return fnp.tile(mat, ((1 << l_skip) // height, 1))
 
 
 def _sels(height: int, l_skip: int) -> Array:
     """The lift of [is_first_row, is_transition, is_last_row] (cpu.rs
     ``sels_per_trace_base``)."""
     lifted = max(height, 1 << l_skip)
-    rows = jnp.arange(lifted) % height
-    table = jnp.stack([rows == 0, rows != height - 1, rows == height - 1], axis=-1)
-    return table.astype(jnp.uint32).astype(F)
+    rows = fnp.arange(lifted) % height
+    table = fnp.stack([rows == 0, rows != height - 1, rows == height - 1], axis=-1)
+    return table.astype(fnp.uint32).astype(F)
 
 
 def _view_mats(air: AirData, l_skip: int) -> list[Array]:
@@ -193,7 +193,7 @@ def _view_mats(air: AirData, l_skip: int) -> list[Array]:
     for m in (*air.cached_mains, air.trace):
         out.append(_lift(m, l_skip))
         if air.needs_next:
-            rot = jnp.concatenate([m[1:], m[:1]], axis=0)
+            rot = fnp.concatenate([m[1:], m[:1]], axis=0)
             out.append(_lift(rot, l_skip))
     return out
 
@@ -225,7 +225,7 @@ def _pack_cols(sels_cells: Array, mat_cells: list[Array]) -> Array:
     selectors then each part's columns, so the ``eval_fn`` slicing is unchanged."""
     cols = [sels_cells[..., j].reshape(-1) for j in range(sels_cells.shape[-1])]
     cols += [m[..., j].reshape(-1) for m in mat_cells for j in range(m.shape[-1])]
-    return jnp.stack(cols, axis=-1)  # (M, nc)
+    return fnp.stack(cols, axis=-1)  # (M, nc)
 
 
 def _stack_promote(node_vals: Sequence[Array], refs: Sequence[int]) -> Array:
@@ -233,13 +233,13 @@ def _stack_promote(node_vals: Sequence[Array], refs: Sequence[int]) -> Array:
 
     A DAG node is per-row (trace variables) or row-constant (``constant`` /
     ``public`` nodes evaluate to scalars). The reference ``acc_*`` folds mix the
-    two via broadcasting addition; ``jnp.stack`` needs identical shapes, so
+    two via broadcasting addition; ``fnp.stack`` needs identical shapes, so
     broadcast the row-constants up to the common leading shape first. Byte-
     identical to weighting each node in place, since the fold is linear per
     node."""
     vals = [_promote(node_vals[r]) for r in refs]
-    shape = jnp.broadcast_shapes(*(v.shape for v in vals))
-    return jnp.stack([jnp.broadcast_to(v, shape) for v in vals], axis=-1)
+    shape = fnp.broadcast_shapes(*(v.shape for v in vals))
+    return fnp.stack([fnp.broadcast_to(v, shape) for v in vals], axis=-1)
 
 
 def _ceval_folds(
@@ -270,7 +270,7 @@ def _ceval_folds(
             return _stack_promote(_nodes(tr), refs)
 
         return constraint_eval(
-            eval_fn, packed, jnp.stack(coeffs), live_width=packed.shape[0]
+            eval_fn, packed, fnp.stack(coeffs), live_width=packed.shape[0]
         ).reshape(lead)
 
     # A lookup-only AIR has no zerocheck constraints; match acc_constraints'
@@ -281,7 +281,7 @@ def _ceval_folds(
             [lambda_pows[k] for k in range(len(dag.constraint_idx))],
         )
         if dag.constraint_idx
-        else jnp.zeros((), EF)
+        else fnp.zeros((), EF)
     )
     if not dag.interactions:
         return acc, None, None
@@ -300,12 +300,12 @@ def _ceval_folds(
             * f_to_ef(f_const(intr.bus_index + 1))
             for i, intr in enumerate(dag.interactions)
         ),
-        jnp.zeros((), EF),
+        fnp.zeros((), EF),
     )
     denom = (
         (_fold(denom_refs, denom_coeffs) + bus_const)
         if denom_refs
-        else jnp.broadcast_to(bus_const, lead)
+        else fnp.broadcast_to(bus_const, lead)
     )
     return acc, numer, denom
 
@@ -361,7 +361,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     dag_ref = weakref.ref(dag)  # held weakly; deref'd under trace (always live then)
 
     if num_cosets_zc > 0:
-        inv_zerofiers = jnp.stack(
+        inv_zerofiers = fnp.stack(
             [
                 f_to_ef(
                     f_inv_const(
@@ -403,7 +403,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 )
                 return _stack_promote(node_vals, dag_.constraint_idx)
 
-            alpha = jnp.stack([lambda_pows[k] for k in range(len(dag_.constraint_idx))])
+            alpha = fnp.stack([lambda_pows[k] for k in range(len(dag_.constraint_idx))])
             acc = constraint_eval(
                 eval_fn, packed, alpha, live_width=packed.shape[0]
             ).reshape(lead)  # (num_cosets, size, rows)
@@ -448,7 +448,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
             return _stack_promote(_nodes(tr), [i.count for i in dag_.interactions])
 
         numer = constraint_eval(
-            count_fn, packed, jnp.stack(list(eq_3bs_t)), live_width=packed.shape[0]
+            count_fn, packed, fnp.stack(list(eq_3bs_t)), live_width=packed.shape[0]
         ).reshape(lead)
 
         denom_refs = [m for intr in dag_.interactions for m in intr.message]
@@ -464,7 +464,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 * f_to_ef(f_const(intr.bus_index + 1))
                 for i, intr in enumerate(dag_.interactions)
             ),
-            jnp.zeros((), EF),
+            fnp.zeros((), EF),
         )
         if denom_refs:
 
@@ -475,13 +475,13 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 constraint_eval(
                     denom_fn,
                     packed,
-                    jnp.stack(denom_coeffs),
+                    fnp.stack(denom_coeffs),
                     live_width=packed.shape[0],
                 ).reshape(lead)
                 + bus_const
             )
         else:
-            denom = jnp.broadcast_to(bus_const, lead)
+            denom = fnp.broadcast_to(bus_const, lead)
 
         p = (numer * eq_xi[None, None, :]).sum(axis=2)
         q = (denom * eq_xi[None, None, :]).sum(axis=2)
@@ -505,7 +505,7 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
     independent of n_max: each trace keeps a fixed-width buffer and stride-pair
     folds in place, re-padding the dead tail with zeros — pairing LSB-stride as
     the reference's MLE fold does, not high/low halves. Front-load exhaustion
-    (round > ñ_t, ñ_t static) becomes a per-trace `jnp.where` on the dynamic scan
+    (round > ñ_t, ñ_t static) becomes a per-trace `fnp.where` on the dynamic scan
     index instead of a Python branch. The round math is unchanged from the eager
     body — only the loop carrier moved into the scan carry.
 
@@ -539,10 +539,10 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
     # the `AirData` objects — those carry `trace` / `cached_mains` device arrays,
     # which a module-cached closure would pin for the process lifetime.
     air_statics = [(weakref.ref(a.dag), a.needs_next, a.public_values) for a in airs]
-    zero = jnp.zeros((), EF)
-    one_ef = f_to_ef(jnp.ones((), F))
+    zero = fnp.zeros((), EF)
+    one_ef = f_to_ef(fnp.ones((), F))
     inv_vdm = _inv_vandermonde_rows(s_deg - 1)
-    domain_pts = jnp.stack(
+    domain_pts = fnp.stack(
         [f_to_ef(f_const(i)) for i in range(1, s_deg + 1)]
     )  # the {1..s_deg} round-poly sample points
     round_dom = natural_domain(s_deg - 1, EF)  # {0..s_deg-1}, the lifted MLE evals
@@ -629,15 +629,15 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                         p0t = eq_sharp_n * _row0(numer) * norm
                         q0t = eq_sharp_n * _row0(denom)
                     else:
-                        p = jnp.zeros((s_deg,), EF)
-                        q = jnp.zeros((s_deg,), EF)
+                        p = fnp.zeros((s_deg,), EF)
+                        q = fnp.zeros((s_deg,), EF)
                         p0t = zero
                         q0t = zero
                     for i in range(s_deg - 1):
-                        sp_head_zc[i] = sp_head_zc[i] + jnp.where(
+                        sp_head_zc[i] = sp_head_zc[i] + fnp.where(
                             is_head, mu_zc * zc[i + 1], zero
                         )
-                        sp_head_logup[i] = sp_head_logup[i] + jnp.where(
+                        sp_head_logup[i] = sp_head_logup[i] + fnp.where(
                             is_head, mu_p * p[i + 1] + mu_q * q[i + 1], zero
                         )
                 else:
@@ -662,21 +662,21 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                 # tilde carry: init f̂-term at round ñ_t+1, then ×r each later round.
                 is_init = round_idx == n_lift + 1
                 is_accum = round_idx > n_lift + 1
-                new_tilde_zc[t] = jnp.where(
-                    is_init, zc0, jnp.where(is_accum, tilde_zc[t] * r_prev, tilde_zc[t])
+                new_tilde_zc[t] = fnp.where(
+                    is_init, zc0, fnp.where(is_accum, tilde_zc[t] * r_prev, tilde_zc[t])
                 )
-                new_tilde_p[t] = jnp.where(
-                    is_init, p0t, jnp.where(is_accum, tilde_p[t] * r_prev, tilde_p[t])
+                new_tilde_p[t] = fnp.where(
+                    is_init, p0t, fnp.where(is_accum, tilde_p[t] * r_prev, tilde_p[t])
                 )
-                new_tilde_q[t] = jnp.where(
-                    is_init, q0t, jnp.where(is_accum, tilde_q[t] * r_prev, tilde_q[t])
+                new_tilde_q[t] = fnp.where(
+                    is_init, q0t, fnp.where(is_accum, tilde_q[t] * r_prev, tilde_q[t])
                 )
                 tail_term = (
                     mu_zc * new_tilde_zc[t]
                     + mu_p * new_tilde_p[t]
                     + mu_q * new_tilde_q[t]
                 )
-                sp_tail = sp_tail + jnp.where(is_head, zero, tail_term)
+                sp_tail = sp_tail + fnp.where(is_head, zero, tail_term)
 
             # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
             sp_head_evals = [zero] * s_deg
@@ -702,7 +702,7 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
             coeffs[0] = coeffs[0] * b
             coeffs[1] = coeffs[1] + sp_tail
 
-            coeffs_arr = jnp.stack(coeffs)
+            coeffs_arr = fnp.stack(coeffs)
             batch_s_evals = eval_coeffs(coeffs_arr, domain_pts)
             transcript = transcript.observe(batch_s_evals)
             transcript, r_round = sample_ext(transcript)
@@ -717,13 +717,13 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                 if n_lift >= 1:
                     live = round_idx <= n_lift
                     fs = _fold_pair(bufs_sels[t][0::2], bufs_sels[t][1::2], r_round)
-                    fs = jnp.concatenate([fs, jnp.zeros_like(fs)], axis=0)
-                    new_bufs_sels.append(jnp.where(live, fs, bufs_sels[t]))
+                    fs = fnp.concatenate([fs, fnp.zeros_like(fs)], axis=0)
+                    new_bufs_sels.append(fnp.where(live, fs, bufs_sels[t]))
                     folded_m = []
                     for m in bufs_mats[t]:
                         fm = _fold_pair(m[0::2], m[1::2], r_round)
-                        fm = jnp.concatenate([fm, jnp.zeros_like(fm)], axis=0)
-                        folded_m.append(jnp.where(live, fm, m))
+                        fm = fnp.concatenate([fm, fnp.zeros_like(fm)], axis=0)
+                        folded_m.append(fnp.where(live, fm, m))
                     new_bufs_mats.append(folded_m)
                 else:
                     new_bufs_sels.append(bufs_sels[t])
@@ -756,7 +756,7 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
             r_0,
             transcript,
             prev_s_eval,
-            jnp.int32(1),
+            fnp.int32(1),
         )
         final_carry, (round_polys, r_rounds) = lax.scan(
             step, init_carry, (eq_xi_xs, xi_cur_xs), length=n_max
@@ -858,8 +858,8 @@ def _stage_body(
     s_deg = max_constraint_degree + 1
     sp_0_deg = max_constraint_degree * ((1 << l_skip) - 1)
 
-    zero = jnp.zeros((), EF)
-    one_ef = f_to_ef(jnp.ones((), F))
+    zero = fnp.zeros((), EF)
+    one_ef = f_to_ef(fnp.ones((), F))
 
     # --- Per-trace inputs: lifted mats, selectors, eq(ξ_3, b) weights ---
     mats = [_view_mats(air, l_skip) for air in airs]
@@ -882,8 +882,8 @@ def _stage_body(
         if n_bits == 0:
             eq_3bs[trace_idx][int_idx] = one_ef
             continue
-        bits = f_to_ef(jnp.array([(b_int >> j) & 1 for j in range(n_bits)], F))
-        point = jnp.stack(xi[l_skip + n_lift : l_skip + n_logup])
+        bits = f_to_ef(fnp.array([(b_int >> j) & 1 for j in range(n_bits)], F))
+        point = fnp.stack(xi[l_skip + n_lift : l_skip + n_logup])
         eq_3bs[trace_idx][int_idx] = eval_eq(point, bits)
 
     # --- Batching randomness λ ---
@@ -947,12 +947,12 @@ def _stage_body(
     # kernels are exactly 1<<l_skip long, so the conv lands at s_0_deg+1 with
     # no padding. Two islands, split by the observe(claims)→sample(μ) seam.
     skip = 1 << l_skip
-    eq_sharp = jnp.stack(prism.eq_sharp_uni_poly(l_skip, xi[:l_skip]))
+    eq_sharp = fnp.stack(prism.eq_sharp_uni_poly(l_skip, xi[:l_skip]))
     skip_domain_size = f_to_ef(f_const(skip))
 
     # Island A (pre-μ): per-trace logup products + sum claims.
-    sp_p = jnp.stack([jnp.stack(_pad(p, sp_0_deg + 1)) for p, _ in sp_logup])
-    sp_q = jnp.stack([jnp.stack(_pad(q, sp_0_deg + 1)) for _, q in sp_logup])
+    sp_p = fnp.stack([fnp.stack(_pad(p, sp_0_deg + 1)) for p, _ in sp_logup])
+    sp_q = fnp.stack([fnp.stack(_pad(q, sp_0_deg + 1)) for _, q in sp_logup])
     p_prods = _batched_conv(sp_p, eq_sharp)  # (num_traces, s_0_deg+1)
     q_prods = _batched_conv(sp_q, eq_sharp)
     # Σ_D Z^j = N iff N | j: read the sum claim off the strided coefficients.
@@ -962,7 +962,7 @@ def _stage_body(
     numerator_term_per_air = []
     denominator_term_per_air = []
     for t in range(num_traces):
-        transcript = transcript.observe(jnp.stack([p_claims[t], q_claims[t]]))
+        transcript = transcript.observe(fnp.stack([p_claims[t], q_claims[t]]))
         numerator_term_per_air.append(p_claims[t])
         denominator_term_per_air.append(q_claims[t])
 
@@ -972,16 +972,16 @@ def _stage_body(
     # Island B (post-μ): μ-batch the zerocheck rows, multiply in eq_D, then add
     # the μ-weighted logup products to form s_0. Contracted axes kept last so
     # the EF reduce stays jit-safe (docs/development.md).
-    eq_uni = jnp.stack(prism.eq_uni_poly(l_skip, xi[0]))
-    sp_zc_rows = jnp.stack(
-        [jnp.stack(_pad(coeffs, sp_0_deg + 1)) for coeffs in sp_zc]
+    eq_uni = fnp.stack(prism.eq_uni_poly(l_skip, xi[0]))
+    sp_zc_rows = fnp.stack(
+        [fnp.stack(_pad(coeffs, sp_0_deg + 1)) for coeffs in sp_zc]
     )  # (num_traces, sp_0_deg+1)
-    zc_weights = jnp.stack(mu_pows[2 * num_traces : 3 * num_traces])
+    zc_weights = fnp.stack(mu_pows[2 * num_traces : 3 * num_traces])
     zc_batched = (sp_zc_rows.T * zc_weights).sum(axis=-1)  # (sp_0_deg+1,)
     zc_prod = _batched_conv(zc_batched, eq_uni)  # (s_0_deg+1,)
 
-    mu_p = jnp.stack(mu_pows[0 : 2 * num_traces : 2])
-    mu_q = jnp.stack(mu_pows[1 : 2 * num_traces : 2])
+    mu_p = fnp.stack(mu_pows[0 : 2 * num_traces : 2])
+    mu_q = fnp.stack(mu_pows[1 : 2 * num_traces : 2])
     s_0_arr = (
         zc_prod + (p_prods.T * mu_p).sum(axis=-1) + (q_prods.T * mu_q).sum(axis=-1)
     )
@@ -1016,18 +1016,18 @@ def _stage_body(
             if n_lift >= 1 and round_ <= n_lift:
                 tab = _eq_table(xi[l_skip + round_ : l_skip + n_lift])
                 rows.append(
-                    jnp.concatenate([tab, jnp.zeros(half_t - tab.shape[0], EF)])
+                    fnp.concatenate([tab, fnp.zeros(half_t - tab.shape[0], EF)])
                 )
             else:
-                rows.append(jnp.zeros(half_t, EF))
+                rows.append(fnp.zeros(half_t, EF))
         eq_xi_xs.append(  # (n_max, H_t/2)
-            jnp.stack(rows) if rows else jnp.zeros((0, half_t), EF)
+            fnp.stack(rows) if rows else fnp.zeros((0, half_t), EF)
         )
 
     xi_cur_xs = (
-        jnp.stack([xi[l_skip + round_ - 1] for round_ in range(1, n_max + 1)])
+        fnp.stack([xi[l_skip + round_ - 1] for round_ in range(1, n_max + 1)])
         if n_max >= 1
-        else jnp.zeros((0,), EF)
+        else fnp.zeros((0,), EF)
     )
     profiler.mark("scan_setup", eq_xi_xs, xi_cur_xs)
 
@@ -1063,7 +1063,7 @@ def _stage_body(
         if air.needs_next:
             # ``mats`` is the flat (local, rot, ...) list; regroup per part.
             parts = [
-                jnp.stack([trace_mats[i][0], trace_mats[i + 1][0]], axis=-1).reshape(-1)
+                fnp.stack([trace_mats[i][0], trace_mats[i + 1][0]], axis=-1).reshape(-1)
                 for i in range(0, len(trace_mats), 2)
             ]
         else:
@@ -1075,7 +1075,7 @@ def _stage_body(
     # opening, then every AIR's remaining (cached/preprocessed) parts.
     # ``column_openings_by_rot``: rotated → (local, rot) already interleaved;
     # un-rotated → each column paired with a zero.
-    zero_arr = jnp.zeros((1,), EF)
+    zero_arr = fnp.zeros((1,), EF)
 
     def _observe_opening(t, part, needs_next):
         if needs_next:

@@ -10,7 +10,7 @@ import dataclasses
 import json
 from pathlib import Path
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
 from zk_dtypes import babybear_mont as F
@@ -43,12 +43,12 @@ def _load_instance():
     vks = []
     for air in meta["airs"]:
         air_idx = air["air_idx"]
-        trace = jnp.array(np.load(_PROVE / "inputs" / f"trace_{air_idx}.npy"), dtype=F)
+        trace = fnp.array(np.load(_PROVE / "inputs" / f"trace_{air_idx}.npy"), dtype=F)
         dag = ConstraintsDag.from_json(
             json.loads((_PROVE / "inputs" / f"constraints_{air_idx}.json").read_text())
         )
         cached_mains = tuple(
-            jnp.array(np.load(_PROVE / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F)
+            fnp.array(np.load(_PROVE / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F)
             for k in range(air.get("num_cached_mains", 0))
         )
         airs.append(
@@ -92,7 +92,7 @@ def _load_instance():
 
 
 def _bump(x):
-    return x + jnp.ones((), x.dtype)
+    return x + fnp.ones((), x.dtype)
 
 
 def _tamper_gkr(p):
@@ -129,7 +129,7 @@ def _tamper_whir_opened_row(p):
     wp = p.whir_proof
     rows = [list(per_commit) for per_commit in wp.initial_round_opened_rows]
     # Perturb the first opened row of the first query of the first commit.
-    rows[0][0] = rows[0][0].at[0, 0].add(jnp.ones((), rows[0][0].dtype))
+    rows[0][0] = rows[0][0].at[0, 0].add(fnp.ones((), rows[0][0].dtype))
     return dataclasses.replace(
         p, whir_proof=dataclasses.replace(wp, initial_round_opened_rows=rows)
     )

@@ -12,7 +12,7 @@ power of two dividing the stacked height, a column never straddles two stacked
 columns — the layout arithmetic below relies on that.
 
 The layout is host-side Python over static shapes (heights are trace-time
-constants); only the matrix assembly is traced jnp. The stacked width is
+constants); only the matrix assembly is traced fnp. The stacked width is
 ``ceil(total_lifted_cells / stacked_height)`` — note the Rust side sizes the
 buffer from this cell count, NOT from the last occupied column, so a trailing
 all-zero column (when the last lifted column ends exactly on a stacked-column
@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from frx import Array
 
@@ -105,7 +105,7 @@ class StackedLayout:
 # transfer, ``height = 2^(l_skip+n_stack)``) is host-bound and spikes under load,
 # dwarfing the device gather + NTT + Merkle it feeds (#46). Memoize the device
 # index by shape signature so only the first commit pays it; every later commit's
-# stacking cost is then just the data-dependent ``src`` concat + ``jnp.take``.
+# stacking cost is then just the data-dependent ``src`` concat + ``fnp.take``.
 _GATHER_INDEX_CACHE: dict[tuple, Array] = {}
 
 
@@ -129,7 +129,7 @@ def _gather_index(l_skip: int, layout: StackedLayout, width: int) -> Array:
     if dest:
         dest_flat = np.concatenate(dest)
         gather[dest_flat] = np.arange(dest_flat.size) + 1
-    return jnp.asarray(gather)
+    return fnp.asarray(gather)
 
 
 def stacked_matrix(
@@ -159,5 +159,5 @@ def stacked_matrix(
         gather_dev = _gather_index(l_skip, layout, width)
         _GATHER_INDEX_CACHE[key] = gather_dev
 
-    src = jnp.concatenate([jnp.zeros((1,), dtype)] + [t.T.reshape(-1) for t in traces])
-    return jnp.take(src, gather_dev).reshape(height, width), layout
+    src = fnp.concatenate([fnp.zeros((1,), dtype)] + [t.T.reshape(-1) for t in traces])
+    return fnp.take(src, gather_dev).reshape(height, width), layout

@@ -19,11 +19,11 @@ on every run, so the compile-vs-runtime split is visible alongside the
 byte-match (proof messages are plain dataclasses, opaque to
 ``block_until_ready``, so block on their array leaves by hand). Wall-clock is
 dominated by XLA GPU compiles, not kernel runtime; for the warm split set
-``JAX_COMPILATION_CACHE_DIR`` to a per-toolchain directory so every run after
+``FRX_COMPILATION_CACHE_DIR`` to a per-toolchain directory so every run after
 the first skips the compiles (leave it unset for byte-match gates).
 
     bazel run //openvm_zorch:verify_prove
-    JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false \
         bazel run //openvm_zorch:verify_prove -- --fixture_dir /path/to/fixture
 
 Exits non-zero on any mismatch.
@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 import frx
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from absl import app, flags
 from frx import lax
@@ -166,7 +166,7 @@ def _load_instance(prove_dir):
     airs = []
     for air in meta["airs"]:
         air_idx = air["air_idx"]
-        trace = jnp.array(
+        trace = fnp.array(
             np.load(prove_dir / "inputs" / f"trace_{air_idx}.npy"), dtype=F
         )
         dag = ConstraintsDag.from_json(
@@ -175,7 +175,7 @@ def _load_instance(prove_dir):
             )
         )
         cached_mains = tuple(
-            jnp.array(
+            fnp.array(
                 np.load(prove_dir / "inputs" / f"cached_{air_idx}_{k}.npy"), dtype=F
             )
             for k in range(air.get("num_cached_mains", 0))
@@ -211,11 +211,11 @@ def _load_instance(prove_dir):
 
 def _ef_limbs(x) -> np.ndarray:
     """Canonical-u32 limbs of a BabyBear⁴ array, shape (..., 4)."""
-    return np.asarray(lax.bitcast_convert_type(jnp.atleast_1d(x), F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(fnp.atleast_1d(x), F).astype(fnp.uint32))
 
 
 def _to_u32(x) -> np.ndarray:
-    return np.asarray(lax.bitcast_convert_type(x, F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(x, F).astype(fnp.uint32))
 
 
 def check_match(label: str, got, want) -> bool:
@@ -251,7 +251,7 @@ def _byte_match(proof: Proof, out: Path) -> bool:
     )
     ok &= check_match(
         "logup_pow_witness",
-        int(_to_u32(jnp.atleast_1d(proof.logup_pow_witness))[0]),
+        int(_to_u32(fnp.atleast_1d(proof.logup_pow_witness))[0]),
         int(np.load(out / "logup_pow_witness.npy")[0]),
     )
     ok &= check_match(
@@ -259,22 +259,22 @@ def _byte_match(proof: Proof, out: Path) -> bool:
         _ef_limbs(proof.gkr_proof.q0_claim)[0],
         np.load(out / "q0_claim.npy"),
     )
-    ok &= check_match("xi", _ef_limbs(jnp.stack(proof.xi)), np.load(out / "xi.npy"))
+    ok &= check_match("xi", _ef_limbs(fnp.stack(proof.xi)), np.load(out / "xi.npy"))
     # Stage 3.
     ok &= check_match(
         "zc.lambda", _ef_limbs(bcp.lambda_)[0], np.load(out / "zc_lambda.npy")
     )
     ok &= check_match(
         "zc.s0_coeffs",
-        _ef_limbs(jnp.stack(bcp.univariate_round_coeffs)),
+        _ef_limbs(fnp.stack(bcp.univariate_round_coeffs)),
         np.load(out / "zc_s0_coeffs.npy"),
     )
-    ok &= check_match("zc.r", _ef_limbs(jnp.stack(bcp.r)), np.load(out / "zc_r.npy"))
+    ok &= check_match("zc.r", _ef_limbs(fnp.stack(bcp.r)), np.load(out / "zc_r.npy"))
     # Stage 4.
     ok &= check_match(
         "st.lambda", _ef_limbs(sp.lambda_)[0], np.load(out / "st_lambda.npy")
     )
-    ok &= check_match("st.u", _ef_limbs(jnp.stack(sp.u)), np.load(out / "st_u.npy"))
+    ok &= check_match("st.u", _ef_limbs(fnp.stack(sp.u)), np.load(out / "st_u.npy"))
     ok &= check_match(
         "st.openings_c0",
         _ef_limbs(sp.stacking_openings[0]),
@@ -283,7 +283,7 @@ def _byte_match(proof: Proof, out: Path) -> bool:
     # Stage 5.
     ok &= check_match(
         "whir.mu_pow_witness",
-        _to_u32(jnp.atleast_1d(wp.mu_pow_witness)),
+        _to_u32(fnp.atleast_1d(wp.mu_pow_witness)),
         np.load(out / "whir_mu_pow_witness.npy"),
     )
     ok &= check_match("whir.mu", _ef_limbs(wp.mu)[0], np.load(out / "whir_mu.npy"))
@@ -292,22 +292,22 @@ def _byte_match(proof: Proof, out: Path) -> bool:
         ok &= check_match(f"whir.sumcheck[{j}]", _ef_limbs(evals), want_sumcheck[j])
     ok &= check_match(
         "whir.codeword_commits",
-        _to_u32(jnp.stack(wp.codeword_commits)),
+        _to_u32(fnp.stack(wp.codeword_commits)),
         np.load(out / "whir_codeword_commits.npy"),
     )
     ok &= check_match(
         "whir.ood_values",
-        _ef_limbs(jnp.stack(wp.ood_values)),
+        _ef_limbs(fnp.stack(wp.ood_values)),
         np.load(out / "whir_ood_values.npy"),
     )
     ok &= check_match(
         "whir.folding_pow_witnesses",
-        _to_u32(jnp.stack(wp.folding_pow_witnesses)),
+        _to_u32(fnp.stack(wp.folding_pow_witnesses)),
         np.load(out / "whir_folding_pow_witnesses.npy"),
     )
     ok &= check_match(
         "whir.query_phase_pow_witnesses",
-        _to_u32(jnp.stack(wp.query_phase_pow_witnesses)),
+        _to_u32(fnp.stack(wp.query_phase_pow_witnesses)),
         np.load(out / "whir_query_phase_pow_witnesses.npy"),
     )
     ok &= check_match(

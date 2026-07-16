@@ -20,7 +20,7 @@ and the BabyBear⁴ challenge conventions:
 
 from __future__ import annotations
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array, lax
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
@@ -55,7 +55,7 @@ def check_witness(
     Fiat-Shamir stream.
     """
     if pow_bits == 0:
-        return transcript, jnp.bool_(True)
+        return transcript, fnp.bool_(True)
     return transcript.check_witness(pow_bits, witness)
 
 
@@ -71,7 +71,7 @@ def grind(
     the Rust grind serial, so both sides find the same witness).
     """
     if pow_bits == 0:
-        return transcript, jnp.zeros((), F)
+        return transcript, fnp.zeros((), F)
     return transcript.grind(pow_bits)
 
 
@@ -81,7 +81,7 @@ def sample_bits(transcript: DuplexTranscript, bits: int) -> tuple[DuplexTranscri
     Merkle queries."""
     transcript, got = transcript.sample(1)
     canonical = int(
-        jnp.asarray(lax.bitcast_convert_type(got, F).astype(jnp.uint32))[0]
+        fnp.asarray(lax.bitcast_convert_type(got, F).astype(fnp.uint32))[0]
     )
     return transcript, canonical & ((1 << bits) - 1)
 

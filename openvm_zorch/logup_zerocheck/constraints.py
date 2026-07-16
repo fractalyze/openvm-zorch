@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 
 from openvm_zorch.fields import F, f_const, f_to_ef
@@ -128,7 +128,7 @@ def acc_constraints(
 ) -> Array:
     """``Σ_k λ^k · C_k`` over the constraint nodes (single.rs
     ``acc_constraints``); always extension-valued."""
-    acc = jnp.zeros((), lambda_pows[0].dtype)
+    acc = fnp.zeros((), lambda_pows[0].dtype)
     for lam_pow, idx in zip(lambda_pows, dag.constraint_idx):
         acc = acc + lam_pow * _promote(node_vals[idx])
     return acc
@@ -159,7 +159,7 @@ def acc_interactions(
     """Interactions accumulated under their ``eq(ξ_3, b)`` weights as a
     (numerator, denominator) pair (single.rs ``acc_interactions``)."""
     pairs = eval_interactions(dag, node_vals, beta_pows)
-    numer = jnp.zeros((), eq_3bs[0].dtype) if eq_3bs else jnp.zeros((), beta_pows[0].dtype)
+    numer = fnp.zeros((), eq_3bs[0].dtype) if eq_3bs else fnp.zeros((), beta_pows[0].dtype)
     denom = numer
     for eq_3b, (count, h_beta) in zip(eq_3bs, pairs):
         numer = numer + eq_3b * _promote(count)

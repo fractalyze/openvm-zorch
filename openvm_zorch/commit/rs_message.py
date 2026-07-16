@@ -24,7 +24,7 @@ op).
 
 from __future__ import annotations
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array, lax
 
 # The MLE coeff↔eval (zeta / Möbius) transforms are scheme-agnostic and live in
@@ -66,7 +66,7 @@ def _coeffs_to_evals_chunk(coeffs: Array) -> Array:
     for b in range(log2_strict_usize(n)):
         x = a.reshape(lead + (n >> (b + 1), 2, 1 << b))
         lo, hi = x[..., 0, :], x[..., 1, :]
-        a = jnp.stack([lo, lo + hi], axis=-2).reshape(lead + (n,))
+        a = fnp.stack([lo, lo + hi], axis=-2).reshape(lead + (n,))
     return a
 
 

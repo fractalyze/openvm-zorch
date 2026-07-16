@@ -1,7 +1,7 @@
 # Development
 
 Pure Python on FRX + the XLA PJRT plugin. Bazel 9 (bzlmod). Tests default to
-`JAX_PLATFORMS=cpu`.
+`FRX_PLATFORMS=cpu`.
 
 ```sh
 bazel test //...                 # hermetic, sandboxed
@@ -34,13 +34,6 @@ one-line `MODULE.bazel` change. (To validate the pin the way CI resolves it,
 temporarily disable the `.bazelrc.user` `--override_module=zorch` line —
 otherwise the build silently uses your local checkout, not the pinned commit.)
 
-An frx wheel bump must move `zk-dtypes` in lockstep: each wheel imports a
-specific `zk_dtypes` ABI (e.g. `efinfo.modulus_low_coeffs` from 0.0.6,
-`pallas_sf` from 0.0.7, the binary-field dtypes from 0.0.10), and frx's
-metadata does not floor the version, so the lock keeps the old `zk-dtypes` and
-every target dies at `import frx`. Bump the `zk-dtypes` pin in
-`requirements.in` alongside the frx pins and re-lock.
-
 ## Running on GPU
 
 `//openvm_zorch:verify_prove` is the entry point — the byte-match +
@@ -48,7 +41,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
 
 - A target only sees the GPU if it deps **both** `requirement("frx_cuda12_plugin")`
   and `requirement("frx_cuda12_pjrt")`; without them frx **silently falls back to
-  CPU**. Run with `JAX_PLATFORMS=cuda` (not `gpu`, which also inits rocm and
+  CPU**. Run with `FRX_PLATFORMS=cuda` (not `gpu`, which also inits rocm and
   dies) so a missing plugin hard-errors instead of silently using CPU.
 - Those plugin `.so`s require **`libcuda` at import**, so a cuda-dep'd target
   cannot even import on a driverless machine. Therefore tests stay
@@ -68,18 +61,18 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   extent (e.g. the stacked matrix can end in an all-zero committed column).
   When a byte-match fails at a hash, first suspect a shape/padding delta,
   not the hash params.
-- `frx.numpy` is a subset of upstream JAX's: `jnp.roll` does not exist (first hit
+- `frx.numpy` is a subset of upstream JAX's: `fnp.roll` does not exist (first hit
   in Stage 4's rotation kernel — use
-  `jnp.concatenate([a[-1:], a[:-1]])`), and `jnp.arange` iota is
-  unsupported for extension dtypes (zorch builds domains via `jnp.stack`
-  of scalars). When an attribute error names a jnp function, reach for a
-  concat/stack equivalent before suspecting your logic. Also: `jnp.stack`
-  (and `jnp.concatenate`) require each element to ALREADY be an array — they
+  `fnp.concatenate([a[-1:], a[:-1]])`), and `fnp.arange` iota is
+  unsupported for extension dtypes (zorch builds domains via `fnp.stack`
+  of scalars). When an attribute error names a fnp function, reach for a
+  concat/stack equivalent before suspecting your logic. Also: `fnp.stack`
+  (and `fnp.concatenate`) require each element to ALREADY be an array — they
   do NOT `asarray` a nested Python list (`stack requires ndarray or scalar
   arguments, got list`). A flat `list[Array]` of 0-D scalars stacks directly,
   but to stack rows of scalars (a `list[list[Array]]`) into a matrix you must
-  inner-stack each row first: `jnp.stack([jnp.stack(row) for row in rows])`.
-  `jnp.pad`, by contrast, DOES work on extension dtypes (verified byte-exact).
+  inner-stack each row first: `fnp.stack([fnp.stack(row) for row in rows])`.
+  `fnp.pad`, by contrast, DOES work on extension dtypes (verified byte-exact).
 - **Perf: a host-int weight loop (a `pow()` nest building a constant
   matrix, contracted into field cells with scalar `acc += w*cell` adds) is
   a dispatch storm, not a FLOP cost.** It dominates eagerly. Fix: build the
@@ -87,7 +80,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   as a field array) and replace the scalar nest with one broadcast-multiply
   + a **trailing-axis** `.sum` (mid-axis EF reduce faults under jit; keep
   the contracted axis last). This is eager-fast and jit-fusable. Do NOT use
-  `jnp.dot`/`@`/`tensordot` — they mis-lower under `frx.jit` on XLA
+  `fnp.dot`/`@`/`tensordot` — they mis-lower under `frx.jit` on XLA
   (see `zorch/fusion.py`, `zorch/pcs/whir/_math.py`). And do NOT wrap a
   scalar-list polynomial (`_conv` over 0-D coeffs) in `frx.jit` directly —
   hundreds of pytree-leaf scalars regress; vectorize into arrays first.
@@ -151,8 +144,8 @@ production-scale fixture with a production baseline:
 ( cd tools/fixture-gen && FIB_LOG_HEIGHT=20 N_STACK=16 \
     cargo run --release -- --prove-out /tmp/prove_prod )
 
-# 2. Compare (GPU; drop JAX_PLATFORMS for CPU):
-JAX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+# 2. Compare (GPU; drop FRX_PLATFORMS for CPU):
+FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
   bazel run //openvm_zorch:verify_prove -- \
     --fixture_dir /tmp/prove_prod \
     --baseline openvm_zorch/testdata/baseline/native_prod_gpu.json
@@ -169,7 +162,7 @@ check of the wiring.
 - **The first GPU `prove()` is compile-dominated, not kernel-dominated**: the
   zerocheck constraint DAG unrolls into one giant `jit_scan` kernel that ptxas
   optimizes for minutes. Two levers (#70):
-  - `JAX_COMPILATION_CACHE_DIR=<dir>` persists compiled modules across process
+  - `FRX_COMPILATION_CACHE_DIR=<dir>` persists compiled modules across process
     runs, so every run after the first skips the compile. Leave it unset for
     byte-match gates — a true cold compile is part of the gate.
   - `XLA_FLAGS=--xla_gpu_force_compilation_parallelism=<cores>` compiles the

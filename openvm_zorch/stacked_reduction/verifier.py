@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 
 from openvm_zorch.commit.stacking import StackedLayout
@@ -77,7 +77,7 @@ def verify_stacked_reduction(
     for j in range(1, n_stack + 1):
         s_j_1 = proof.sumcheck_round_polys[j - 1][0]
         s_j_2 = proof.sumcheck_round_polys[j - 1][1]
-        transcript = transcript.observe(jnp.stack([s_j_1, s_j_2]))
+        transcript = transcript.observe(fnp.stack([s_j_1, s_j_2]))
         transcript, u[j] = sample_ext(transcript)
         s_j_0 = claim - s_j_1
         claim = interp_quadratic_012([s_j_0, s_j_1, s_j_2], u[j])

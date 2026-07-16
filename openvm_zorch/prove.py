@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Sequence
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 from frx import Array
 from zk_dtypes import babybear_mont as F
 
@@ -168,7 +168,7 @@ def _log_prelude_obs_diff(obs: Sequence[Array], obs_log: dict) -> None:
     ``logup_pow_witness``, is observed right after this prelude)."""
     got: list[int] = []
     for a in obs:
-        got.extend(int(v) for v in jnp.atleast_1d(a).astype(jnp.uint32))
+        got.extend(int(v) for v in fnp.atleast_1d(a).astype(fnp.uint32))
     want = [int(v) for v in obs_log["values"]]
     plen = int(obs_log["prelude_len_faithful"])
     n = min(len(got), plen, len(want))
@@ -299,7 +299,7 @@ class CommitStage(Stage):
         # the reference observation-log element-by-element (issue #59); the
         # absorb order is unchanged, so the Fiat-Shamir stream is byte-identical.
         obs: list[Array] = [
-            jnp.array(list(self._vk_pre_hash), dtype=F),
+            fnp.array(list(self._vk_pre_hash), dtype=F),
             root,
         ]
         prev = -1
@@ -309,20 +309,20 @@ class CommitStage(Stage):
             # are non-required (a required AIR is always present), so each
             # observes a present=0 flag and nothing else.
             for _absent in range(prev + 1, idx):
-                obs.append(jnp.array([0], dtype=F))
+                obs.append(fnp.array([0], dtype=F))
             prev = idx
             head: list[int] = [] if air.is_required else [1]
             head.append(log2_strict_usize(air.trace.shape[0]))
             cached = cached_by_air.get(id(air), [])
             if not cached:
                 head.extend(air.public_values)
-                obs.append(jnp.array(head, dtype=F))
+                obs.append(fnp.array(head, dtype=F))
                 continue
-            obs.append(jnp.array(head, dtype=F))
+            obs.append(fnp.array(head, dtype=F))
             for cd in cached:
                 obs.append(cd.commit)
             if air.public_values:
-                obs.append(jnp.array(list(air.public_values), dtype=F))
+                obs.append(fnp.array(list(air.public_values), dtype=F))
 
         if self._obs_log is not None:
             _log_prelude_obs_diff(obs, self._obs_log)

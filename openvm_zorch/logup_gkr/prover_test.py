@@ -12,7 +12,7 @@ no tolerances.
 import json
 from pathlib import Path
 
-import frx.numpy as jnp
+import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 from frx import lax
@@ -38,7 +38,7 @@ _DAGS = (
 
 def _ef_limbs(x) -> np.ndarray:
     """Canonical-u32 limbs of a BabyBear⁴ array, shape (..., 4)."""
-    return np.asarray(lax.bitcast_convert_type(jnp.atleast_1d(x), F).astype(jnp.uint32))
+    return np.asarray(lax.bitcast_convert_type(fnp.atleast_1d(x), F).astype(fnp.uint32))
 
 
 class _LogWalk:
@@ -65,7 +65,7 @@ class LogupGkrByteMatchTest(absltest.TestCase):
         cls.values = np.load(_FIXTURE / "outputs" / "transcript_values.npy")
         cls.is_sample = np.load(_FIXTURE / "outputs" / "transcript_is_sample.npy")
         cls.traces = [
-            jnp.array(np.load(_FIXTURE / "inputs" / f"trace_{i}.npy"), dtype=F)
+            fnp.array(np.load(_FIXTURE / "inputs" / f"trace_{i}.npy"), dtype=F)
             for i in range(len(cls.meta["airs"]))
         ]
         cls.dags = [
@@ -101,11 +101,11 @@ class LogupGkrByteMatchTest(absltest.TestCase):
             np.asarray(prelude, dtype=np.uint32), self.values[: len(prelude)]
         )
         self.assertFalse(self.is_sample[: len(prelude)].any())
-        t = new_transcript().observe(jnp.array(prelude, dtype=F))
+        t = new_transcript().observe(fnp.array(prelude, dtype=F))
 
         # --- LogUp PoW + α, β ---
         t, ok = check_witness(
-            t, params["logup_pow_bits"], jnp.array(meta["logup_pow_witness"], F)
+            t, params["logup_pow_bits"], fnp.array(meta["logup_pow_witness"], F)
         )
         self.assertTrue(bool(ok))
         t, alpha = sample_ext(t)
@@ -187,14 +187,14 @@ class LogupGkrByteMatchTest(absltest.TestCase):
         t, xi = pad_xi(t, xi, l_skip + meta["n_global"])
         want_xi = np.load(_FIXTURE / "outputs" / "xi.npy")
         self.assertEqual(len(xi), want_xi.shape[0])
-        np.testing.assert_array_equal(_ef_limbs(jnp.stack(xi)), want_xi)
+        np.testing.assert_array_equal(_ef_limbs(fnp.stack(xi)), want_xi)
         for _ in range(len(xi) - total_rounds):
             walk.take(4, True)
         self.assertEqual(walk.idx, meta["stage2_end"])
 
     def test_ef_from_limbs_roundtrip(self) -> None:
-        limbs = jnp.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=jnp.uint32)
-        back = lax.bitcast_convert_type(ef_from_limbs(limbs), F).astype(jnp.uint32)
+        limbs = fnp.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=fnp.uint32)
+        back = lax.bitcast_convert_type(ef_from_limbs(limbs), F).astype(fnp.uint32)
         np.testing.assert_array_equal(np.asarray(back), np.asarray(limbs))
 
 
