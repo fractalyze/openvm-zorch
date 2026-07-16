@@ -58,7 +58,8 @@ class ZerocheckByteMatchTest(absltest.TestCase):
         cls.values = np.load(_FIXTURE / "outputs" / "transcript_values.npy")
         cls.is_sample = np.load(_FIXTURE / "outputs" / "transcript_is_sample.npy")
 
-    def test_stage3_matches(self) -> None:
+    def _load_case(self):
+        """Build the Stage-3 inputs (sorted AIRs, ξ, β) from the fixture."""
         meta = self.meta
         l_skip = meta["params"]["l_skip"]
 
@@ -85,10 +86,14 @@ class ZerocheckByteMatchTest(absltest.TestCase):
 
         xi_rows = np.load(_FIXTURE / "outputs" / "xi.npy")
         xi = [ef_from_limbs(jnp.array(row, jnp.uint32)) for row in xi_rows]
-        beta = ef_from_limbs(jnp.array(np.load(_FIXTURE / "outputs" / "beta.npy"), jnp.uint32))
+        beta = ef_from_limbs(
+            jnp.array(np.load(_FIXTURE / "outputs" / "beta.npy"), jnp.uint32)
+        )
+        return meta, l_skip, airs, xi, beta
 
+    def _prove(self, meta, l_skip, airs, xi, beta):
         t = _replay_log(self.values, self.is_sample, meta["stage2_end"])
-        t, proof = prove_batch_constraints(
+        return prove_batch_constraints(
             t,
             l_skip,
             meta["n_logup"],
@@ -97,6 +102,10 @@ class ZerocheckByteMatchTest(absltest.TestCase):
             beta,
             meta["params"]["max_constraint_degree"],
         )
+
+    def test_stage3_matches(self) -> None:
+        meta, l_skip, airs, xi, beta = self._load_case()
+        t, proof = self._prove(meta, l_skip, airs, xi, beta)
 
         np.testing.assert_array_equal(
             _ef_limbs(proof.lambda_)[0], np.load(_FIXTURE / "outputs" / "lambda.npy")
@@ -144,6 +153,36 @@ class ZerocheckByteMatchTest(absltest.TestCase):
         t, nxt = t.sample(1)
         got = int(np.asarray(lax.bitcast_convert_type(nxt, F).astype(jnp.uint32))[0])
         self.assertEqual(got, int(self.values[end]))
+
+    def test_stage3_reuse_after_chain_rebuild(self) -> None:
+        """A rebuilt chain over the same AIR set must re-trace the whole-stage
+        jit without leaking the first trace's tracers into the reused round-0 /
+        MLE-scan kernels, and stay byte-identical (#45).
+
+        ``verify_prove``'s warm pass assembles a fresh chain, so the whole-stage
+        cache misses and the stage re-traces while ``_ROUND0_FNS`` / ``_MLE_SCAN_FNS``
+        are already populated. Building those inner kernels lazily under the first
+        trace captured its tracers, which then escaped into the second trace
+        (``UnexpectedTracerError``); the fix pre-builds them eagerly. Clearing
+        ``_STAGE_FNS`` reproduces the rebuild without touching the inner caches."""
+        from openvm_zorch.logup_zerocheck.prover import _STAGE_FNS
+
+        meta, l_skip, airs, xi, beta = self._load_case()
+        _, first = self._prove(meta, l_skip, airs, xi, beta)
+        _STAGE_FNS.clear()
+        _, second = self._prove(meta, l_skip, airs, xi, beta)
+
+        np.testing.assert_array_equal(
+            _ef_limbs(jnp.stack(first.r)), _ef_limbs(jnp.stack(second.r))
+        )
+        np.testing.assert_array_equal(
+            _ef_limbs(jnp.stack(first.sumcheck_round_polys)),
+            _ef_limbs(jnp.stack(second.sumcheck_round_polys)),
+        )
+        np.testing.assert_array_equal(
+            _ef_limbs(jnp.stack(first.univariate_round_coeffs)),
+            _ef_limbs(jnp.stack(second.univariate_round_coeffs)),
+        )
 
 
 class KernelCacheLifetimeTest(absltest.TestCase):
