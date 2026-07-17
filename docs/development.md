@@ -134,9 +134,12 @@ README).
 
 ### Comparing zorch against the baseline
 
-`verify_prove --baseline <file>` runs a second warm chain pass and prints the
-zorch per-stage `_TimedRound` warm sum against the native e2e number, with the
-delta. The baseline's params must match the fixture's, so pair a
+`verify_prove --baseline <file>` proves the chain cold once (compiles, byte-
+matches), then warm `--runs=N` more times, and prints the zorch per-stage
+`_TimedRound` **converged min** (across warm passes) against the native e2e
+number, with the delta. Use `--runs=5`: the first warm pass has not settled
+(allocator / driver caches) and reads high, so the min over 3–5 passes is the
+number worth pinning. The baseline's params must match the fixture's, so pair a
 production-scale fixture with a production baseline:
 
 ```sh
@@ -146,8 +149,9 @@ production-scale fixture with a production baseline:
 
 # 2. Compare (GPU; drop FRX_PLATFORMS for CPU):
 FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  FRX_COMPILATION_CACHE_DIR=/tmp/frx_cache \
   bazel run //openvm_zorch:verify_prove -- \
-    --fixture_dir /tmp/prove_prod \
+    --fixture_dir /tmp/prove_prod --runs=5 \
     --baseline openvm_zorch/testdata/baseline/native_prod_gpu.json
 ```
 
@@ -155,19 +159,65 @@ Running the committed micro fixture (`testdata/prove`) against a production
 baseline warns about the param mismatch — that combination is only a smoke
 check of the wiring.
 
+### Per-stage comparison (real fibonacci block, GPU)
+
+The living baseline. Regenerate on every perf change and update the numbers so
+the ratios below stay honest. Measured on an **idle RTX 5090** over the real
+openvm fibonacci block (19 AIRs, `tools/real-block-gen`), `frx` pin
+`0.10.0.dev20260716113241`, byte-match **ALL OK**, `--runs=5` converged min:
+
+```sh
+FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  FRX_COMPILATION_CACHE_DIR=/tmp/frx_cache \
+  bazel run //openvm_zorch:verify_prove -- --fixture_dir /tmp/real_fib --runs=5 \
+    --baseline openvm_zorch/testdata/baseline/native_realfib_gpu.json
+```
+
+| stage | zorch warm | native openvm | zorch / native |
+|---|---|---|---|
+| trace commit | 5.7 ms | 4.4 ms | 1.3× |
+| LogUp-GKR | 99.3 ms | 7.2 ms | 13.8× |
+| zerocheck | 154.4 ms | 10.6 ms | 14.6× |
+| stacking | 245.3 ms | 6.2 ms | 39.7× |
+| WHIR | 638.4 ms | 6.0 ms | 106.9× |
+| **full prove** | **1143 ms** | **34.3 ms** | **33.4×** |
+
+Native GKR is the `fractional_sumcheck` span; native zerocheck is
+`prove_zerocheck_and_logup − fractional_sumcheck` (GKR nests inside it). The five
+native per-stage bars sum to the `stark_prove_excluding_trace` e2e span. WHIR is
+the widest gap (~107×) — zorch's WHIR is 56% of its prove but ~2× the native
+stage's *share*.
+
+> **Native per-stage capture.** The native CUDA backend names its phase spans
+> differently from the CPU set — `_gpu`-suffixed for zerocheck/GKR,
+> `prover.openings.*` for stacking/WHIR — so `tools/real-block-gen/dump_fixture.rs`
+> `phase_key` normalizes every backend's name to one canonical `per_stage_s` key
+> (openvm-stark-backend `v2.0.0-beta.2`). All five stages are captured; regenerate
+> the baseline (`--features cuda`, CUDA box) after any prover change.
+
+**Cold is cache-state-dependent, so it is not in the table.** A true first-ever
+cold (empty `FRX_COMPILATION_CACHE_DIR`) compiles zerocheck's whole-stage jit in
+one ~259 s XLA pass (`jit(run)`, 95% of the stage cold) plus WHIR ~75 s. With a
+populated cache a fresh process **loads** the executables instead of recompiling
+(persistent cache hit): zerocheck ~29 s, ~16 s of which is the `jit(run)`
+deserialize. So configure `FRX_COMPILATION_CACHE_DIR` in prod/CI and the 259 s is
+paid once. See #120 for the cold-compile lever discussion.
+
 ### GPU measurement hygiene
 
 - **Idle GPU only.** Shared-GPU contention inflates every stage 2–50× and
   makes the per-stage ranking meaningless (#71).
-- **The first GPU `prove()` is compile-dominated, not kernel-dominated**: the
-  zerocheck constraint DAG unrolls into one giant `jit_scan` kernel that ptxas
-  optimizes for minutes. Two levers (#70):
-  - `FRX_COMPILATION_CACHE_DIR=<dir>` persists compiled modules across process
-    runs, so every run after the first skips the compile. Leave it unset for
-    byte-match gates — a true cold compile is part of the gate.
-  - `XLA_FLAGS=--xla_gpu_force_compilation_parallelism=<cores>` compiles the
-    per-AIR kernels in parallel (~25% off the first compile; complements, not
-    replaces, the cache — the dominant cost is a single serial-ptxas kernel).
+- **The first GPU `prove()` is compile-dominated, not kernel-dominated.** Each
+  stage now lowers as one cached jit, so a true cold pays a single large XLA
+  compile per stage — zerocheck's `jit(run)` is ~259 s (95% of the stage cold,
+  PR #119), WHIR ~75 s. Two levers:
+  - `FRX_COMPILATION_CACHE_DIR=<dir>` persists compiled executables across process
+    runs; every run after the first **loads** them (persistent cache hit) rather
+    than recompiling — zerocheck drops ~259 s → ~29 s (the residual is the
+    `jit(run)` deserialize, not a recompile). Leave it unset for byte-match gates
+    — a true cold compile is part of the gate. See #120.
+  - `XLA_FLAGS=--xla_gpu_force_compilation_parallelism=<cores>` parallelizes the
+    first compile (~25% off; complements, not replaces, the cache).
 - The native GPU prover returns before its kernels finish; fixture-gen's timer
   already brackets `prove` with stream syncs, so the baseline JSONs record real
   completion times — don't re-measure with a bare wall-clock around the call.

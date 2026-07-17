@@ -29,7 +29,6 @@ the first skips the compiles (leave it unset for byte-match gates).
 Exits non-zero on any mismatch.
 """
 
-import dataclasses
 import json
 import os
 import sys
@@ -90,6 +89,15 @@ _STOP_AFTER = flags.DEFINE_string(
     "2^22 ptxas blow-up on GPU at real-block scale -- so an earlier stage can "
     "be timed cold+warm in isolation. Pairs with OPENVM_ZC_PROFILE for the "
     "zerocheck sub-region split.",
+)
+
+_RUNS = flags.DEFINE_integer(
+    "runs",
+    1,
+    "Warm passes to prove in one process (executables reused across passes). "
+    "Reports the converged per-stage MINIMUM across passes -- use >=3 for a "
+    "stable number to pin in docs, since the first warm pass has not settled "
+    "(allocator / driver caches) and can read high.",
 )
 
 _PROVE = Path(__file__).parent / "testdata" / "prove"
@@ -374,6 +382,36 @@ def _compare_baseline(baseline_path: str, params, stage_times: dict) -> None:
                 f"  zorch is {zorch_sum / native:.2f}x SLOWER than native", flush=True
             )
 
+    # Per-stage head-to-head, when the baseline carries native per-stage bars
+    # (`per_stage_s`). Native GKR is `fractional_sumcheck`; native zerocheck is
+    # `prove_zerocheck_and_logup` minus it (GKR nests inside); commit / stacking /
+    # WHIR are their own spans. dump_fixture normalizes the backend-specific span
+    # names into these canonical `per_stage_s` keys.
+    per_stage = baseline.get("per_stage_s")
+    if per_stage:
+
+        def _span(name):
+            e = per_stage.get(name)
+            return e["s"] if isinstance(e, dict) else e
+
+        gkr_n, zclog_n = _span("fractional_sumcheck"), _span("prove_zerocheck_and_logup")
+        native_stage = {
+            "commit": _span("prover.main_trace_commit"),
+            "GKR": gkr_n,
+            "zerocheck": (zclog_n - gkr_n) if (zclog_n and gkr_n) else None,
+            "stacking": _span("prove_stacked_opening_reduction"),
+            "WHIR": _span("prove_whir"),
+        }
+        print("  per-stage (zorch warm / native / ratio, ms):", flush=True)
+        for label in ("commit", "GKR", "zerocheck", "stacking", "WHIR"):
+            z = stage_times.get(label)
+            if z is None:
+                continue
+            n = native_stage.get(label)
+            n_str = f"{n * 1e3:.1f}" if n else "-"
+            ratio = f"{z / n:.1f}x" if n else "-"
+            print(f"    {label:<10} {z * 1e3:8.1f}  {n_str:>7}  {ratio:>6}", flush=True)
+
 
 def main(argv) -> None:
     del argv
@@ -423,14 +461,23 @@ def main(argv) -> None:
     # chain a second time and capture each stage's wall-clock. --stop_after
     # alone also triggers it (per-stage profiling needs no baseline).
     if _BASELINE.value or _STOP_AFTER.value is not None:
-        stage_times: dict = {}
         warm_chain, warm_carry = prove_chain(sponge, comp, params, vk_pre_hash, airs)
-        warm_chain.rounds = [
-            _TimedRound(rnd, record=stage_times)
-            for rnd in _rounds_through(warm_chain.rounds, _STOP_AFTER.value)
-        ]
-        print("\n[warm pass]", flush=True)
-        warm_chain(warm_carry, new_transcript())
+        base_rounds = _rounds_through(warm_chain.rounds, _STOP_AFTER.value)
+        n_runs = max(_RUNS.value, 1)
+        # Report the per-stage MINIMUM across warm passes: the first warm pass
+        # has not settled and reads high, so the min approximates the converged
+        # steady state (the number worth pinning).
+        stage_times: dict = {}
+        print(f"\n[warm pass{'es' if n_runs > 1 else ''}]", flush=True)
+        for _ in range(n_runs):
+            st: dict = {}
+            warm_chain.rounds = [_TimedRound(rnd, record=st) for rnd in base_rounds]
+            warm_chain(warm_carry, new_transcript())
+            for label, dt in st.items():
+                stage_times[label] = min(stage_times.get(label, dt), dt)
+        if n_runs > 1:
+            summary = "  ".join(f"{k} {stage_times[k] * 1e3:.1f}ms" for k in stage_times)
+            print(f"[converged min over {n_runs} passes] {summary}", flush=True)
         # The e2e sum-vs-native comparison is only meaningful for the full chain.
         if _BASELINE.value and _STOP_AFTER.value is None:
             _compare_baseline(_BASELINE.value, params, stage_times)

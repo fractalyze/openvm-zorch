@@ -1,5 +1,5 @@
 {
-  "available_parallelism": 24,
+  "available_parallelism": 32,
   "num_queries": [
     193,
     88,
@@ -16,17 +16,43 @@
     "n_stack": 17,
     "query_phase_pow_bits": 20
   },
-  "platform": "a41-rtx5090",
+  "per_stage_s": {
+    "fractional_sumcheck": {
+      "count": 1,
+      "s": 0.007181194
+    },
+    "prove_stacked_opening_reduction": {
+      "count": 1,
+      "s": 0.006171964
+    },
+    "prove_whir": {
+      "count": 1,
+      "s": 0.005972906
+    },
+    "prove_zerocheck_and_logup": {
+      "count": 1,
+      "s": 0.017734772
+    },
+    "prover.main_trace_commit": {
+      "count": 1,
+      "s": 0.004364582
+    },
+    "stark_prove_excluding_trace": {
+      "count": 1,
+      "s": 0.034261237
+    }
+  },
+  "platform": "local-rtx5090",
   "prove_e2e_s": {
     "runs": [
-      0.040635878,
-      0.035263868,
-      0.081842798,
-      0.035194397,
-      0.034967256
+      0.03864207,
+      0.033985435,
+      0.034125299,
+      0.034106314,
+      0.033946622
     ],
-    "warm_mean": 0.045580839399999996,
-    "warm_min": 0.034967256
+    "warm_mean": 0.034961148000000004,
+    "warm_min": 0.033946622
   },
   "reference": "openvm-stark-backend v2.0.0 (16d60de7), real fibonacci guest (n=100)",
   "runs": 5,

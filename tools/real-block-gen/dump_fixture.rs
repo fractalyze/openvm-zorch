@@ -93,23 +93,35 @@ static SPAN_TIMES: Mutex<Option<BTreeMap<String, (Duration, u64)>>> = Mutex::new
 /// [`measure_spans`].
 static ARMED: AtomicBool = AtomicBool::new(false);
 
-/// The generic coordinator's per-phase `info` spans (see
-/// `openvm-stark-backend` `crates/stark-backend/src/prover`), shared by the CPU
-/// and CUDA backends. `stark_prove_excluding_trace` is the e2e parent (cross-
-/// checks the warm e2e number); the rest are the per-stage bars — `#46` commit,
-/// `#44` GKR, `#45` zerocheck (note `fractional_sumcheck` nests inside
-/// `prove_zerocheck_and_logup`, so the zerocheck-proper bar is their
+/// The canonical (backend-agnostic) `per_stage_s` key for a coordinator phase
+/// span, or `None` if `name` is not one. `stark_prove_excluding_trace` is the
+/// e2e parent (cross-checks the warm e2e number); the rest are the per-stage
+/// bars — `#46` commit, `#44` GKR, `#45` zerocheck (note `fractional_sumcheck`
+/// nests inside `prove_zerocheck_and_logup`, so the zerocheck-proper bar is their
 /// difference), `#43` stacking + WHIR.
-fn is_phase_span(name: &str) -> bool {
-    matches!(
-        name,
-        "stark_prove_excluding_trace"
-            | "prover.main_trace_commit"
-            | "fractional_sumcheck"
-            | "prove_zerocheck_and_logup"
-            | "prove_stacked_opening_reduction"
-            | "prove_whir"
-    )
+///
+/// The CUDA backend does not share the CPU span *names*: the GPU phase functions
+/// carry their own `#[instrument(name = ...)]`, so each `_gpu` bar lands under a
+/// different key than its CPU twin and reads as missing unless normalized here.
+/// GKR/zerocheck take a `_gpu` suffix (`fractional_sumcheck_gpu`,
+/// `prove_zerocheck_and_logup_gpu`); stacking/WHIR use a `prover.openings.*`
+/// name (`prover.openings.stacked_reduction`, `prover.openings.whir`). Map every
+/// backend's name to the one canonical CPU key so `per_stage_s` is
+/// backend-agnostic (openvm-stark-backend v2.0.0-beta.2).
+fn phase_key(name: &str) -> Option<&'static str> {
+    match name {
+        "stark_prove_excluding_trace" => Some("stark_prove_excluding_trace"),
+        "prover.main_trace_commit" => Some("prover.main_trace_commit"),
+        "fractional_sumcheck" | "fractional_sumcheck_gpu" => Some("fractional_sumcheck"),
+        "prove_zerocheck_and_logup" | "prove_zerocheck_and_logup_gpu" => {
+            Some("prove_zerocheck_and_logup")
+        }
+        "prove_stacked_opening_reduction" | "prover.openings.stacked_reduction" => {
+            Some("prove_stacked_opening_reduction")
+        }
+        "prove_whir" | "prover.openings.whir" => Some("prove_whir"),
+        _ => None,
+    }
 }
 
 /// Records each phase span's busy-time into [`SPAN_TIMES`] when armed. A plain
@@ -125,7 +137,7 @@ where
             return;
         }
         let Some(span) = ctx.span(id) else { return };
-        if is_phase_span(span.name()) {
+        if phase_key(span.name()).is_some() {
             span.extensions_mut().insert(Instant::now());
         }
     }
@@ -135,14 +147,12 @@ where
             return;
         }
         let Some(span) = ctx.span(id) else { return };
-        if !is_phase_span(span.name()) {
+        let Some(key) = phase_key(span.name()) else {
             return;
-        }
+        };
         let started = span.extensions_mut().remove::<Instant>();
         if let (Some(started), Some(map)) = (started, SPAN_TIMES.lock().unwrap().as_mut()) {
-            let e = map
-                .entry(span.name().to_string())
-                .or_insert((Duration::ZERO, 0));
+            let e = map.entry(key.to_string()).or_insert((Duration::ZERO, 0));
             e.0 += started.elapsed();
             e.1 += 1;
         }
