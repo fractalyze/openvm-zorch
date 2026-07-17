@@ -21,6 +21,7 @@ py_library(
         "//openvm_zorch:transcript",
         "//openvm_zorch/commit:stacking",
         "//openvm_zorch/logup_zerocheck:prism",
+        "@zorch//zorch/poly",
         "@zorch//zorch:prove",
         "@zorch//zorch:transcript",
         "@zorch//zorch/sumcheck",

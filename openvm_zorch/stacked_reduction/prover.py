@@ -32,6 +32,7 @@ from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, f_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.transcript import sample_ext
+from zorch.poly.univariate import powers
 from zorch.prove import fold_rounds
 from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
 from zorch.sumcheck.prover import RoundMsg, StandardRound
@@ -363,9 +364,23 @@ def prove_stacked_opening_reduction(
             start = i
 
     transcript, lam = sample_ext(transcript)
-    lam_pows = [fnp.ones((), EF)]
-    for _ in range(lam_count - 1):
-        lam_pows.append(lam_pows[-1] * lam)
+    lam_pows = powers(lam, lam_count)
+    # Views reserve two powers each, in order (see above), so view i takes
+    # λ^{2i} / λ^{2i+1}: the weights are just the even and odd strides, and a
+    # group — a contiguous run of views — is a slice of them. No per-view index
+    # vector, and nothing rebuilt per group.
+    lam_eq_all = lam_pows[0::2]
+    lam_rot_all = fnp.where(
+        fnp.array([v.lam_rot is not None for v in views]),
+        lam_pows[1::2],
+        fnp.zeros((), EF),
+    )
+    # `_eqw_columns` indexes per view, so it gets the vector pre-sliced: `list`
+    # unstacks in jitted chunks (~30 dispatches), where indexing the array per
+    # view would cost a device slice each (~723, measured 253 ms against this
+    # 197 ms). The list is a waypoint, not a design: gather-assembling
+    # `_eqw_columns` the way the input layer assembles its columns retires it.
+    lam_pows_per_view = list(lam_pows)
 
     omega = prism.omega_int(l_skip)
     r_0 = r[0]
@@ -425,13 +440,10 @@ def prove_stacked_opening_reduction(
             ],
             axis=1,
         )
-        lam_eq_w = fnp.stack([lam_pows[v.lam_eq] for v in g_views])
-        lam_rot_w = fnp.stack(
-            [
-                lam_pows[v.lam_rot] if v.lam_rot is not None else fnp.zeros((), EF)
-                for v in g_views
-            ]
-        )
+        # Slice the strided weights: a per-view `stack` here took one operand per
+        # view — 723 on the real block, ~104 ms of the stage.
+        lam_eq_w = lam_eq_all[g_start:g_end]
+        lam_rot_w = lam_rot_all[g_start:g_end]
         l_eff, omega_eff, r_uni = _uni_kernel_args(l_skip, n, omega, r_0)
         # (num_cosets, 2^l_skip, 2^ñ_T windows, columns) — coset_evals stays
         # eager; only the kernel-eval + contraction is jitted.
@@ -484,7 +496,7 @@ def prove_stacked_opening_reduction(
         eq_tables,
         k_rot_tables,
         views,
-        lam_pows,
+        lam_pows_per_view,
         u,
         n_stack,
     )
