@@ -33,6 +33,7 @@ from openvm_zorch.commit.trace_commit import stacked_commit
 from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import (
     FracSumcheckProof,
+    empty_frac_sumcheck_proof,
     fractional_sumcheck,
     pad_xi,
 )
@@ -339,12 +340,19 @@ class GkrStage(Stage):
     ξ onto the carry for ZeroCheck."""
 
     def __init__(
-        self, *, l_skip: int, n_logup: int, n_global: int, logup_pow_bits: int
+        self,
+        *,
+        l_skip: int,
+        n_logup: int,
+        n_global: int,
+        logup_pow_bits: int,
+        total_interactions: int,
     ) -> None:
         self._l_skip = l_skip
         self._n_logup = n_logup
         self._n_global = n_global
         self._logup_pow_bits = logup_pow_bits
+        self._total_interactions = total_interactions
 
     def __call__(
         self, carry: ProveCarry, transcript: DuplexTranscript
@@ -352,18 +360,27 @@ class GkrStage(Stage):
         transcript, logup_pow_witness = grind(transcript, self._logup_pow_bits)
         transcript, alpha = sample_ext(transcript)
         transcript, beta = sample_ext(transcript)
-        num, den = gkr_input_evals(
-            self._l_skip,
-            self._n_logup,
-            [a.trace for a in carry.sorted_airs],
-            [a.dag for a in carry.sorted_airs],
-            [a.public_values for a in carry.sorted_airs],
-            [a.needs_next for a in carry.sorted_airs],
-            [a.cached_mains for a in carry.sorted_airs],
-            alpha,
-            beta,
-        )
-        transcript, gkr_proof, xi = fractional_sumcheck(transcript, num, den)
+        if self._total_interactions > 0:
+            num, den = gkr_input_evals(
+                self._l_skip,
+                self._n_logup,
+                [a.trace for a in carry.sorted_airs],
+                [a.dag for a in carry.sorted_airs],
+                [a.public_values for a in carry.sorted_airs],
+                [a.needs_next for a in carry.sorted_airs],
+                [a.cached_mains for a in carry.sorted_airs],
+                alpha,
+                beta,
+            )
+            transcript, gkr_proof, xi = fractional_sumcheck(transcript, num, den)
+        else:
+            # No interactions: the reference builds an empty GKR input layer, so
+            # ``fractional_sumcheck`` is a no-op — it neither absorbs into the
+            # transcript nor produces any ξ. The verifier gates ``verify_gkr`` on
+            # the same ``total_interactions == 0`` (verifier/batch_constraints.rs),
+            # so skipping it here keeps both sides' transcript and ξ in lockstep.
+            gkr_proof = empty_frac_sumcheck_proof(alpha.dtype)
+            xi = []
         transcript, xi = pad_xi(transcript, xi, self._l_skip + self._n_global)
         carry = replace(carry, beta=beta, xi=xi)
         return carry, transcript, GkrStageMsg(logup_pow_witness, gkr_proof, xi)
@@ -562,6 +579,7 @@ def prove_chain(
                 n_logup=n_logup,
                 n_global=n_global,
                 logup_pow_bits=params.logup_pow_bits,
+                total_interactions=total_interactions,
             ),
             ZeroCheckStage(
                 l_skip=l_skip,
