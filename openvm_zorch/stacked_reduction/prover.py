@@ -30,7 +30,7 @@ import numpy as np
 from frx import Array, lax
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
-from openvm_zorch.fields import EF, MODULUS, f_const, f_to_ef
+from openvm_zorch.fields import EF, F, MODULUS, f_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.transcript import sample_ext
 from zorch.poly.univariate import powers
@@ -70,7 +70,10 @@ class _TraceView:
     lam_rot: int | None
 
 
+@functools.cache
 def _ef_const(value: int) -> Array:
+    # A few distinct host ints (ω and its powers) recur across the groups; each
+    # miss builds a device scalar, so cache them.
     return f_to_ef(f_const(value))
 
 
@@ -485,22 +488,20 @@ def prove_stacked_opening_reduction(
     # reduction order does not change s_0).
     num_cosets = 2  # q · (eq or κ_rot) is degree 2 per variable
     size = 1 << l_skip
-    # z[c, k] = g^{c+1}·ω^k, the z-index of coset c (host ints → one EF grid).
-    z_grid = fnp.stack(
+    # z[c, k] = g^{c+1}·ω^k, the z-index of coset c: the host ints become one
+    # base-field array, embedded into EF in a single op rather than a scalar
+    # `_ef_const` per cell nested in two stacks.
+    z_ints = np.array(
         [
-            fnp.stack(
-                [
-                    _ef_const(
-                        pow(prism.GENERATOR, c + 1, MODULUS)
-                        * pow(omega, k, MODULUS)
-                        % MODULUS
-                    )
-                    for k in range(size)
-                ]
-            )
+            [
+                pow(prism.GENERATOR, c + 1, MODULUS) * pow(omega, k, MODULUS) % MODULUS
+                for k in range(size)
+            ]
             for c in range(num_cosets)
-        ]
-    )  # (num_cosets, size) EF
+        ],
+        dtype=np.int64,
+    )
+    z_grid = f_to_ef(fnp.array(z_ints, F))  # (num_cosets, size) EF
     eq_uni_1_grid = prism.eval_eq_uni_at_one(l_skip, z_grid)  # group-invariant
 
     # One flat source for every group's q-column gather: the base-field stacked
