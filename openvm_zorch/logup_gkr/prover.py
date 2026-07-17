@@ -143,6 +143,24 @@ def _eq_table(xi: list[Array]) -> Array:
     return expand_eq_to_hypercube(point, fnp.ones((), point.dtype))
 
 
+def empty_frac_sumcheck_proof(ef_dtype) -> FracSumcheckProof:
+    """The GKR proof for an instance with no interactions.
+
+    When the input layer is empty the reference's ``fractional_sumcheck``
+    early-returns ``fractional_sum = (0, 1)`` with empty layer claims and
+    sumcheck polys, and an empty ξ — touching neither the transcript nor ξ
+    (fractional_sumcheck_gkr.rs:65). ``q0_claim`` carries the denominator 1; the
+    numerator is the implicit zero the root balance already satisfies."""
+    return FracSumcheckProof(
+        q0_claim=fnp.ones((), ef_dtype),
+        claims_per_layer=[],
+        sumcheck_polys=[],
+        lambdas=[],
+        mus=[],
+        rhos=[],
+    )
+
+
 def fractional_sumcheck(
     transcript: DuplexTranscript, num: Array, den: Array
 ) -> tuple[DuplexTranscript, FracSumcheckProof, list[Array]]:

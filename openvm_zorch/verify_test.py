@@ -162,6 +162,41 @@ class VerifyTest(parameterized.TestCase):
     def test_accepts_honest_proof(self) -> None:
         self._verify(self.proof)  # must not raise
 
+    def test_accepts_instance_with_no_interactions(self) -> None:
+        """An instance where no AIR declares an interaction still round-trips.
+
+        AIR 0 is the fixture's only constraints-only AIR, so proving it alone is
+        the whole instance's ``total_interactions == 0`` case. The verifier skips
+        the GKR entirely there (reference batch_constraints.rs gates
+        ``verify_gkr`` on the same count), so the prover has to skip it too — its
+        reference builds an empty input layer, which makes ``fractional_sumcheck``
+        a no-op that touches neither the transcript nor ξ. Proving a real GKR over
+        an all-(0/α) layer instead desynchronizes both, and every earlier Stage-3
+        check is vacuously ``0 == 0`` without interactions, so it surfaces only at
+        the final claim.
+        """
+        airs = [a for a in self.airs if not a.dag.interactions]
+        vks = [v for v in self.vks if not v.dag.interactions]
+        self.assertEqual(len(airs), 1, "fixture should have exactly one such AIR")
+        _, proof = prove(
+            new_transcript(),
+            self.sponge,
+            self.comp,
+            self.params,
+            self.meta["vk_pre_hash"],
+            airs,
+        )
+        verify(  # must not raise
+            new_transcript(),
+            self.sponge,
+            self.comp,
+            self.params,
+            self.meta["vk_pre_hash"],
+            vks,
+            proof.common_main_commit,
+            proof,
+        )
+
     @parameterized.named_parameters(*_TAMPERS.items())
     def test_rejects_tampered(self, mutate) -> None:
         """Each mutator perturbs one field of an otherwise-honest proof; the
