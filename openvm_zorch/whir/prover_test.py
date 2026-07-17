@@ -21,12 +21,9 @@ from frx import lax
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.commit.trace_commit import stacked_commit
-from openvm_zorch.poseidon2.babybear16 import babybear16_params
+from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 from openvm_zorch.transcript import ef_from_limbs, new_transcript
 from openvm_zorch.whir.prover import WhirConfig, prove_whir_opening
-from zorch.hash.compression import Compression, CompressionParams
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
-from zorch.hash.sponge import Sponge, SpongeParams
 
 _FIXTURE = Path(__file__).parent / "testdata" / "whir"
 
@@ -75,9 +72,7 @@ class WhirByteMatchTest(absltest.TestCase):
 
         # Recommit the sorted traces with the Stage-1 code; the root must
         # reproduce the prelude's common-main commitment (log values [8..16]).
-        perm = Poseidon2(babybear16_params())
-        sponge = Sponge(perm, SpongeParams(rate=8, out=8))
-        comp = Compression(perm, CompressionParams(arity=2, chunk=8))
+        sponge, comp = babybear16_hasher()
         traces = [
             fnp.array(np.load(_FIXTURE / "inputs" / f"trace_{air_idx}.npy"), dtype=F)
             for air_idx in meta["sorted_airs"]

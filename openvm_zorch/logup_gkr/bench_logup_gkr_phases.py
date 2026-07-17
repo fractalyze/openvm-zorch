@@ -47,23 +47,12 @@ from openvm_zorch.bench_common import array_leaves
 from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import fractional_sumcheck
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
-from openvm_zorch.poseidon2.babybear16 import babybear16_params
+from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 from openvm_zorch.prove import AirInstance, SystemParams, prove_chain
 from openvm_zorch.transcript import grind, new_transcript, sample_ext
 from openvm_zorch.whir.prover import WhirConfig
-from zorch.hash.compression import Compression, CompressionParams
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
-from zorch.hash.sponge import Sponge, SpongeParams
 
 _OPS = ("grind", "input_evals", "frac_sumcheck", "total")
-
-
-def _poseidon2():
-    perm = Poseidon2(babybear16_params())
-    return (
-        Sponge(perm, SpongeParams(rate=8, out=8)),
-        Compression(perm, CompressionParams(arity=2, chunk=8)),
-    )
 
 
 def _load_instance(prove_dir):
@@ -141,7 +130,7 @@ class LogupGkrPhasesBenchmark(FrxBenchmark):
         ops = set(args.ops)
         prove_dir = Path(args.fixture_dir)
         params, vk_pre_hash, airs = _load_instance(prove_dir)
-        sponge, comp = _poseidon2()
+        sponge, comp = babybear16_hasher()
 
         chain, carry0 = prove_chain(sponge, comp, params, vk_pre_hash, airs)
         commit, gkr = chain.rounds[0], chain.rounds[1]

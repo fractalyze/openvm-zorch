@@ -18,10 +18,7 @@ from zk_dtypes import babybear_mont as F
 from openvm_zorch.commit.rs_message import rs_code_matrix
 from openvm_zorch.commit.stacking import stacked_matrix
 from openvm_zorch.commit.trace_commit import stacked_commit
-from openvm_zorch.poseidon2.babybear16 import babybear16_params
-from zorch.hash.compression import Compression, CompressionParams
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
-from zorch.hash.sponge import Sponge, SpongeParams
+from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 
 _FIXTURE = Path(__file__).parent / "testdata" / "stacked_commit"
 
@@ -54,9 +51,7 @@ class TraceCommitByteMatchTest(absltest.TestCase):
         )
 
     def test_commit_matches(self) -> None:
-        perm = Poseidon2(babybear16_params())
-        sponge = Sponge(perm, SpongeParams(rate=8, out=8))
-        comp = Compression(perm, CompressionParams(arity=2, chunk=8))
+        sponge, comp = babybear16_hasher()
         root, data = stacked_commit(
             sponge,
             comp,

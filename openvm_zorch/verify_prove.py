@@ -44,7 +44,7 @@ from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.bench_common import array_leaves
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
-from openvm_zorch.poseidon2.babybear16 import babybear16_params
+from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 from openvm_zorch.prove import (
     AirInstance,
     CommitStage,
@@ -58,9 +58,6 @@ from openvm_zorch.prove import (
 )
 from openvm_zorch.transcript import new_transcript
 from openvm_zorch.whir.prover import WhirConfig
-from zorch.hash.compression import Compression, CompressionParams
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
-from zorch.hash.sponge import Sponge, SpongeParams
 from zorch.round import Round
 
 _FIXTURE_DIR = flags.DEFINE_string(
@@ -157,14 +154,6 @@ class _TimedRound(Round):
             self._record[label] = dt
         print(f"[stage {label}] {dt:.1f}s", flush=True)
         return out
-
-
-def _poseidon2():
-    perm = Poseidon2(babybear16_params())
-    return (
-        Sponge(perm, SpongeParams(rate=8, out=8)),
-        Compression(perm, CompressionParams(arity=2, chunk=8)),
-    )
 
 
 def _load_instance(prove_dir):
@@ -417,7 +406,7 @@ def main(argv) -> None:
     del argv
     prove_dir = Path(_FIXTURE_DIR.value) if _FIXTURE_DIR.value else _PROVE
     params, vk_pre_hash, airs, obs_log = _load_instance(prove_dir)
-    sponge, comp = _poseidon2()
+    sponge, comp = babybear16_hasher()
 
     heights = [int(a.trace.shape[0]) for a in airs]
     print(f"backend={frx.default_backend()} devices={frx.devices()}")

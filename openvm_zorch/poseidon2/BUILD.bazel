@@ -10,6 +10,8 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "@zorch//zorch/hash:compression",
+        "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("frx"),
         requirement("numpy"),
@@ -24,8 +26,6 @@ py_test(
     data = ["//openvm_zorch/commit:testdata"],
     deps = [
         ":babybear16",
-        "@zorch//zorch/hash:compression",
-        "@zorch//zorch/hash:sponge",
         "@zorch//zorch/hash/poseidon2",
         requirement("absl_py"),
         requirement("frx"),
