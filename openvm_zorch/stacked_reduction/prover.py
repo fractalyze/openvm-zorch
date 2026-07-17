@@ -482,20 +482,15 @@ def prove_stacked_opening_reduction(
     # reduction order does not change s_0).
     num_cosets = 2  # q · (eq or κ_rot) is degree 2 per variable
     size = 1 << l_skip
-    # z[c, k] = g^{c+1}·ω^k, the z-index of coset c: the host ints become one
-    # base-field array, embedded into EF in a single op rather than a scalar
-    # `_ef_const` per cell nested in two stacks.
-    z_ints = np.array(
-        [
-            [
-                pow(prism.GENERATOR, c + 1, MODULUS) * pow(omega, k, MODULUS) % MODULUS
-                for k in range(size)
-            ]
-            for c in range(num_cosets)
-        ],
-        dtype=np.int64,
-    )
-    z_grid = f_to_ef(fnp.array(z_ints, F))  # (num_cosets, size) EF
+    # z[c, k] = g^{c+1}·ω^k, the z-index of coset c, in the field algebra: the
+    # per-coset geometric shift g^{c+1} times the ω-power table `[1, ω, …]`, as
+    # babybear elements (field `**` / `powers`, no host-side modular arithmetic),
+    # embedded into EF. One multiply over the tiny (num_cosets, size) grid — a far
+    # cry from the scalar `_ef_const` per cell nested in two stacks it replaced.
+    g = fnp.array(prism.GENERATOR, F)
+    omega_f = fnp.array(omega, F)
+    shifts = fnp.stack([g ** (c + 1) for c in range(num_cosets)])  # (num_cosets,) F
+    z_grid = f_to_ef(shifts[:, None] * powers(omega_f, size))  # (num_cosets, size) EF
     eq_uni_1_grid = prism.eval_eq_uni_at_one(l_skip, z_grid)  # group-invariant
 
     # One flat source for every group's q-column gather: the base-field stacked
