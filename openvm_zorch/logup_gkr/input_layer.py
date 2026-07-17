@@ -125,6 +125,93 @@ def _air_pairs(
     return _run
 
 
+# The stacked (count, denom) assembly + gather, cached per AIR set + trace
+# heights (``id(dag)``, weakref-evicted — same discipline as ``_air_eval_cache``).
+# Run eagerly it was a per-interaction-column op swarm (``f_to_ef`` / broadcast /
+# lift-``norm`` / ``concatenate`` / two ``take``), ~68 ms of pure host dispatch at
+# ~0 device — 60% of the whole GKR stage (#44). One jit collapses it to a single
+# launch. ``gather_idx`` and the lift factors are Python-int-derived — built once
+# in the builder, not re-derived per trace; ``pairs`` and ``alpha`` are the only
+# device operands. Byte-identical: the same ops in the same order, one jit
+# boundary (jit fuses without reassociating field ops).
+_assemble_cache: dict[tuple, Callable[..., tuple[Array, Array]]] = {}
+
+
+def _assemble(
+    l_skip: int,
+    n_logup: int,
+    dags: Sequence[ConstraintsDag],
+    trace_heights: Sequence[int],
+    sorted_cols: Sequence[tuple[int, int, Any]],
+) -> Callable[..., tuple[Array, Array]]:
+    """Builder for the assembly kernel; see ``_assemble_cache``. ``pairs`` is the
+    per-AIR ``(count, denom)`` list (``pairs[t][i]`` for column ``(t, i)``); the
+    rest is static and closed over."""
+    key = (tuple((id(d), h) for d, h in zip(dags, trace_heights)), l_skip, n_logup)
+    hit = _assemble_cache.get(key)
+    if hit is not None:
+        return hit
+
+    modulus = pfinfo(F).modulus
+    size = 1 << (l_skip + n_logup)
+
+    # gather_idx and the inverse lift factors are static (Python-int-derived);
+    # build them once here rather than at every trace. Slot ``row_idx + j`` reads
+    # source row ``j % height`` of its column; off-image slots (-1) route to a
+    # zero sentinel appended at ``base``. ``norms[c]`` is column c's inverse
+    # cyclic-lift factor, or None when its height needs no lift.
+    gather_idx = np.full(size, -1, dtype=np.int32)
+    norms: list[int | None] = []
+    base = 0
+    for trace_idx, _, s in sorted_cols:
+        height = trace_heights[trace_idx]
+        length = 1 << s.log_height
+        gather_idx[s.row_idx : s.row_idx + length] = base + np.arange(length) % height
+        base += height
+        reps = length // height
+        norms.append(pow(reps, modulus - 2, modulus) if length != height else None)
+    gather_idx[gather_idx < 0] = base
+
+    @frx.jit
+    def _run(pairs, alpha):
+        counts: list[Array] = []
+        denoms: list[Array] = []
+        for (trace_idx, int_idx, _), norm_int in zip(sorted_cols, norms):
+            count, denom = pairs[trace_idx][int_idx]
+            height = trace_heights[trace_idx]
+
+            # eval_interactions returns count in whatever field its expression
+            # evaluates to (base for a column/constant product; extension once a
+            # challenge enters); promote to EF so num is uniformly EF.
+            count = f_to_ef(count) if count.dtype == F else count
+            # A pure-constant count/denom (no trace column — a real-block case the
+            # column-only synthetic fixture never hit) evaluates to a scalar;
+            # broadcast to the row axis the cyclic lift assumes.
+            if count.ndim == 0:
+                count = fnp.broadcast_to(count, (height,))
+            if denom.ndim == 0:
+                denom = fnp.broadcast_to(denom, (height,))
+            if norm_int is not None:
+                # Cyclic lift repeats rows; the numerator carries the inverse lift
+                # factor so the fraction-sum is unchanged.
+                count = count * f_to_ef(fnp.array(norm_int, F))
+
+            counts.append(count)
+            denoms.append(denom)
+
+        zero = fnp.zeros((1,), EF)
+        count_flat = fnp.concatenate([*counts, zero])
+        denom_flat = fnp.concatenate([*denoms, zero])
+        num = fnp.take(count_flat, gather_idx, axis=0)
+        den = fnp.take(denom_flat, gather_idx, axis=0)
+        return num, den + alpha
+
+    _assemble_cache[key] = _run
+    for d in dags:
+        weakref.finalize(d, _assemble_cache.pop, key, None)
+    return _run
+
+
 def gkr_input_evals(
     l_skip: int,
     n_logup: int,
@@ -173,65 +260,15 @@ def gkr_input_evals(
             continue
         pairs.append(_air_pairs(dag, pubs, nxt)(trace, tuple(cached), beta_pows))
 
-    modulus = pfinfo(F).modulus
-    size = 1 << (l_skip + n_logup)
-
-    # Assemble (num, den) on H by a single on-device gather rather than a
-    # per-column ``.at[].set()`` scatter loop: scatters serialize on GPU (the
-    # gather-not-scatter lesson from #78), and one scatter per interaction
-    # column was the eager dispatch storm left in ``input_evals`` after #85.
-    #
-    # Each column contributes its full-height ``(count, denom)`` once to a flat
-    # buffer; a static ``gather_idx`` then maps every hypercube slot to the
-    # source row it reads, encoding both the column's ``row_idx`` offset and the
-    # cyclic lift (``j % height``). Off-image slots point at an appended zero
-    # sentinel, reproducing the additive identity ``0/α`` the old zero-init +
-    # ``den += α`` guard produced. The index is built from the static layout
-    # (heights / row offsets are Python ints), so it costs no device ops.
-    counts: list[Array] = []
-    denoms: list[Array] = []
-    gather_idx = np.full(size, -1, dtype=np.int32)  # -1 → zero sentinel
-    base = 0
-    for trace_idx, int_idx, s in layout.sorted_cols:
-        count, denom = pairs[trace_idx][int_idx]
-        height = traces[trace_idx].shape[0]
-        length = 1 << s.log_height
-
-        # eval_interactions returns count in whatever field its expression
-        # evaluates to (base when a column/constant product, as the synthetic
-        # fixture is; extension once a challenge enters); promote to EF up front
-        # so num is uniformly EF and the lift norm stays in one field.
-        count = f_to_ef(count) if count.dtype == F else count
-        # A count/denom whose expression is a pure constant (no trace column)
-        # evaluates to a scalar — a real-block case the synthetic fixture, whose
-        # interaction fields were always columns, never hit. The field is the
-        # same on every row, so broadcast it to the row axis before the cyclic
-        # lift below (which assumes a per-row ``(height,)`` vector).
-        if count.ndim == 0:
-            count = fnp.broadcast_to(count, (height,))
-        if denom.ndim == 0:
-            denom = fnp.broadcast_to(denom, (height,))
-        reps = length // height
-        if length != height:
-            # Lifting repeats the rows cyclically; the numerator carries the
-            # inverse lift factor so the fraction-sum is unchanged.
-            norm = f_to_ef(fnp.array(pow(reps, modulus - 2, modulus), F))
-            count = count * norm
-
-        counts.append(count)
-        denoms.append(denom)
-        # Slot ``row_idx + j`` reads source row ``j % height`` of this column.
-        gather_idx[s.row_idx : s.row_idx + length] = base + np.arange(length) % height
-        base += height
-
-    # Append the zero sentinel at index ``base`` (the total source height) and
-    # route every off-image slot to it.
-    zero = fnp.zeros((1,), EF)
-    count_flat = fnp.concatenate([*counts, zero])
-    denom_flat = fnp.concatenate([*denoms, zero])
-    gather_idx[gather_idx < 0] = base
-
-    idx = fnp.asarray(gather_idx)
-    num = fnp.take(count_flat, idx, axis=0)
-    den = fnp.take(denom_flat, idx, axis=0)
-    return num, den + alpha
+    # Assemble (num, den) on H inside one cached kernel (see ``_assemble``). Each
+    # column contributes its full-height ``(count, denom)`` once to a flat buffer;
+    # a static ``gather_idx`` maps every hypercube slot to the source row it reads,
+    # encoding both the column's ``row_idx`` offset and the cyclic lift
+    # (``j % height``) — a single on-device gather, not a per-column scatter
+    # (scatters serialize on GPU; the gather-not-scatter lesson from #78). Off-image
+    # slots point at an appended zero sentinel, reproducing the additive identity
+    # ``0/α`` the old zero-init + ``den += α`` guard produced.
+    trace_heights = [t.shape[0] for t in traces]
+    return _assemble(l_skip, n_logup, dags, trace_heights, layout.sorted_cols)(
+        pairs, alpha
+    )
