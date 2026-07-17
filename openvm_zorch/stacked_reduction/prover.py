@@ -199,26 +199,24 @@ class _StackingRound(StandardRound):
         return fold(folded, r), transcript, RoundMsg(msg, r)
 
 
-_EQW_GATHER_CACHE: dict[tuple, Array] = {}
-
-
-def _eqw_gather_index(
-    l_skip: int, commit_views: Sequence[_TraceView], width: int, height: int
-) -> Array:
+@functools.lru_cache(maxsize=128)
+def _eqw_gather_index(key: tuple) -> Array:
     """Device gather index placing each view's weight block into the
     ``(height, width)`` eqw matrix; sentinel 0 fills the gaps and zero tail.
-    Pure function of the layout — memoized by ``_eqw_columns``, mirroring
-    ``commit/stacking.py``'s ``_gather_index``.
+    Pure function of the layout — ``key`` is the hashable
+    ``(l_skip, width, height, (col_idx, row_idx, log_height)…)`` ``_eqw_columns``
+    builds. Mirrors ``commit/stacking.py``'s ``_gather_index``, lru-bounded so the
+    device indices can't accumulate without limit across proof shapes.
 
     A view's length-``2^ñ`` weight vector lands in stacked column ``col_idx`` at
     cube offset ``row_idx >> l_skip``: the skip domain is round 0's, so the cube
     position is the stacked row shifted past it (equivalently, the running sum of
     the earlier blocks in the column)."""
+    l_skip, width, height, views = key
     dest = []
-    for v in commit_views:
-        s = v.slice
-        blen = 1 << max(s.log_height - l_skip, 0)
-        dest.append(((s.row_idx >> l_skip) + np.arange(blen)) * width + s.col_idx)
+    for col_idx, row_idx, log_height in views:
+        blen = 1 << max(log_height - l_skip, 0)
+        dest.append(((row_idx >> l_skip) + np.arange(blen)) * width + col_idx)
     gather = np.zeros((height * width,), np.int64)
     if dest:
         dest_flat = np.concatenate(dest)
@@ -274,37 +272,33 @@ def _eqw_columns(
             for v in commit_views
         ),
     )
-    gather = _EQW_GATHER_CACHE.get(key)
-    if gather is None:
-        gather = _eqw_gather_index(l_skip, commit_views, width, height)
-        _EQW_GATHER_CACHE[key] = gather
     src = fnp.concatenate([fnp.zeros((1,), EF)] + blocks)
-    return fnp.take(src, gather).reshape(height, width)
+    return fnp.take(src, _eqw_gather_index(key)).reshape(height, width)
 
 
-_Q_COLS_GATHER_CACHE: dict[tuple, Array] = {}
-
-
-def _q_cols_gather_index(
-    l_skip: int,
-    g_views: Sequence[_TraceView],
-    mat_offsets: Sequence[int],
-    mat_widths: Sequence[int],
-) -> Array:
+@functools.lru_cache(maxsize=128)
+def _q_cols_gather_index(key: tuple) -> Array:
     """Device gather index building a group's ``(lifted_len, group_size)`` q
-    block from the flat stacked-matrix source. Pure function of the layout;
-    memoized per group, mirroring ``commit/stacking.py``'s ``_gather_index``.
+    block from the flat stacked-matrix source. Pure function of the layout —
+    ``key`` is the hashable ``(l_skip, ((h, w)…), (com_idx, row, col, lht)…)``;
+    the per-commit source offsets are derived from the matrix shapes, matching
+    the ``q_src`` concat order. Mirrors ``commit/stacking.py``'s ``_gather_index``,
+    lru-bounded like ``_eqw_gather_index``.
 
     A view's round-0 claim is the contiguous column segment
     ``mat[row:row+lifted, col]`` — a stride-``width`` run in the row-major flat
     matrix, shifted to its commit's span in the shared source. Column ``k`` of
     the block is view ``k``, reproducing the axis-1 stack it replaces."""
-    lifted = g_views[0].slice.lifted_len(l_skip)
+    l_skip, mat_shapes, views = key
+    mat_widths = [w for _h, w in mat_shapes]
+    mat_offsets, off = [], 1
+    for h, w in mat_shapes:
+        mat_offsets.append(off)
+        off += h * w
+    lifted = 1 << max(views[0][3], l_skip)
     cols = [
-        mat_offsets[v.com_idx]
-        + v.slice.col_idx
-        + (v.slice.row_idx + np.arange(lifted)) * mat_widths[v.com_idx]
-        for v in g_views
+        mat_offsets[com_idx] + col_idx + (row_idx + np.arange(lifted)) * mat_widths[com_idx]
+        for com_idx, row_idx, col_idx, _lht in views
     ]
     return fnp.asarray(np.stack(cols, axis=1).reshape(-1))
 
@@ -509,14 +503,9 @@ def prove_stacked_opening_reduction(
     # segment is a stride-`width` run). Each group then gathers its views'
     # segments in one `fnp.take` instead of a slice-and-stack per view — 723
     # slices + stacks on the real block, ~68 ms of the stage (commit/stacking.py
-    # recipe). Each group's index is a pure function of the layout, memoized.
-    mat_widths = [mat.shape[1] for mat, _ in stacked_per_commit]
+    # recipe). Each group's index is a pure function of the layout, memoized;
+    # the matrix shapes carry the per-commit source offsets into it.
     mat_shapes = tuple((mat.shape[0], mat.shape[1]) for mat, _ in stacked_per_commit)
-    mat_offsets: list[int] = []
-    off = 1
-    for mat, _ in stacked_per_commit:
-        mat_offsets.append(off)
-        off += mat.shape[0] * mat.shape[1]
     q_src = fnp.concatenate(
         [fnp.zeros((1,), stacked_per_commit[0][0].dtype)]
         + [mat.reshape(-1) for mat, _ in stacked_per_commit]
@@ -538,11 +527,7 @@ def prove_stacked_opening_reduction(
                 for v in g_views
             ),
         )
-        q_idx = _Q_COLS_GATHER_CACHE.get(key)
-        if q_idx is None:
-            q_idx = _q_cols_gather_index(l_skip, g_views, mat_offsets, mat_widths)
-            _Q_COLS_GATHER_CACHE[key] = q_idx
-        q_cols = fnp.take(q_src, q_idx).reshape(
+        q_cols = fnp.take(q_src, _q_cols_gather_index(key)).reshape(
             g_views[0].slice.lifted_len(l_skip), len(g_views)
         )
         # Slice the strided weights: a per-view `stack` here took one operand per
