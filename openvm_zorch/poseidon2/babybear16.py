@@ -24,7 +24,10 @@ import frx.numpy as fnp
 import numpy as np
 from zk_dtypes import babybear_mont as F
 
+from zorch.hash.compression import Compression, CompressionParams
 from zorch.hash.poseidon2.params import Poseidon2Params
+from zorch.hash.poseidon2.poseidon2 import Poseidon2
+from zorch.hash.sponge import Sponge, SpongeParams
 
 _WIDTH, _ER, _IR, _ALPHA = 16, 4, 13, 7
 
@@ -116,4 +119,25 @@ def babybear16_params() -> Poseidon2Params:
         external_constants_terminal=fnp.array(_EXTERNAL_TERMINAL, dtype=F),
         internal_constants=fnp.array(internal_rc, dtype=F),
         internal_diag=fnp.array(_INTERNAL_DIAG, dtype=F),
+    )
+
+
+# The Merkle hasher's shape around that permutation: an 8-element digest,
+# absorbed 8 at a time, compressed 2-to-1 — the reference's
+# ``Poseidon2Sponge`` / ``Poseidon2Compression`` over the width-16 instance.
+_RATE = 8
+_DIGEST = 8
+_ARITY = 2
+
+
+def babybear16_hasher() -> tuple[Sponge, Compression]:
+    """OpenVM's Merkle hasher: the sponge and the 2-to-1 compression.
+
+    Both wrap ONE permutation — they are the same Poseidon2 instance used two
+    ways, and building it twice would only pay for the round constants twice.
+    """
+    perm = Poseidon2(babybear16_params())
+    return (
+        Sponge(perm, SpongeParams(rate=_RATE, out=_DIGEST)),
+        Compression(perm, CompressionParams(arity=_ARITY, chunk=_DIGEST)),
     )

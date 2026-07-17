@@ -25,13 +25,10 @@ from frx import lax
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
-from openvm_zorch.poseidon2.babybear16 import babybear16_params
+from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 from openvm_zorch.prove import AirInstance, Proof, SystemParams, prove
 from openvm_zorch.transcript import new_transcript
 from openvm_zorch.whir.prover import WhirConfig
-from zorch.hash.compression import Compression, CompressionParams
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
-from zorch.hash.sponge import Sponge, SpongeParams
 
 _TESTDATA = Path(__file__).parent
 _GKR = _TESTDATA / "logup_gkr" / "testdata" / "logup_gkr"
@@ -39,14 +36,6 @@ _ZEROCHECK = _TESTDATA / "logup_zerocheck" / "testdata" / "zerocheck"
 _STACKING = _TESTDATA / "stacked_reduction" / "testdata" / "stacking"
 _WHIR = _TESTDATA / "whir" / "testdata" / "whir"
 _PROVE = _TESTDATA / "testdata" / "prove"  # self-contained, production-shaped
-
-
-def _poseidon2():
-    perm = Poseidon2(babybear16_params())
-    return (
-        Sponge(perm, SpongeParams(rate=8, out=8)),
-        Compression(perm, CompressionParams(arity=2, chunk=8)),
-    )
 
 
 def _ef_limbs(x) -> np.ndarray:
@@ -110,7 +99,7 @@ class ProveEndToEndTest(absltest.TestCase):
             ),
         )
 
-        sponge, comp = _poseidon2()
+        sponge, comp = babybear16_hasher()
         _, proof = prove(
             new_transcript(),
             sponge,
@@ -264,7 +253,7 @@ class ProveEndToEndTest(absltest.TestCase):
             ),
         )
 
-        sponge, comp = _poseidon2()
+        sponge, comp = babybear16_hasher()
         _, proof = prove(
             new_transcript(), sponge, comp, params, meta["vk_pre_hash"], airs
         )

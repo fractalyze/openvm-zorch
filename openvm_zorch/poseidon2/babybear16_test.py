@@ -14,10 +14,8 @@ import numpy as np
 from absl.testing import absltest
 from zk_dtypes import babybear_mont as F
 
-from openvm_zorch.poseidon2.babybear16 import babybear16_params
-from zorch.hash.compression import Compression, CompressionParams
+from openvm_zorch.poseidon2.babybear16 import babybear16_hasher, babybear16_params
 from zorch.hash.poseidon2.poseidon2 import Poseidon2
-from zorch.hash.sponge import Sponge, SpongeParams
 
 _FIXTURE = (
     Path(__file__).parent.parent / "commit" / "testdata" / "stacked_commit" / "outputs"
@@ -35,14 +33,12 @@ class BabyBear16Test(absltest.TestCase):
         self.assertTrue(bool(fnp.array_equal(out, _golden("perm_0_15.npy"))))
 
     def test_sponge_matches_reference(self) -> None:
-        sponge = Sponge(Poseidon2(babybear16_params()), SpongeParams(rate=8, out=8))
+        sponge, _ = babybear16_hasher()
         out = sponge.hash(fnp.arange(32, dtype=F))
         self.assertTrue(bool(fnp.array_equal(out, _golden("sponge_0_31.npy"))))
 
     def test_compress_matches_reference(self) -> None:
-        comp = Compression(
-            Poseidon2(babybear16_params()), CompressionParams(arity=2, chunk=8)
-        )
+        _, comp = babybear16_hasher()
         left = fnp.arange(8, dtype=F)
         right = fnp.arange(100, 108, dtype=F)
         out = comp.compress(fnp.stack([left, right]))

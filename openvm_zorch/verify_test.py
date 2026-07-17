@@ -16,24 +16,13 @@ from absl.testing import absltest, parameterized
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
-from openvm_zorch.poseidon2.babybear16 import babybear16_params
+from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 from openvm_zorch.prove import AirInstance, SystemParams, prove
 from openvm_zorch.transcript import new_transcript
 from openvm_zorch.verify import AirVk, VerificationError, verify
 from openvm_zorch.whir.prover import WhirConfig
-from zorch.hash.compression import Compression, CompressionParams
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
-from zorch.hash.sponge import Sponge, SpongeParams
 
 _PROVE = Path(__file__).parent / "testdata" / "prove"
-
-
-def _poseidon2():
-    perm = Poseidon2(babybear16_params())
-    return (
-        Sponge(perm, SpongeParams(rate=8, out=8)),
-        Compression(perm, CompressionParams(arity=2, chunk=8)),
-    )
 
 
 def _load_instance():
@@ -152,7 +141,7 @@ class VerifyTest(parameterized.TestCase):
     def setUpClass(cls) -> None:
         super().setUpClass()
         cls.meta, cls.params, cls.airs, cls.vks = _load_instance()
-        sponge, comp = _poseidon2()
+        sponge, comp = babybear16_hasher()
         cls.sponge, cls.comp = sponge, comp
         _, cls.proof = prove(
             new_transcript(), sponge, comp, cls.params, cls.meta["vk_pre_hash"], cls.airs
