@@ -26,10 +26,11 @@ from typing import Sequence
 
 import frx
 import frx.numpy as fnp
+import numpy as np
 from frx import Array, lax
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
-from openvm_zorch.fields import EF, MODULUS, f_const, f_to_ef
+from openvm_zorch.fields import EF, F, MODULUS, f_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.transcript import sample_ext
 from zorch.poly.univariate import powers
@@ -69,7 +70,10 @@ class _TraceView:
     lam_rot: int | None
 
 
+@functools.cache
 def _ef_const(value: int) -> Array:
+    # A few distinct host ints (ω and its powers) recur across the groups; each
+    # miss builds a device scalar, so cache them.
     return f_to_ef(f_const(value))
 
 
@@ -195,13 +199,40 @@ class _StackingRound(StandardRound):
         return fold(folded, r), transcript, RoundMsg(msg, r)
 
 
+@functools.lru_cache(maxsize=128)
+def _eqw_gather_index(key: tuple) -> Array:
+    """Device gather index placing each view's weight block into the
+    ``(height, width)`` eqw matrix; sentinel 0 fills the gaps and zero tail.
+    Pure function of the layout — ``key`` is the hashable
+    ``(l_skip, width, height, (col_idx, row_idx, log_height)…)`` ``_eqw_columns``
+    builds. Mirrors ``commit/stacking.py``'s ``_gather_index``, lru-bounded so the
+    device indices can't accumulate without limit across proof shapes.
+
+    A view's length-``2^ñ`` weight vector lands in stacked column ``col_idx`` at
+    cube offset ``row_idx >> l_skip``: the skip domain is round 0's, so the cube
+    position is the stacked row shifted past it (equivalently, the running sum of
+    the earlier blocks in the column)."""
+    l_skip, width, height, views = key
+    dest = []
+    for col_idx, row_idx, log_height in views:
+        blen = 1 << max(log_height - l_skip, 0)
+        dest.append(((row_idx >> l_skip) + np.arange(blen)) * width + col_idx)
+    gather = np.zeros((height * width,), np.int64)
+    if dest:
+        dest_flat = np.concatenate(dest)
+        gather[dest_flat] = np.arange(dest_flat.size) + 1
+    return fnp.asarray(gather)
+
+
 def _eqw_columns(
+    l_skip: int,
     commit_views: Sequence[_TraceView],
     width: int,
     height: int,
     eq_tables: dict[int, Array],
     k_rot_tables: dict[int, Array],
-    lam_pows: Sequence[Array],
+    lam_eq: Array,
+    lam_rot: Array,
 ) -> Array:
     """The λ-batched eq/κ_rot weight matrix for one commit — the full-cube
     companion of the stacked matrix ``Q``, shape ``(2^n_stack, width)``.
@@ -210,28 +241,66 @@ def _eqw_columns(
     ``λ^{lam_eq}·eq + λ^{lam_rot}·κ_rot`` over the view's contiguous cube block
     and zero elsewhere, so folding it round-by-round binds every view uniformly:
     a short trace's block is just a short eq vector, so the high cube bits bind
-    its position automatically once the block is exhausted. Built per column by
-    concatenating each view's weight in stacking order (the views in a column are
-    contiguous and ascending in ``row_idx``), mirroring ``stacked_matrix``'s
-    segment assembly so ``EQW`` and ``Q`` share one row layout."""
-    segments: dict[int, list[Array]] = {c: [] for c in range(width)}
-    for v in commit_views:
-        lht = v.slice.log_height
-        weight = lam_pows[v.lam_eq] * eq_tables[lht]
-        if v.lam_rot is not None:
-            weight = weight + lam_pows[v.lam_rot] * k_rot_tables[lht]
-        segments[v.slice.col_idx].append(weight)
-    cols = []
-    for c in range(width):
-        parts = segments[c]
-        used = sum(p.shape[0] for p in parts)
-        if used < height:
-            parts = parts + [fnp.zeros((height - used,), EF)]
-        # `parts` is always non-empty here: an empty column has used == 0 < height
-        # (height = 2^n_stack ≥ 2 past the n_stack == 0 guard), so the pad above
-        # fills it. Mirrors `stacked_matrix`'s `concatenate(parts)` (commit/stacking.py).
-        cols.append(fnp.concatenate(parts))
-    return fnp.stack(cols, axis=1)
+    its position automatically once the block is exhausted.
+
+    Assembled like ``stacked_matrix``: one broadcast per equal-height run of
+    views (a run shares eq/κ_rot tables, so ``lam_eq[run][:, None] *
+    eq_tables[lht]`` weights the whole run at once, κ_rot riding the 0-masked
+    ``lam_rot``), then one memoized gather scatters the blocks into their
+    stacked-column positions. ``lam_eq[i]`` / ``lam_rot[i]`` are the λ powers of
+    ``commit_views[i]`` (``lam_rot`` 0 for an absent rotation), pre-sliced by the
+    caller. ``EQW`` and ``Q`` share the one row layout the gather encodes."""
+    blocks: list[Array] = []
+    i, n = 0, len(commit_views)
+    while i < n:
+        lht = commit_views[i].slice.log_height
+        j = i
+        while j < n and commit_views[j].slice.log_height == lht:
+            j += 1
+        weights = (
+            lam_eq[i:j][:, None] * eq_tables[lht]
+            + lam_rot[i:j][:, None] * k_rot_tables[lht]
+        )
+        blocks.append(weights.reshape(-1))
+        i = j
+    key = (
+        l_skip,
+        width,
+        height,
+        tuple(
+            (v.slice.col_idx, v.slice.row_idx, v.slice.log_height)
+            for v in commit_views
+        ),
+    )
+    src = fnp.concatenate([fnp.zeros((1,), EF)] + blocks)
+    return fnp.take(src, _eqw_gather_index(key)).reshape(height, width)
+
+
+@functools.lru_cache(maxsize=128)
+def _q_cols_gather_index(key: tuple) -> Array:
+    """Device gather index building a group's ``(lifted_len, group_size)`` q
+    block from the flat stacked-matrix source. Pure function of the layout —
+    ``key`` is the hashable ``(l_skip, ((h, w)…), (com_idx, row, col, lht)…)``;
+    the per-commit source offsets are derived from the matrix shapes, matching
+    the ``q_src`` concat order. Mirrors ``commit/stacking.py``'s ``_gather_index``,
+    lru-bounded like ``_eqw_gather_index``.
+
+    A view's round-0 claim is the contiguous column segment
+    ``mat[row:row+lifted, col]`` — a stride-``width`` run in the row-major flat
+    matrix, shifted to its commit's span in the shared source. Column ``k`` of
+    the block is view ``k``, reproducing the axis-1 stack it replaces."""
+    l_skip, mat_shapes, views = key
+    mat_widths = [w for _h, w in mat_shapes]
+    mat_offsets, off = [], 1
+    for h, w in mat_shapes:
+        mat_offsets.append(off)
+        off += h * w
+    lifted = 1 << max(views[0][3], l_skip)
+    cols = [
+        mat_offsets[com_idx] + col_idx + (row_idx + np.arange(lifted)) * mat_widths[com_idx]
+        for com_idx, row_idx, col_idx, _lht in views
+    ]
+    return fnp.asarray(np.stack(cols, axis=1).reshape(-1))
 
 
 def _sumcheck_rounds(
@@ -240,9 +309,11 @@ def _sumcheck_rounds(
     eq_tables: dict[int, Array],
     k_rot_tables: dict[int, Array],
     views: Sequence[_TraceView],
-    lam_pows: Sequence[Array],
+    lam_eq: Array,
+    lam_rot: Array,
     u: Sequence[Array],
     n_stack: int,
+    l_skip: int,
 ) -> tuple[DuplexTranscript, list[Array], list[Array], list[Array]]:
     """Rounds 1..=n_stack of Stage 4: the quadratic MLE sumcheck (round-poly
     evals at {1, 2}) folding every stacked column to its opening, then observing
@@ -283,17 +354,29 @@ def _sumcheck_rounds(
 
     height = 1 << n_stack
     q_cols = fnp.concatenate([q.T for q in q_evals], axis=0)  # (Σ width, 2^n_stack)
+    # views are commit-major; each commit's contiguous run indexes its slice of
+    # the per-view λ vectors alongside its views.
+    com_ranges: list[tuple[int, int]] = []
+    start = 0
+    for c in range(len(q_evals)):
+        end = start
+        while end < len(views) and views[end].com_idx == c:
+            end += 1
+        com_ranges.append((start, end))
+        start = end
     eqw_cols = fnp.concatenate(
         [
             _eqw_columns(
-                [v for v in views if v.com_idx == c],
+                l_skip,
+                views[s:e],
                 widths[c],
                 height,
                 eq_tables,
                 k_rot_tables,
-                lam_pows,
+                lam_eq[s:e],
+                lam_rot[s:e],
             ).T
-            for c in range(len(q_evals))
+            for c, (s, e) in enumerate(com_ranges)
         ],
         axis=0,
     )
@@ -375,12 +458,6 @@ def prove_stacked_opening_reduction(
         lam_pows[1::2],
         fnp.zeros((), EF),
     )
-    # `_eqw_columns` indexes per view, so it gets the vector pre-sliced: `list`
-    # unstacks in jitted chunks (~30 dispatches), where indexing the array per
-    # view would cost a device slice each (~723, measured 253 ms against this
-    # 197 ms). The list is a waypoint, not a design: gather-assembling
-    # `_eqw_columns` the way the input layer assembles its columns retires it.
-    lam_pows_per_view = list(lam_pows)
 
     omega = prism.omega_int(l_skip)
     r_0 = r[0]
@@ -405,23 +482,30 @@ def prove_stacked_opening_reduction(
     # reduction order does not change s_0).
     num_cosets = 2  # q · (eq or κ_rot) is degree 2 per variable
     size = 1 << l_skip
-    # z[c, k] = g^{c+1}·ω^k, the z-index of coset c (host ints → one EF grid).
-    z_grid = fnp.stack(
-        [
-            fnp.stack(
-                [
-                    _ef_const(
-                        pow(prism.GENERATOR, c + 1, MODULUS)
-                        * pow(omega, k, MODULUS)
-                        % MODULUS
-                    )
-                    for k in range(size)
-                ]
-            )
-            for c in range(num_cosets)
-        ]
-    )  # (num_cosets, size) EF
+    # z[c, k] = g^{c+1}·ω^k, the z-index of coset c, in the field algebra: the
+    # per-coset geometric shift g^{c+1} times the ω-power table `[1, ω, …]`, as
+    # babybear elements (field `**` / `powers`, no host-side modular arithmetic),
+    # embedded into EF. One multiply over the tiny (num_cosets, size) grid — a far
+    # cry from the scalar `_ef_const` per cell nested in two stacks it replaced.
+    g = fnp.array(prism.GENERATOR, F)
+    omega_f = fnp.array(omega, F)
+    shifts = fnp.stack([g ** (c + 1) for c in range(num_cosets)])  # (num_cosets,) F
+    z_grid = f_to_ef(shifts[:, None] * powers(omega_f, size))  # (num_cosets, size) EF
     eq_uni_1_grid = prism.eval_eq_uni_at_one(l_skip, z_grid)  # group-invariant
+
+    # One flat source for every group's q-column gather: the base-field stacked
+    # matrices laid end to end behind a zero sentinel (row-major, so a column
+    # segment is a stride-`width` run). Each group then gathers its views'
+    # segments in one `fnp.take` instead of a slice-and-stack per view — 723
+    # slices + stacks on the real block, ~68 ms of the stage (commit/stacking.py
+    # recipe). Each group's index is a pure function of the layout, memoized;
+    # the matrix shapes carry the per-commit source offsets into it.
+    mat_shapes = tuple((mat.shape[0], mat.shape[1]) for mat, _ in stacked_per_commit)
+    q_src = fnp.concatenate(
+        [fnp.zeros((1,), stacked_per_commit[0][0].dtype)]
+        + [mat.reshape(-1) for mat, _ in stacked_per_commit]
+    )
+
     s_evals = fnp.zeros((num_cosets, size), EF)
     for g_start, g_end in groups:
         g_views = views[g_start:g_end]
@@ -430,15 +514,16 @@ def prove_stacked_opening_reduction(
         eq_rs = eq_tables[lht]
         # κ_rot's cube factor is eq at the rotated-back point: index x − 1.
         k_rot_rs = _rot_prev(eq_rs)
-        q_cols = fnp.stack(
-            [
-                stacked_per_commit[v.com_idx][0][
-                    v.slice.row_idx : v.slice.row_idx + v.slice.lifted_len(l_skip),
-                    v.slice.col_idx,
-                ]
+        key = (
+            l_skip,
+            mat_shapes,
+            tuple(
+                (v.com_idx, v.slice.row_idx, v.slice.col_idx, v.slice.log_height)
                 for v in g_views
-            ],
-            axis=1,
+            ),
+        )
+        q_cols = fnp.take(q_src, _q_cols_gather_index(key)).reshape(
+            g_views[0].slice.lifted_len(l_skip), len(g_views)
         )
         # Slice the strided weights: a per-view `stack` here took one operand per
         # view — 723 on the real block, ~104 ms of the stage.
@@ -496,9 +581,11 @@ def prove_stacked_opening_reduction(
         eq_tables,
         k_rot_tables,
         views,
-        lam_pows_per_view,
+        lam_eq_all,
+        lam_rot_all,
         u,
         n_stack,
+        l_skip,
     )
 
     return transcript, StackingProof(
