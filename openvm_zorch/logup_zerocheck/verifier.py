@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Sequence
 import frx.numpy as fnp
 from frx import Array
 
-from openvm_zorch.fields import MODULUS, f_const, f_inv_const, f_to_ef
+from openvm_zorch.fields import f_const, f_inv_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.logup_zerocheck.constraints import (
     acc_constraints,
@@ -184,7 +184,7 @@ def verify_zerocheck_stage(
         if n < 0:
             l_eff = l_skip + n
             rs_n = [exp_pow_2(rs[0], -n)]
-            norm = f_to_ef(f_inv_const(pow(2, -n, MODULUS)))
+            norm = f_to_ef(f_const(2) ** n)  # 2^n (n < 0), the cyclic-lift factor
         else:
             l_eff = l_skip
             rs_n = rs[: n + 1]
