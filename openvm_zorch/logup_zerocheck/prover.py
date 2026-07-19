@@ -237,7 +237,7 @@ def _stack_promote(node_vals: Sequence[Array], refs: Sequence[int]) -> Array:
     broadcast the row-constants up to the common leading shape first. Byte-
     identical to weighting each node in place, since the fold is linear per
     node."""
-    vals = [_promote(node_vals[r]) for r in refs]
+    vals = [node_vals[r] for r in refs]
     shape = fnp.broadcast_shapes(*(v.shape for v in vals))
     return fnp.stack([fnp.broadcast_to(v, shape) for v in vals], axis=-1)
 
