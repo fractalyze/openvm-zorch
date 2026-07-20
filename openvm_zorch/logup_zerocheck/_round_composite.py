@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import frx.numpy as fnp
 from frx import Array
-from zk_dtypes import babybearx4_mont as EF
 
 from zorch._composite import composite
 from zorch.sumcheck.prover import (
@@ -60,7 +59,6 @@ def _decomp(
     mu_p: Array,
     mu_q: Array,
     norm: Array,
-    is_head: Array,
     *,
     degree: int,
     **_attrs: object,
@@ -71,24 +69,20 @@ def _decomp(
     ``s_deg`` (rides as the marker's ``degree`` attribute).
 
     Returns ``(head_zc[degree-1], head_logup[degree-1], zc0, p0t, q0t)`` -- the
-    round poly's live ``{1..s_deg-1}`` head contributions and the three
+    round poly's ``{1..s_deg-1}`` head contributions (UN-gated: the caller
+    applies the ``is_head`` round-liveness select, a cheap scalar op kept
+    outside the marker so the body stays a pure reduce) and the three
     exhausted-trace tilde bases the caller folds into its scan carry.
     """
-    zero = fnp.zeros((), EF)
     zc = (acc * eq_xi[None, :]).sum(axis=1)
     zc0 = eq_n * _row0(acc)
     p = (numer * eq_xi[None, :]).sum(axis=1) * norm
     q = (denom * eq_xi[None, :]).sum(axis=1)
     p0t = eq_sharp_n * _row0(numer) * norm
     q0t = eq_sharp_n * _row0(denom)
-    head_zc = fnp.stack(
-        [fnp.where(is_head, mu_zc * zc[i + 1], zero) for i in range(degree - 1)]
-    )
+    head_zc = fnp.stack([mu_zc * zc[i + 1] for i in range(degree - 1)])
     head_logup = fnp.stack(
-        [
-            fnp.where(is_head, mu_p * p[i + 1] + mu_q * q[i + 1], zero)
-            for i in range(degree - 1)
-        ]
+        [mu_p * p[i + 1] + mu_q * q[i + 1] for i in range(degree - 1)]
     )
     return head_zc, head_logup, zc0, p0t, q0t
 
@@ -104,7 +98,6 @@ def zerocheck_round_reduce(
     mu_p: Array,
     mu_q: Array,
     norm: Array,
-    is_head: Array,
     *,
     s_deg: int,
 ) -> tuple[Array, Array, Array, Array, Array]:
@@ -115,7 +108,11 @@ def zerocheck_round_reduce(
     ``(s_deg, size)``: the eval at each of the ``{1..s_deg}`` lifted points over
     the current hypercube of ``size`` cells). Returns ``(head_zc[s_deg-1],
     head_logup[s_deg-1], zc0, p0t, q0t)`` -- the per-AIR contributions the
-    caller sums into the round poly and folds into the tilde carry.
+    caller sums into the round poly and folds into the tilde carry. The head
+    vectors are UN-gated; the caller applies the ``is_head`` round-liveness
+    select (kept outside so the marker body is a pure reduce). The round is
+    phase-less and eval-form, so the marker carries only its ``variant`` and
+    ``degree`` -- the GPU emitter routes on the variant.
     """
     return composite(
         _decomp,
@@ -129,11 +126,8 @@ def zerocheck_round_reduce(
         mu_p,
         mu_q,
         norm,
-        is_head,
         name=SUMCHECK_ROUND_MARKER,
         version=SUMCHECK_ROUND_MARKER_VERSION,
-        phase="mid",
         variant="openvm-zerocheck",
         degree=s_deg,
-        poly_form="evals",
     )

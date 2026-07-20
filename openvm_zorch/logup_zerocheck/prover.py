@@ -638,12 +638,20 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                             mu_p,
                             mu_q,
                             norm,
-                            is_head,
                             s_deg=s_deg,
                         )
+                        # The is_head round-liveness gate is applied HERE, not in
+                        # the marker: the marker returns the un-gated head, and
+                        # this cheap scalar select zeroes it past the AIR's live
+                        # rounds (kept outside so the marker body is a pure
+                        # reduce the emitter can collapse).
                         for i in range(s_deg - 1):
-                            sp_head_zc[i] = sp_head_zc[i] + head_zc_t[i]
-                            sp_head_logup[i] = sp_head_logup[i] + head_logup_t[i]
+                            sp_head_zc[i] = sp_head_zc[i] + fnp.where(
+                                is_head, head_zc_t[i], zero
+                            )
+                            sp_head_logup[i] = sp_head_logup[i] + fnp.where(
+                                is_head, head_logup_t[i], zero
+                            )
                     else:
                         # No interactions: only the zc head folds (the logup head
                         # would add field zero, so it is skipped, not marked).
