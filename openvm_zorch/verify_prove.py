@@ -147,12 +147,24 @@ class _TimedRound(Round):
     def __call__(self, carry, transcript):
         t0 = time.monotonic()
         out = self._inner(carry, transcript)
+        # Dispatch-return: async execution returns here before the device is
+        # done, so this span is the host cost -- the trace-cached executable
+        # launch plus any eager Python glue around it. The remainder up to the
+        # block is the device-execution wait. On a warm stage that is one
+        # cached jit (e.g. zerocheck's _STAGE_FNS), the split says whether the
+        # wall is host-dispatch-bound or executable/device-bound without the
+        # per-region profiler's sync distortion.
+        t_dispatch = time.monotonic() - t0
         frx.block_until_ready(array_leaves(out))
         dt = time.monotonic() - t0
         label = _STAGE_LABELS.get(type(self._inner), type(self._inner).__name__)
         if self._record is not None:
             self._record[label] = dt
-        print(f"[stage {label}] {dt:.1f}s", flush=True)
+        print(
+            f"[stage {label}] {dt:.1f}s  "
+            f"[host/dispatch {t_dispatch * 1e3:.1f}ms + device {(dt - t_dispatch) * 1e3:.1f}ms]",
+            flush=True,
+        )
         return out
 
 
