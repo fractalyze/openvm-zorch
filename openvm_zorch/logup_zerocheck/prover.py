@@ -52,6 +52,7 @@ from frx import Array, lax
 from openvm_zorch.fields import EF, F, f_const, f_inv_const, f_to_ef
 from openvm_zorch.logup_gkr.input_layer import interactions_layout
 from openvm_zorch.logup_zerocheck import prism
+from openvm_zorch.logup_zerocheck._round_composite import zerocheck_round_reduce
 from openvm_zorch.logup_zerocheck.constraints import (
     ConstraintsDag,
     _promote,
@@ -621,25 +622,39 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                         beta_pows,
                         eq_3bs[t],
                     )
-                    zc = (acc * eq_xi[None, :]).sum(axis=1)
-                    zc0 = eq_n * _row0(acc)
                     if dag.interactions:
-                        p = (numer * eq_xi[None, :]).sum(axis=1) * norm
-                        q = (denom * eq_xi[None, :]).sum(axis=1)
-                        p0t = eq_sharp_n * _row0(numer) * norm
-                        q0t = eq_sharp_n * _row0(denom)
+                        # The eq-weighted reduce (the per-AIR launch storm) as one
+                        # `zorch.sumcheck.round` marker; `_ceval_folds` above stays
+                        # its own `zorch.constraint_eval` composite. Byte-identical
+                        # to the inline fold when no emitter claims the marker.
+                        head_zc_t, head_logup_t, zc0, p0t, q0t = zerocheck_round_reduce(
+                            acc,
+                            numer,
+                            denom,
+                            eq_xi,
+                            eq_n,
+                            eq_sharp_n,
+                            mu_zc,
+                            mu_p,
+                            mu_q,
+                            norm,
+                            is_head,
+                            s_deg=s_deg,
+                        )
+                        for i in range(s_deg - 1):
+                            sp_head_zc[i] = sp_head_zc[i] + head_zc_t[i]
+                            sp_head_logup[i] = sp_head_logup[i] + head_logup_t[i]
                     else:
-                        p = fnp.zeros((s_deg,), EF)
-                        q = fnp.zeros((s_deg,), EF)
+                        # No interactions: only the zc head folds (the logup head
+                        # would add field zero, so it is skipped, not marked).
+                        zc = (acc * eq_xi[None, :]).sum(axis=1)
+                        zc0 = eq_n * _row0(acc)
                         p0t = zero
                         q0t = zero
-                    for i in range(s_deg - 1):
-                        sp_head_zc[i] = sp_head_zc[i] + fnp.where(
-                            is_head, mu_zc * zc[i + 1], zero
-                        )
-                        sp_head_logup[i] = sp_head_logup[i] + fnp.where(
-                            is_head, mu_p * p[i + 1] + mu_q * q[i + 1], zero
-                        )
+                        for i in range(s_deg - 1):
+                            sp_head_zc[i] = sp_head_zc[i] + fnp.where(
+                                is_head, mu_zc * zc[i + 1], zero
+                            )
                 else:
                     # Pure-tilde trace (height 1): eval over its single row.
                     node0 = eval_nodes(
