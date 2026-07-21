@@ -274,15 +274,21 @@ def _ceval_folds(
             eval_fn, packed, fnp.stack(coeffs), live_width=packed.shape[0]
         ).reshape(lead)
 
-    # A lookup-only AIR has no zerocheck constraints; match acc_constraints'
-    # empty-fold scalar zero (an empty α-stack has nothing to fold).
+    # A lookup-only AIR has no zerocheck constraints, so its zc fold is all
+    # zero. Keep the full ``(s_deg, size)`` shape (an empty α-stack folds to a
+    # zero row-set, not a 0-d scalar): the round reduce carries this AIR to the
+    # ``zorch.sumcheck.round`` marker whenever it has interactions, and the
+    # marker's emitter contract is rank-2 ``[s_deg, size]`` acc/numer/denom.
+    # A 0-d zero also under-indexes ``_decomp``'s head loop (``zc[i+1]`` on a
+    # length-1 reduce) when ``s_deg > 1`` — the full shape reduces to the same
+    # zeros byte-for-byte while satisfying both the emitter and the fallback.
     acc = (
         _fold(
             dag.constraint_idx,
             [lambda_pows[k] for k in range(len(dag.constraint_idx))],
         )
         if dag.constraint_idx
-        else fnp.zeros((), EF)
+        else fnp.zeros(lead, EF)
     )
     if not dag.interactions:
         return acc, None, None
