@@ -44,6 +44,7 @@ py_library(
     name = "prover",
     srcs = [
         "__init__.py",
+        "_round_composite.py",
         "prover.py",
     ],
     visibility = ["//visibility:public"],
@@ -53,6 +54,7 @@ py_library(
         "//openvm_zorch:fields",
         "//openvm_zorch:transcript",
         "//openvm_zorch/logup_gkr:input_layer",
+        "@zorch//zorch:_composite",
         "@zorch//zorch:constraint_eval",
         "@zorch//zorch:transcript",
         "@zorch//zorch/poly",
