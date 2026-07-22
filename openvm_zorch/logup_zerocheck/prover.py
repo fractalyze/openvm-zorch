@@ -68,6 +68,16 @@ from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
 
+# Bake the monomial-form `constraint_eval` body into the marker via the
+# ``cone_program_max_monomials`` composite attribute (fractalyze/xla#304), so
+# the default GPU prove path takes it. Byte-identical to the cone body; the
+# flatter distributed circuit cut zerocheck device ~2× (warm 82→51ms on the real
+# fib block, #138). 512 is the measured plateau — a larger cap does not help and
+# only risks a per-cone monomial blow-up (which safely falls back to the cone
+# body per cone). A CPU / unrecognizing backend ignores the hint.
+_ZC_MAX_MONOMIALS = 512
+
+
 def _fold_pair(p0: Array, p1: Array, r: Array) -> Array:
     """Fold one split pair at challenge ``r``: ``P0 + r*(P1 − P0)``.
 
@@ -270,7 +280,11 @@ def _ceval_folds(
             return _stack_promote(_nodes(tr), refs)
 
         return constraint_eval(
-            eval_fn, packed, fnp.stack(coeffs), live_width=packed.shape[0]
+            eval_fn,
+            packed,
+            fnp.stack(coeffs),
+            live_width=packed.shape[0],
+            max_monomials=_ZC_MAX_MONOMIALS,
         ).reshape(lead)
 
     # A lookup-only AIR has no zerocheck constraints; match acc_constraints'
@@ -405,7 +419,11 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
 
             alpha = fnp.stack([lambda_pows[k] for k in range(len(dag_.constraint_idx))])
             acc = constraint_eval(
-                eval_fn, packed, alpha, live_width=packed.shape[0]
+                eval_fn,
+                packed,
+                alpha,
+                live_width=packed.shape[0],
+                max_monomials=_ZC_MAX_MONOMIALS,
             ).reshape(lead)  # (num_cosets, size, rows)
             weighted = acc * eq_xi[None, None, :]
             return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
@@ -448,7 +466,11 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
             return _stack_promote(_nodes(tr), [i.count for i in dag_.interactions])
 
         numer = constraint_eval(
-            count_fn, packed, fnp.stack(list(eq_3bs_t)), live_width=packed.shape[0]
+            count_fn,
+            packed,
+            fnp.stack(list(eq_3bs_t)),
+            live_width=packed.shape[0],
+            max_monomials=_ZC_MAX_MONOMIALS,
         ).reshape(lead)
 
         denom_refs = [m for intr in dag_.interactions for m in intr.message]
@@ -477,6 +499,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                     packed,
                     fnp.stack(denom_coeffs),
                     live_width=packed.shape[0],
+                    max_monomials=_ZC_MAX_MONOMIALS,
                 ).reshape(lead)
                 + bus_const
             )
