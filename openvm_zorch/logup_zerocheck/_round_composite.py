@@ -59,14 +59,13 @@ def _decomp(
     mu_p: Array,
     mu_q: Array,
     norm: Array,
-    *,
-    degree: int,
     **_attrs: object,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Byte-exact fallback (the emitter replaces this) for one LIVE
     (``n_lift >= 1``) interaction AIR's reduce: the eq-weighted zc/logup folds
-    over the hypercube, plus the origin-cell tilde bases. ``degree`` is
-    ``s_deg`` (rides as the marker's ``degree`` attribute).
+    over the hypercube, plus the origin-cell tilde bases. The marker attributes
+    (``variant``/``degree``) ride in via ``**_attrs``; the fallback derives the
+    head length from the array shapes and does not read them.
 
     Returns ``(head_zc[degree-1], head_logup[degree-1], zc0, p0t, q0t)`` -- the
     round poly's ``{1..s_deg-1}`` head contributions (UN-gated: the caller
@@ -80,10 +79,11 @@ def _decomp(
     q = (denom * eq_xi[None, :]).sum(axis=1)
     p0t = eq_sharp_n * _row0(numer) * norm
     q0t = eq_sharp_n * _row0(denom)
-    head_zc = fnp.stack([mu_zc * zc[i + 1] for i in range(degree - 1)])
-    head_logup = fnp.stack(
-        [mu_p * p[i + 1] + mu_q * q[i + 1] for i in range(degree - 1)]
-    )
+    # Strided slice, not a stacked list comp: zc/p/q are 1D (degree,) arrays, so
+    # [1:] is the {1..degree-1} head directly — cleaner and robust at degree==1
+    # (an empty fnp.stack([]) would fail; [1:] yields a length-0 array).
+    head_zc = mu_zc * zc[1:]
+    head_logup = mu_p * p[1:] + mu_q * q[1:]
     return head_zc, head_logup, zc0, p0t, q0t
 
 
