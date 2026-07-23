@@ -175,12 +175,12 @@ FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 
 | stage | zorch warm | native openvm | zorch / native |
 |---|---|---|---|
-| trace commit | 5.6 ms | 4.4 ms | 1.3× |
+| trace commit | 5.5 ms | 4.4 ms | 1.3× |
 | LogUp-GKR | 32.9 ms | 7.2 ms | 4.6× |
-| zerocheck | 48.7 ms | 10.6 ms | 4.6× |
-| stacking | 92.6 ms | 6.2 ms | 15.0× |
-| WHIR | 22.8 ms | 6.0 ms | 3.8× |
-| **full prove** | **203 ms** | **34.3 ms** | **6.0×** |
+| zerocheck | 46.5 ms | 10.6 ms | 4.4× |
+| stacking | 44.9 ms | 6.2 ms | 7.2× |
+| WHIR | 21.4 ms | 6.0 ms | 3.6× |
+| **full prove** | **151 ms** | **34.3 ms** | **4.5×** |
 
 Native GKR is the `fractional_sumcheck` span; native zerocheck is
 `prove_zerocheck_and_logup − fractional_sumcheck` (GKR nests inside it). The five
@@ -188,8 +188,9 @@ native per-stage bars sum to the `stark_prove_excluding_trace` e2e span.
 `verify_prove`'s host/device split locates the gap: zerocheck is the one
 **device-bound** stage (~43 ms device — the monomial-form `constraint_eval`
 body (#143, xla#304) plus the poseidon2 transcript, #138); every other stage is
-host-dispatch-bound — stacking, the widest ratio (15.0×), is ~92 ms host /
-~0.3 ms device.
+host-dispatch-bound — stacking, still the widest ratio (7.2×), is ~45 ms host /
+~0.3 ms device, ~21 ms of it the unrolled sumcheck fold gated on #44's capture
+lever (`OPENVM_STACKING_PROFILE=1` prints the region split; see #134).
 
 > **Native per-stage capture.** The native CUDA backend names its phase spans
 > differently from the CPU set — `_gpu`-suffixed for zerocheck/GKR,

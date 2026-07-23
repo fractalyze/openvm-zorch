@@ -24,12 +24,14 @@ https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/s
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Sequence
 
 import frx.numpy as fnp
 from frx import Array, lax
 
 from openvm_zorch.fields import EF, F, MODULUS, f_const, f_inv_const, f_to_ef
-from zorch.poly.eq import expand_eq_to_hypercube
+from zorch.poly.eq import expand_eq_to_hypercube, expand_hypercube_step
+from zorch.poly.univariate import powers
 
 # plonky3 BabyBear `F::GENERATOR` (baby_bear.rs `MONTY_GEN`).
 GENERATOR = 31
@@ -180,6 +182,26 @@ def eq_cube_table(point: list[Array]) -> Array:
     return expand_eq_to_hypercube(fnp.stack(point[::-1]), fnp.ones((), point[0].dtype))
 
 
+def eq_cube_tables(point: list[Array], sizes: Sequence[int]) -> dict[int, Array]:
+    """``eq_cube_table(point[:n])`` for every ``n`` in ``sizes``, from one
+    ascending expansion: each new variable is one ``expand_hypercube_step``
+    (``msb=True`` binds ``point[j]`` at index bit ``j``, the LSB-first layout
+    above), snapshotting at each requested prefix instead of re-expanding from
+    scratch per size — Stage 4 needs a table per distinct trace height, and
+    the from-scratch loop was ~17 ms of the stage (#134). Per-entry products
+    reassociate exactly in the field, so every snapshot is byte-identical to
+    its ``eq_cube_table``."""
+    out: dict[int, Array] = {}
+    state = fnp.ones((1,), point[0].dtype if point else EF)
+    built = 0
+    for n in sorted(set(sizes)):
+        for j in range(built, n):
+            state = expand_hypercube_step(state, point[j], msb=True)
+        built = max(built, n)
+        out[n] = state
+    return out
+
+
 def eval_eq_sharp_uni(l_skip: int, xi_1: list[Array], z: Array) -> Array:
     """``eq♯_D(ξ_1, z)`` (poly_common.rs ``eval_eq_sharp_uni``)."""
     eq_evals = eq_cube_table(xi_1)
@@ -219,12 +241,11 @@ def fold_ple_evals(l_skip: int, mat: Array, r: Array) -> Array:
     height, width = mat.shape
     chunks = mat.reshape(height >> l_skip, 1 << l_skip, width)
     coeffs = _idft_rows(l_skip, fnp.moveaxis(chunks, 1, -1))
-    acc = f_to_ef(coeffs[0])
-    r_pow = r
-    for c in coeffs[1:]:
-        acc = acc + f_to_ef(c) * r_pow
-        r_pow = r_pow * r
-    return acc
+    # Σ_t c_t·r^t as one broadcast-multiply + trailing-axis sum: the Horner
+    # ``r_pow`` chain it replaces was ~4 eager dispatches per coefficient row
+    # (#134). Field addition is exact, so the reduction order is immaterial.
+    stacked = f_to_ef(fnp.stack(coeffs, axis=-1))
+    return (stacked * powers(r, 1 << l_skip)).sum(axis=-1)
 
 
 def coset_evals(l_skip: int, mat: Array, num_cosets: int) -> Array:
