@@ -210,6 +210,32 @@ def _round0_group_contrib(
     return contrib * ind  # (C, S)
 
 
+@functools.partial(frx.jit, static_argnums=(0, 1, 2))
+def _kernel_tables_update(
+    l_skip: int,
+    l_eff: int,
+    n: int,
+    eq: Array,
+    u_0: Array,
+    r_uni: Array,
+    omega_eff_ef: Array,
+    eq_const: Array,
+    eq_uni_u01: Array,
+) -> tuple[Array, Array]:
+    """One height's rounds-1.. ``(eq, κ_rot)`` table pair as one fused kernel.
+
+    Folds the univariate factors bound at ``u_0`` into the cube tables —
+    ``eq ← eq·(in·eq_D)`` and the κ_rot companion (stacked_reduction.rs
+    ``fold_ple_evals``-adjacent table prep). Jitted per ``(l_skip, l_eff, n)``
+    like ``_round0_group_contrib``: the eager body was ~30 tiny dispatches per
+    distinct height (~14 heights ≈ 21 ms of the stage, #134)."""
+    ind = prism.eval_in_uni(l_skip, n, u_0)
+    eq_uni = prism.eval_eq_uni(l_eff, u_0, r_uni)
+    eq_uni_rot = prism.eval_eq_uni(l_eff, u_0, r_uni * omega_eff_ef)
+    k_rot = ind * (eq_uni_rot * eq + eq_const * eq_uni_u01 * (_rot_prev(eq) - eq))
+    return eq * (ind * eq_uni), k_rot
+
+
 @dataclass(frozen=True)
 class _StackingSummand:
     """Product summand the sumcheck rounds fold: ``Σ_columns Q·EQW`` per cube
@@ -533,12 +559,13 @@ def prove_stacked_opening_reduction(
     eq_const = prism.eval_eq_uni_at_one(l_skip, r_0 * _ef_const(omega))
 
     # eq(-, r[1..1+ñ_T]) hypercube tables per distinct log_height (LSB-first).
-    eq_tables: dict[int, Array] = {}
-    for v in views:
-        lht = v.slice.log_height
-        if lht not in eq_tables:
-            n_lift = max(lht - l_skip, 0)
-            eq_tables[lht] = prism.eq_cube_table(list(r[1 : 1 + n_lift]))
+    lhts = sorted({v.slice.log_height for v in views})
+    by_lift = prism.eq_cube_tables(
+        list(r[1:]), [max(lht - l_skip, 0) for lht in lhts]
+    )
+    eq_tables: dict[int, Array] = {
+        lht: by_lift[max(lht - l_skip, 0)] for lht in lhts
+    }
     prof.mark("setup.eq_cube_tables", list(eq_tables.values()))
 
     # --- Round 0: s_0 from evaluations on the cosets g·D, g²·D ---
@@ -643,13 +670,17 @@ def prove_stacked_opening_reduction(
     for lht, eq in eq_tables.items():
         n = lht - l_skip
         l_eff, omega_eff, r_uni = _uni_kernel_args(l_skip, n, omega, r_0)
-        ind = prism.eval_in_uni(l_skip, n, u_0)
-        eq_uni = prism.eval_eq_uni(l_eff, u_0, r_uni)
-        eq_uni_rot = prism.eval_eq_uni(l_eff, u_0, r_uni * _ef_const(omega_eff))
-        k_rot_tables[lht] = ind * (
-            eq_uni_rot * eq + eq_const * eq_uni_u01 * (_rot_prev(eq) - eq)
+        eq_tables[lht], k_rot_tables[lht] = _kernel_tables_update(
+            l_skip,
+            l_eff,
+            n,
+            eq,
+            u_0,
+            r_uni,
+            _ef_const(omega_eff),
+            eq_const,
+            eq_uni_u01,
         )
-        eq_tables[lht] = eq * (ind * eq_uni)
     prof.mark(
         "kernel_tables", list(eq_tables.values()), list(k_rot_tables.values())
     )
