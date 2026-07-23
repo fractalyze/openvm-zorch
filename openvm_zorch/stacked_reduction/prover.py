@@ -21,6 +21,8 @@ https://github.com/openvm-org/stark-backend/blob/16d60de7/crates/stark-backend/s
 from __future__ import annotations
 
 import functools
+import os
+import time
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -38,6 +40,65 @@ from zorch.prove import fold_rounds
 from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
 from zorch.sumcheck.prover import RoundMsg, StandardRound
 from zorch.transcript import DuplexTranscript, Transcript, sample_challenge
+
+
+_STACKING_PROFILE = os.environ.get("OPENVM_STACKING_PROFILE") == "1"
+
+
+class _StackingProfiler:
+    """Coarse, env-guarded region timer for Stage-4 localization (#134) —
+    ``OPENVM_ZC_PROFILE``'s sibling (``logup_zerocheck/prover.py``).
+
+    No-op unless ``OPENVM_STACKING_PROFILE=1``. ``mark`` blocks on the region's
+    outputs and prints the wall-clock since the previous mark, split into host
+    (tracing + dispatch) and device (work still pending at the block). ``acc``
+    takes the same split but sums it under the label instead of printing —
+    for the regions inside the round-0 group loop, where only the sum across
+    the ~dozen per-height groups is meaningful — and ``flush`` prints the sums.
+    Off by default so ``verify_prove``'s whole-stage ``_TimedRound`` number
+    stays block-distortion-free (coarse region blocks sum coherently; see the
+    ``_ZcProfiler`` docstring)."""
+
+    def __init__(self) -> None:
+        self._t = time.monotonic()
+        self._acc: dict[str, list[float]] = {}
+
+    def _split(self, *outputs: object) -> tuple[float, float]:
+        dispatched = time.monotonic()
+        frx.block_until_ready(outputs)
+        now = time.monotonic()
+        host, device = dispatched - self._t, now - dispatched
+        self._t = now
+        return host, device
+
+    def mark(self, label: str, *outputs: object) -> None:
+        if not _STACKING_PROFILE:
+            return
+        host, device = self._split(*outputs)
+        print(
+            f"  [stacking {label}] {host + device:.3f}s "
+            f"(host={host:.3f} device={device:.3f})",
+            flush=True,
+        )
+
+    def acc(self, label: str, *outputs: object) -> None:
+        if not _STACKING_PROFILE:
+            return
+        host, device = self._split(*outputs)
+        total = self._acc.setdefault(label, [0.0, 0.0])
+        total[0] += host
+        total[1] += device
+
+    def flush(self) -> None:
+        if not _STACKING_PROFILE:
+            return
+        for label, (host, device) in self._acc.items():
+            print(
+                f"  [stacking {label}] {host + device:.3f}s "
+                f"(host={host:.3f} device={device:.3f})",
+                flush=True,
+            )
+        self._acc.clear()
 
 
 def _rot_prev(table: Array) -> Array:
@@ -314,6 +375,7 @@ def _sumcheck_rounds(
     u: Sequence[Array],
     n_stack: int,
     l_skip: int,
+    prof: _StackingProfiler,
 ) -> tuple[DuplexTranscript, list[Array], list[Array], list[Array]]:
     """Rounds 1..=n_stack of Stage 4: the quadratic MLE sumcheck (round-poly
     evals at {1, 2}) folding every stacked column to its opening, then observing
@@ -382,6 +444,7 @@ def _sumcheck_rounds(
     )
     q_cols = lax.bit_reverse(q_cols, dimensions=(1,))
     eqw_cols = lax.bit_reverse(eqw_cols, dimensions=(1,))
+    prof.mark("rounds.eqw_build", q_cols, eqw_cols)
 
     summand = _StackingSummand()
     # {1, 2} — the natural {0, 1, 2} domain minus s(0), which the verifier
@@ -395,6 +458,7 @@ def _sumcheck_rounds(
     )
     round_polys = [m.round_poly for m in msgs]
     u = u + [m.challenge for m in msgs]
+    prof.mark("rounds.fold", folded, round_polys)
 
     # Split the folded stacked columns back per commit and observe the openings.
     folded_q = folded[0][:, 0]  # (Σ width,)
@@ -405,6 +469,7 @@ def _sumcheck_rounds(
         openings.append(opening)
         transcript = transcript.observe(opening)
         start += w
+    prof.mark("rounds.observe", openings, transcript.state)
     return transcript, round_polys, u, openings
 
 
@@ -424,6 +489,7 @@ def prove_stacked_opening_reduction(
     of commit ``c`` carries a rotation claim; ``r`` is Stage 3's challenge
     vector (``r[0]`` univariate).
     """
+    prof = _StackingProfiler()
     views: list[_TraceView] = []
     lam_count = 0
     for com_idx, (_, layout) in enumerate(stacked_per_commit):
@@ -446,8 +512,10 @@ def prove_stacked_opening_reduction(
             groups.append((start, i))
             start = i
 
+    prof.mark("setup.views", transcript.state)
     transcript, lam = sample_ext(transcript)
     lam_pows = powers(lam, lam_count)
+    prof.mark("setup.lam_powers", lam_pows)
     # Views reserve two powers each, in order (see above), so view i takes
     # λ^{2i} / λ^{2i+1}: the weights are just the even and odd strides, and a
     # group — a contiguous run of views — is a slice of them. No per-view index
@@ -471,6 +539,7 @@ def prove_stacked_opening_reduction(
         if lht not in eq_tables:
             n_lift = max(lht - l_skip, 0)
             eq_tables[lht] = prism.eq_cube_table(list(r[1 : 1 + n_lift]))
+    prof.mark("setup.eq_cube_tables", list(eq_tables.values()))
 
     # --- Round 0: s_0 from evaluations on the cosets g·D, g²·D ---
     # The whole (coset, z-index) grid is evaluated at once: the per-x kernels
@@ -506,6 +575,7 @@ def prove_stacked_opening_reduction(
         + [mat.reshape(-1) for mat, _ in stacked_per_commit]
     )
 
+    prof.mark("setup.rest", lam_eq_all, lam_rot_all, eq_const, z_grid, q_src)
     s_evals = fnp.zeros((num_cosets, size), EF)
     for g_start, g_end in groups:
         g_views = views[g_start:g_end]
@@ -525,6 +595,7 @@ def prove_stacked_opening_reduction(
         q_cols = fnp.take(q_src, _q_cols_gather_index(key)).reshape(
             g_views[0].slice.lifted_len(l_skip), len(g_views)
         )
+        prof.acc("r0.gather", q_cols)
         # Slice the strided weights: a per-view `stack` here took one operand per
         # view — 723 on the real block, ~104 ms of the stage.
         lam_eq_w = lam_eq_all[g_start:g_end]
@@ -533,6 +604,7 @@ def prove_stacked_opening_reduction(
         # (num_cosets, 2^l_skip, 2^ñ_T windows, columns) — coset_evals stays
         # eager; only the kernel-eval + contraction is jitted.
         ce = f_to_ef(prism.coset_evals(l_skip, q_cols, num_cosets))
+        prof.acc("r0.coset_evals", ce)
         s_evals = s_evals + _round0_group_contrib(
             l_skip,
             l_eff,
@@ -548,19 +620,24 @@ def prove_stacked_opening_reduction(
             lam_eq_w,
             lam_rot_w,
         )  # (C, S)
+        prof.acc("r0.contrib", s_evals)
+    prof.flush()
     s_0_deg = num_cosets * (size - 1)
     s_0 = fnp.stack(
         prism.geometric_cosets_to_coeffs(l_skip, s_evals, num_cosets)[: s_0_deg + 1]
     )
     transcript = transcript.observe(s_0)
+    prof.mark("r0.s0_coeffs+observe", s_0, transcript.state)
 
     transcript, u_0 = sample_ext(transcript)
     u = [u_0]
+    prof.mark("r0.sample_u0", u_0)
 
     # --- Fold the PLEs (q and both kernels) at u_0 ---
     q_evals = [
         prism.fold_ple_evals(l_skip, mat, u_0) for mat, _ in stacked_per_commit
     ]
+    prof.mark("fold_ple", q_evals)
     eq_uni_u01 = prism.eval_eq_uni_at_one(l_skip, u_0)
     k_rot_tables: dict[int, Array] = {}
     for lht, eq in eq_tables.items():
@@ -573,6 +650,9 @@ def prove_stacked_opening_reduction(
             eq_uni_rot * eq + eq_const * eq_uni_u01 * (_rot_prev(eq) - eq)
         )
         eq_tables[lht] = eq * (ind * eq_uni)
+    prof.mark(
+        "kernel_tables", list(eq_tables.values()), list(k_rot_tables.values())
+    )
 
     # --- Rounds 1..=n_stack: the quadratic MLE sumcheck (split out) ---
     transcript, round_polys, u, openings = _sumcheck_rounds(
@@ -586,6 +666,7 @@ def prove_stacked_opening_reduction(
         u,
         n_stack,
         l_skip,
+        prof,
     )
 
     return transcript, StackingProof(
