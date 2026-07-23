@@ -11,10 +11,10 @@
 # zorch".
 absl-py
 numpy
-frx==0.10.0.dev20260722120418
-frxlib==0.10.0.dev20260722120418
-frx-cuda12-pjrt==0.10.0.dev20260722120418
-frx-cuda12-plugin==0.10.0.dev20260722120418
+frx==0.10.0.dev20260723035840
+frxlib==0.10.0.dev20260723035840
+frx-cuda12-pjrt==0.10.0.dev20260723035840
+frx-cuda12-plugin==0.10.0.dev20260723035840
 zk-dtypes==0.0.10
 
 # Benchmark harness (shared across fractalyze repos); used only by the
