@@ -164,7 +164,7 @@ check of the wiring.
 The living baseline. Regenerate on every perf change and update the numbers so
 the ratios below stay honest. Measured on an **idle RTX 5090** over the real
 openvm fibonacci block (19 AIRs, `tools/real-block-gen`), `frx` pin
-`0.10.0.dev20260722083811`, byte-match **ALL OK**, `--runs=5` converged min:
+`0.10.0.dev20260722120418`, byte-match **ALL OK**, `--runs=5` converged min:
 
 ```sh
 FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -175,23 +175,21 @@ FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 
 | stage | zorch warm | native openvm | zorch / native |
 |---|---|---|---|
-| trace commit | 6.1 ms | 4.4 ms | 1.4× |
-| LogUp-GKR | 37.1 ms | 7.2 ms | 5.2× |
-| zerocheck | 82.1 ms | 10.6 ms | 7.8× |
-| stacking | 101.2 ms | 6.2 ms | 16.4× |
-| WHIR | 24.5 ms | 6.0 ms | 4.1× |
-| **full prove** | **251 ms** | **34.3 ms** | **7.4×** |
+| trace commit | 5.6 ms | 4.4 ms | 1.3× |
+| LogUp-GKR | 32.9 ms | 7.2 ms | 4.6× |
+| zerocheck | 48.7 ms | 10.6 ms | 4.6× |
+| stacking | 92.6 ms | 6.2 ms | 15.0× |
+| WHIR | 22.8 ms | 6.0 ms | 3.8× |
+| **full prove** | **203 ms** | **34.3 ms** | **6.0×** |
 
 Native GKR is the `fractional_sumcheck` span; native zerocheck is
 `prove_zerocheck_and_logup − fractional_sumcheck` (GKR nests inside it). The five
 native per-stage bars sum to the `stark_prove_excluding_trace` e2e span.
 `verify_prove`'s host/device split locates the gap: zerocheck is the one
-**device-bound** stage (~68 ms device — the bounded `constraint_eval` circuit
-plus the poseidon2 transcript, #138); every other stage is host-dispatch-bound —
-stacking, the widest ratio (16.4×), is ~101 ms host / ~0.4 ms device. zerocheck
-runs the cone `constraint_eval` body: the pinned plugin wheel was built before
-the monomial-form emitter merged (xla#304), so the #143 hint decomposes — the
-next frx wheel bump activates it (~48 ms measured in #143).
+**device-bound** stage (~43 ms device — the monomial-form `constraint_eval`
+body (#143, xla#304) plus the poseidon2 transcript, #138); every other stage is
+host-dispatch-bound — stacking, the widest ratio (15.0×), is ~92 ms host /
+~0.3 ms device.
 
 > **Native per-stage capture.** The native CUDA backend names its phase spans
 > differently from the CPU set — `_gpu`-suffixed for zerocheck/GKR,
