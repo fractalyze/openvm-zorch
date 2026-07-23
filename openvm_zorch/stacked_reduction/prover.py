@@ -157,12 +157,13 @@ def _uni_kernel_args(l_skip: int, n: int, omega: int, r_0: Array):
     return l_skip, omega, r_0
 
 
-@functools.partial(frx.jit, static_argnums=(0, 1, 2))
+@functools.partial(frx.jit, static_argnums=(0, 1, 2, 3))
 def _round0_group_contrib(
     l_skip: int,
     l_eff: int,
     n: int,
-    ce: Array,
+    num_cosets: int,
+    q_cols: Array,
     z_grid: Array,
     r_uni: Array,
     omega_eff_ef: Array,
@@ -176,15 +177,18 @@ def _round0_group_contrib(
     """One stacking group's round-0 contribution to ``s_evals`` (shape
     ``(num_cosets, 2^l_skip)``), as a single fused kernel.
 
-    Evaluates the eq / κ_rot univariate kernels over the whole ``(coset, z)``
-    grid, contracts ``q``'s coset windows (``ce``), then λ-batches the columns.
-    Jitted so XLA fuses the per-grid array ops into a handful of kernels
-    instead of dispatching the field arithmetic op-by-op (the lever that
-    turned GKR/WHIR eager dispatch into a compute win); each distinct group
-    shape compiles once. ``coset_evals`` is kept eager and passed in as ``ce``
-    — its host-int Lagrange weight construction crashes the XLA backend's
-    compiler when traced.
+    Contracts ``q``'s skip windows to coset evaluations, evaluates the eq /
+    κ_rot univariate kernels over the whole ``(coset, z)`` grid, then
+    λ-batches the columns. Jitted so XLA fuses the per-grid array ops into a
+    handful of kernels instead of dispatching the field arithmetic op-by-op
+    (the lever that turned GKR/WHIR eager dispatch into a compute win); each
+    distinct group shape compiles once. ``coset_evals`` runs under the trace:
+    the caller pre-warms the host-int weight caches
+    (``prism.prewarm_coset_weights``, the #45 recipe) so the constant matrix
+    folds into the graph instead of faulting mid-trace — eager per group it
+    was ~9 ms of the stage (#134).
     """
+    ce = f_to_ef(prism.coset_evals(l_skip, q_cols, num_cosets))
     ind = prism.eval_in_uni(l_skip, n, z_grid)  # (C, S) or scalar 1
     eq_uni_r0 = prism.eval_eq_uni(l_eff, z_grid, r_uni)  # (C, S)
     eq_uni_r0_rot = prism.eval_eq_uni(l_eff, z_grid, r_uni * omega_eff_ef)
@@ -538,10 +542,8 @@ def prove_stacked_opening_reduction(
             groups.append((start, i))
             start = i
 
-    prof.mark("setup.views", transcript.state)
     transcript, lam = sample_ext(transcript)
     lam_pows = powers(lam, lam_count)
-    prof.mark("setup.lam_powers", lam_pows)
     # Views reserve two powers each, in order (see above), so view i takes
     # λ^{2i} / λ^{2i+1}: the weights are just the even and odd strides, and a
     # group — a contiguous run of views — is a slice of them. No per-view index
@@ -566,7 +568,6 @@ def prove_stacked_opening_reduction(
     eq_tables: dict[int, Array] = {
         lht: by_lift[max(lht - l_skip, 0)] for lht in lhts
     }
-    prof.mark("setup.eq_cube_tables", list(eq_tables.values()))
 
     # --- Round 0: s_0 from evaluations on the cosets g·D, g²·D ---
     # The whole (coset, z-index) grid is evaluated at once: the per-x kernels
@@ -602,7 +603,13 @@ def prove_stacked_opening_reduction(
         + [mat.reshape(-1) for mat, _ in stacked_per_commit]
     )
 
-    prof.mark("setup.rest", lam_eq_all, lam_rot_all, eq_const, z_grid, q_src)
+    # ω extraction / host-int weight construction fault under a jit trace;
+    # warming the lru cache here lets `_round0_group_contrib` constant-fold
+    # the fused coset weights (``prewarm_coset_weights`` docstring, #45).
+    prism.prewarm_coset_weights(l_skip, num_cosets)
+    prof.mark(
+        "setup", list(eq_tables.values()), lam_eq_all, lam_rot_all, z_grid, q_src
+    )
     s_evals = fnp.zeros((num_cosets, size), EF)
     for g_start, g_end in groups:
         g_views = views[g_start:g_end]
@@ -628,15 +635,12 @@ def prove_stacked_opening_reduction(
         lam_eq_w = lam_eq_all[g_start:g_end]
         lam_rot_w = lam_rot_all[g_start:g_end]
         l_eff, omega_eff, r_uni = _uni_kernel_args(l_skip, n, omega, r_0)
-        # (num_cosets, 2^l_skip, 2^ñ_T windows, columns) — coset_evals stays
-        # eager; only the kernel-eval + contraction is jitted.
-        ce = f_to_ef(prism.coset_evals(l_skip, q_cols, num_cosets))
-        prof.acc("r0.coset_evals", ce)
         s_evals = s_evals + _round0_group_contrib(
             l_skip,
             l_eff,
             n,
-            ce,
+            num_cosets,
+            q_cols,
             z_grid,
             r_uni,
             _ef_const(omega_eff),
@@ -658,13 +662,11 @@ def prove_stacked_opening_reduction(
 
     transcript, u_0 = sample_ext(transcript)
     u = [u_0]
-    prof.mark("r0.sample_u0", u_0)
 
     # --- Fold the PLEs (q and both kernels) at u_0 ---
     q_evals = [
         prism.fold_ple_evals(l_skip, mat, u_0) for mat, _ in stacked_per_commit
     ]
-    prof.mark("fold_ple", q_evals)
     eq_uni_u01 = prism.eval_eq_uni_at_one(l_skip, u_0)
     k_rot_tables: dict[int, Array] = {}
     for lht, eq in eq_tables.items():
@@ -682,7 +684,10 @@ def prove_stacked_opening_reduction(
             eq_uni_u01,
         )
     prof.mark(
-        "kernel_tables", list(eq_tables.values()), list(k_rot_tables.values())
+        "fold_ple+tables",
+        q_evals,
+        list(eq_tables.values()),
+        list(k_rot_tables.values()),
     )
 
     # --- Rounds 1..=n_stack: the quadratic MLE sumcheck (split out) ---
