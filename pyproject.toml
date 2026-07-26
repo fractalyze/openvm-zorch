@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openvm-zorch"
+dynamic = ["version"]
+description = "openvm-zorch — a lean OpenVM (SWIRL) prover built on zorch's scheme-agnostic blocks."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "The openvm-zorch Authors" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+]
+# Every entry below is imported at module top level by a module that ships in
+# the wheel, which is the whole bar for being here — `requirements.in` is the
+# development pin set and is deliberately not the source for this list.
+#
+# pyzorch is the PyPI distribution of `zorch` (the `zorch` name is taken by an
+# unrelated project); the import package stays `zorch`, and all five SWIRL
+# stages import it. frx (imported as frx / frx.numpy / frx.lax) pulls the CPU
+# stack (frxlib, zk-dtypes) transitively, so `pip install openvm-zorch` is
+# importable on its own; the `.dev0` floor stays compatible with the exact dev
+# frx the consuming workspace pins in requirements.in (a plain `>=0.10.0` would
+# conflict — dev builds sort below the release). The frx-cuda12-* plugins are
+# NOT declared: frx-cuda12-pjrt is 129 MB against PyPI's 100 MiB per-file
+# limit, so PyPI carries a 0.0.0 stub only and the GPU tier pulls the real
+# wheels from the Fractalyze index (see the README's Installation section).
+# absl-py is verify_prove's flag parsing plus every `*_test.py`; numpy is the
+# host-side fixture/bit math in the stage modules.
+dependencies = [
+    "absl-py",
+    "numpy",
+    "pyzorch>=0.1.0",
+    "frx>=0.10.0.dev0",
+]
+
+# zkbench is served by the Fractalyze index, not PyPI, so as a hard dependency
+# it would break `pip install openvm-zorch` outright. It is not dev-only here
+# the way it is in the sibling repos either: the driver that imports it,
+# openvm_zorch/logup_gkr/bench_logup_gkr_phases.py, sits inside the shipped
+# package rather than under a benchmark/ directory, so an extra is what makes
+# that one module usable from an install:
+#   pip install "openvm-zorch[bench]" \
+#     --extra-index-url https://fractalyze.github.io/pypi/simple/
+[project.optional-dependencies]
+bench = ["zkbench>=0.5.0"]
+
+[project.urls]
+Repository = "https://github.com/fractalyze/openvm-zorch"
+
+[tool.setuptools.dynamic]
+version = { attr = "openvm_zorch.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["openvm_zorch*"]
+
+# The `*_test.py` modules and `verify_prove.py` live inside the package rather
+# than beside it, so package discovery ships them; `verify_prove` in particular
+# defaults to `openvm_zorch/testdata/prove` and would die on a missing directory
+# from a pip install. 172 KB across 37 files is cheap enough to just include,
+# which is why this ships the fixtures instead of trying to strip the modules —
+# setuptools can exclude packages, not individual modules within one.
+[tool.setuptools.package-data]
+openvm_zorch = ["testdata/**/*"]
