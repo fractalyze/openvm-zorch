@@ -21,7 +21,35 @@ as implemented by
 `v2.0.0`. This repo re-implements that prover on zorch, keeping
 only the SWIRL-specific surface here and pushing every generic block upstream.
 
-## Quick start
+## Installation
+
+**Python 3.11 on Linux x86_64 only.**
+
+### CPU
+
+```sh
+pip install openvm-zorch
+```
+
+### GPU (CUDA 12)
+
+```sh
+pip install openvm-zorch 'frx[cuda12]' \
+    --extra-index-url https://fractalyze.github.io/pypi/simple/
+```
+
+The extra index carries the CUDA plugin wheels, which are too large for PyPI's
+per-file limit. It is not needed for the CPU tier.
+
+### Verify
+
+```sh
+python -c "import frx, openvm_zorch; print(frx.devices()); print(openvm_zorch.__version__)"
+```
+
+`[CpuDevice(id=0)]` means the CPU tier; a CUDA install prints the GPU devices.
+
+## Development
 
 ```sh
 bazel test //...                              # hermetic, CPU by default
@@ -52,9 +80,9 @@ plonky3 `=0.4.3`).
 
 ## Documentation
 
-See [`docs/`](docs/README.md) for the full index — pipeline & terminology, and
+See [`docs/`](https://github.com/fractalyze/openvm-zorch/blob/main/docs/README.md) for the full index — pipeline & terminology, and
 development & benchmarking.
 
 ## License
 
-Licensed under the Apache License, Version 2.0 (see [LICENSE](LICENSE)).
+Licensed under the Apache License, Version 2.0 (see [LICENSE](https://github.com/fractalyze/openvm-zorch/blob/main/LICENSE)).
