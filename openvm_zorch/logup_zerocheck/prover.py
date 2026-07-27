@@ -42,25 +42,13 @@ from __future__ import annotations
 import os
 import time
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import frx
 import frx.numpy as fnp
 from frx import Array, lax
-
-from openvm_zorch.fields import EF, F, f_const, f_inv_const, f_to_ef
-from openvm_zorch.logup_gkr.input_layer import interactions_layout
-from openvm_zorch.logup_zerocheck import prism
-from openvm_zorch.logup_zerocheck._round_composite import zerocheck_round_reduce
-from openvm_zorch.logup_zerocheck.constraints import (
-    ConstraintsDag,
-    _promote,
-    acc_constraints,
-    acc_interactions,
-    eval_nodes,
-)
-from openvm_zorch.transcript import sample_ext
 from zorch.constraint_eval import constraint_eval
 from zorch.poly.eq import eval_eq, expand_eq_to_hypercube
 from zorch.poly.univariate import compute_inv_vandermonde, eval_coeffs
@@ -68,6 +56,17 @@ from zorch.sumcheck.domain import natural_domain
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
+from openvm_zorch.fields import EF, F, f_const, f_inv_const, f_to_ef
+from openvm_zorch.logup_gkr.input_layer import interactions_layout
+from openvm_zorch.logup_zerocheck import prism
+from openvm_zorch.logup_zerocheck._round_composite import zerocheck_round_reduce
+from openvm_zorch.logup_zerocheck.constraints import (
+    ConstraintsDag,
+    acc_constraints,
+    acc_interactions,
+    eval_nodes,
+)
+from openvm_zorch.transcript import sample_ext
 
 # Bake the monomial-form `constraint_eval` body into the marker via the
 # ``cone_program_max_monomials`` composite attribute (fractalyze/xla#304), so
@@ -364,7 +363,8 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     constant-fold (a cold cache faults under trace — ``omega_int``'s
     ``lax.ntt`` + ``int(...)`` concretization). Same DAG walk the MLE
     ``lax.scan`` jits, pure EF arithmetic, contracted (row) axis kept LAST per
-    docs/development.md ⇒ byte-exact. One compile per AIR (distinct DAGs); warm/GPU reaps
+    docs/development.md ⇒ byte-exact. One compile per AIR (distinct DAGs);
+    warm/GPU reaps
     the fusion.
 
     Build the kernels once per AIR and reuse them across proves (see
@@ -431,9 +431,12 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
                 alpha,
                 live_width=packed.shape[0],
                 max_monomials=_ZC_MAX_MONOMIALS,
-            ).reshape(lead)  # (num_cosets, size, rows)
+            ).reshape(
+                lead
+            )  # (num_cosets, size, rows)
             weighted = acc * eq_xi[None, None, :]
             return weighted.sum(axis=2) * inv_zerofiers[:, None]  # (num_cosets, size)
+
     else:
         zc_eval = None
 
@@ -855,7 +858,8 @@ class _ZcProfiler:
         now = time.monotonic()
         host, device = dispatched - self._t, now - dispatched
         print(
-            f"  [zc {label}] {now - self._t:.3f}s (host={host:.3f} device={device:.3f})",
+            f"  [zc {label}] {now - self._t:.3f}s "
+            f"(host={host:.3f} device={device:.3f})",
             flush=True,
         )
         self._t = now
@@ -1173,7 +1177,7 @@ def _stage_body(
 # DAGs are held WEAKLY and the per-AIR device arrays (``trace`` + ``cached_mains``)
 # ride in as operands, never closed over, so a cached entry pins neither the traces
 # nor (past a weakref) the DAGs.
-_STAGE_FNS: dict[tuple, object] = {}
+_STAGE_FNS: dict[tuple, Callable[..., tuple[Any, Any]]] = {}
 
 
 def _stage_cache_key(
@@ -1186,7 +1190,13 @@ def _stage_cache_key(
     # leak the eager pre-build exists to prevent.
     return (
         tuple(
-            (id(a.dag), a.public_values, a.constraint_degree, a.needs_next, a.trace.shape)
+            (
+                id(a.dag),
+                a.public_values,
+                a.constraint_degree,
+                a.needs_next,
+                a.trace.shape,
+            )
             for a in airs
         ),
         l_skip,

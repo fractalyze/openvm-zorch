@@ -10,6 +10,7 @@ other stage duals in ``openvm_zorch/verify.py``, mirroring sp1-zorch's
 from __future__ import annotations
 
 from frx import Array
+from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.logup_gkr.prover import FracSumcheckProof
 from openvm_zorch.poly_common import (
@@ -21,7 +22,6 @@ from openvm_zorch.poly_common import (
     interp_linear_01,
 )
 from openvm_zorch.transcript import check_witness, sample_ext
-from zorch.transcript import DuplexTranscript
 
 
 def verify_gkr(
@@ -104,9 +104,7 @@ def verify_gkr_stage(
     p_xi = ZERO
     q_xi = alpha
     if total_interactions > 0:
-        transcript, p_xi, q_xi, xi = verify_gkr(
-            transcript, gkr_proof, l_skip + n_logup
-        )
+        transcript, p_xi, q_xi, xi = verify_gkr(transcript, gkr_proof, l_skip + n_logup)
 
     while len(xi) != l_skip + n_global:
         transcript, extra = sample_ext(transcript)

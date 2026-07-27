@@ -43,7 +43,9 @@ class BatchedConvTest(absltest.TestCase):
 
         got = _batched_conv(rows, kernel)
         # Output length == len(row) + len(kernel) - 1.
-        self.assertEqual(got.shape, (len(rows_vals), len(rows_vals[0]) + len(kernel_vals) - 1))
+        self.assertEqual(
+            got.shape, (len(rows_vals), len(rows_vals[0]) + len(kernel_vals) - 1)
+        )
 
         for i, r in enumerate(rows_vals):
             want = fnp.stack(_conv(_ef_list(r), _ef_list(kernel_vals)))

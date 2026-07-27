@@ -16,7 +16,7 @@ from typing import Sequence
 import frx.numpy as fnp
 from frx import Array, lax
 
-from openvm_zorch.fields import EF, F, MODULUS, f_const, f_inv_const, f_to_ef
+from openvm_zorch.fields import EF, MODULUS, F, f_const, f_inv_const, f_to_ef
 
 
 class VerificationError(Exception):

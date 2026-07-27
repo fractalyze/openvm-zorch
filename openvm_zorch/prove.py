@@ -28,8 +28,13 @@ from typing import Sequence
 import frx.numpy as fnp
 from frx import Array
 from zk_dtypes import babybear_mont as F
+from zorch.hash.compression import Compression
+from zorch.hash.sponge import Sponge
+from zorch.round import ProveChain, Stage
+from zorch.transcript import DuplexTranscript
+from zorch.utils.bits import log2_strict_usize
 
-from openvm_zorch.commit.trace_commit import stacked_commit
+from openvm_zorch.commit.trace_commit import StackedPcsData, stacked_commit
 from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import (
     FracSumcheckProof,
@@ -47,14 +52,8 @@ from openvm_zorch.stacked_reduction.prover import (
     StackingProof,
     prove_stacked_opening_reduction,
 )
-from openvm_zorch.commit.trace_commit import StackedPcsData
 from openvm_zorch.transcript import grind, sample_ext
 from openvm_zorch.whir.prover import WhirConfig, WhirProof, prove_whir_opening
-from zorch.hash.compression import Compression
-from zorch.hash.sponge import Sponge
-from zorch.round import ProveChain, Stage
-from zorch.transcript import DuplexTranscript
-from zorch.utils.bits import log2_strict_usize
 
 
 @dataclass(frozen=True)
@@ -226,7 +225,9 @@ def _commit_cached_mains(
     for a in sorted_airs:
         if a.cached_mains:
             cds = [
-                stacked_commit(sponge, compressor, l_skip, n_stack, log_blowup, k, [cm])[1]
+                stacked_commit(
+                    sponge, compressor, l_skip, n_stack, log_blowup, k, [cm]
+                )[1]
                 for cm in a.cached_mains
             ]
             cached_by_air[id(a)] = cds
@@ -401,6 +402,8 @@ class ZeroCheckStage(Stage):
     def __call__(
         self, carry: ProveCarry, transcript: DuplexTranscript
     ) -> tuple[ProveCarry, DuplexTranscript, BatchConstraintProof]:
+        # Set by GkrStage, which always precedes this one in the chain.
+        assert carry.xi is not None and carry.beta is not None
         transcript, bcp = prove_batch_constraints(
             transcript,
             self._l_skip,
@@ -436,6 +439,8 @@ class StackingStage(Stage):
     def __call__(
         self, carry: ProveCarry, transcript: DuplexTranscript
     ) -> tuple[ProveCarry, DuplexTranscript, StackingProof]:
+        # pcs_data comes from CommitStage, bcp_r from ZeroCheckStage.
+        assert carry.pcs_data is not None and carry.bcp_r is not None
         needs_next = [a.needs_next for a in carry.sorted_airs]
         # Stage 1 committed the common main plus each cached main as its own
         # stacked commitment; the opening reduction runs over all of them, common
@@ -487,6 +492,8 @@ class WhirStage(Stage):
     def __call__(
         self, carry: ProveCarry, transcript: DuplexTranscript
     ) -> tuple[ProveCarry, DuplexTranscript, WhirProof]:
+        # stacking_u comes from StackingStage, pcs_data from CommitStage.
+        assert carry.stacking_u is not None and carry.pcs_data is not None
         u_0 = carry.stacking_u[0]
         u_cube = [u_0]
         for _ in range(self._l_skip - 1):

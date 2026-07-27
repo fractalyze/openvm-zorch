@@ -27,7 +27,6 @@ from typing import Sequence
 import frx.numpy as fnp
 import numpy as np
 from frx import Array
-
 from zorch.utils.bits import log2_strict_usize
 
 
@@ -91,9 +90,7 @@ class StackedLayout:
                         raise ValueError(f"column overflow at stacked col {col_idx}")
                     col_idx += 1
                     row_idx = 0
-                sorted_cols.append(
-                    (mat_idx, j, StackedSlice(col_idx, row_idx, log_ht))
-                )
+                sorted_cols.append((mat_idx, j, StackedSlice(col_idx, row_idx, log_ht)))
                 row_idx += slice_len
         width = col_idx + (1 if row_idx != 0 else 0)
         return StackedLayout(l_skip, height, width, sorted_cols, mat_starts)

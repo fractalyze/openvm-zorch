@@ -30,17 +30,16 @@ import frx
 import frx.numpy as fnp
 import numpy as np
 from frx import Array, lax
-
-from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
-from openvm_zorch.fields import EF, F, MODULUS, f_const, f_to_ef
-from openvm_zorch.logup_zerocheck import prism
-from openvm_zorch.transcript import sample_ext
 from zorch.poly.univariate import powers
 from zorch.prove import fold_rounds
 from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
 from zorch.sumcheck.prover import RoundMsg, StandardRound
 from zorch.transcript import DuplexTranscript, Transcript, sample_challenge
 
+from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
+from openvm_zorch.fields import EF, MODULUS, F, f_const, f_to_ef
+from openvm_zorch.logup_zerocheck import prism
+from openvm_zorch.transcript import sample_ext
 
 _STACKING_PROFILE = os.environ.get("OPENVM_STACKING_PROFILE") == "1"
 
@@ -359,8 +358,7 @@ def _eqw_columns(
         width,
         height,
         tuple(
-            (v.slice.col_idx, v.slice.row_idx, v.slice.log_height)
-            for v in commit_views
+            (v.slice.col_idx, v.slice.row_idx, v.slice.log_height) for v in commit_views
         ),
     )
     src = fnp.concatenate([fnp.zeros((1,), EF)] + blocks)
@@ -388,7 +386,9 @@ def _q_cols_gather_index(key: tuple) -> Array:
         off += h * w
     lifted = 1 << max(views[0][3], l_skip)
     cols = [
-        mat_offsets[com_idx] + col_idx + (row_idx + np.arange(lifted)) * mat_widths[com_idx]
+        mat_offsets[com_idx]
+        + col_idx
+        + (row_idx + np.arange(lifted)) * mat_widths[com_idx]
         for com_idx, row_idx, col_idx, _lht in views
     ]
     return fnp.asarray(np.stack(cols, axis=1).reshape(-1))
@@ -562,12 +562,8 @@ def prove_stacked_opening_reduction(
 
     # eq(-, r[1..1+ñ_T]) hypercube tables per distinct log_height (LSB-first).
     lhts = sorted({v.slice.log_height for v in views})
-    by_lift = prism.eq_cube_tables(
-        list(r[1:]), [max(lht - l_skip, 0) for lht in lhts]
-    )
-    eq_tables: dict[int, Array] = {
-        lht: by_lift[max(lht - l_skip, 0)] for lht in lhts
-    }
+    by_lift = prism.eq_cube_tables(list(r[1:]), [max(lht - l_skip, 0) for lht in lhts])
+    eq_tables: dict[int, Array] = {lht: by_lift[max(lht - l_skip, 0)] for lht in lhts}
 
     # --- Round 0: s_0 from evaluations on the cosets g·D, g²·D ---
     # The whole (coset, z-index) grid is evaluated at once: the per-x kernels
@@ -607,9 +603,7 @@ def prove_stacked_opening_reduction(
     # warming the lru cache here lets `_round0_group_contrib` constant-fold
     # the fused coset weights (``prewarm_coset_weights`` docstring, #45).
     prism.prewarm_coset_weights(l_skip, num_cosets)
-    prof.mark(
-        "setup", list(eq_tables.values()), lam_eq_all, lam_rot_all, z_grid, q_src
-    )
+    prof.mark("setup", list(eq_tables.values()), lam_eq_all, lam_rot_all, z_grid, q_src)
     s_evals = fnp.zeros((num_cosets, size), EF)
     for g_start, g_end in groups:
         g_views = views[g_start:g_end]
@@ -664,9 +658,7 @@ def prove_stacked_opening_reduction(
     u = [u_0]
 
     # --- Fold the PLEs (q and both kernels) at u_0 ---
-    q_evals = [
-        prism.fold_ple_evals(l_skip, mat, u_0) for mat, _ in stacked_per_commit
-    ]
+    q_evals = [prism.fold_ple_evals(l_skip, mat, u_0) for mat, _ in stacked_per_commit]
     eq_uni_u01 = prism.eval_eq_uni_at_one(l_skip, u_0)
     k_rot_tables: dict[int, Array] = {}
     for lht, eq in eq_tables.items():

@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Sequence
 
 import frx.numpy as fnp
 from frx import Array
+from zorch.poly.univariate import eval_coeffs
+from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.fields import MODULUS, f_const, f_inv_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
@@ -33,8 +35,6 @@ from openvm_zorch.poly_common import (
     progression_exp_2,
 )
 from openvm_zorch.transcript import sample_ext
-from zorch.poly.univariate import eval_coeffs
-from zorch.transcript import DuplexTranscript
 
 if TYPE_CHECKING:
     from openvm_zorch.verify import AirVk

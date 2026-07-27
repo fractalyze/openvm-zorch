@@ -7,9 +7,8 @@ which is the point: `array_leaves` drives every per-stage number the milestone-4
 
 from __future__ import annotations
 
-from absl.testing import absltest
-
 import frx.numpy as fnp
+from absl.testing import absltest
 from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.bench_common import _NO_ARRAY_TYPES, array_leaves

@@ -47,6 +47,10 @@ from typing import Sequence
 
 import frx.numpy as fnp
 from frx import Array
+from zorch.hash.compression import Compression
+from zorch.hash.sponge import Sponge
+from zorch.round import Stage, VerifyChain
+from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.commit.stacking import StackedLayout
 from openvm_zorch.fields import F
@@ -60,10 +64,6 @@ from openvm_zorch.stacked_reduction.prover import StackingProof
 from openvm_zorch.stacked_reduction.verifier import verify_stacked_reduction
 from openvm_zorch.whir.prover import WhirProof
 from openvm_zorch.whir.verifier import verify_whir
-from zorch.hash.compression import Compression
-from zorch.hash.sponge import Sponge
-from zorch.round import Stage, VerifyChain
-from zorch.transcript import DuplexTranscript
 
 
 @dataclass(frozen=True)
@@ -201,6 +201,8 @@ class ZeroCheckVerifierStage(Stage):
         msg: BatchConstraintProof,
         transcript: DuplexTranscript,
     ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
+        # Set by GkrVerifierStage, which always precedes this one.
+        assert carry.xi is not None
         transcript, r = verify_zerocheck_stage(
             transcript,
             self._params.l_skip,
@@ -232,6 +234,8 @@ class StackingVerifierStage(Stage):
     def __call__(
         self, carry: VerifyCarry, msg: StackingProof, transcript: DuplexTranscript
     ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
+        # Both are set by ZeroCheckVerifierStage.
+        assert carry.column_openings is not None and carry.r is not None
         sorted_vks = carry.sorted_vks
         layout = StackedLayout.new(
             self._params.l_skip,
@@ -269,6 +273,8 @@ class WhirVerifierStage(Stage):
     def __call__(
         self, carry: VerifyCarry, msg: WhirProof, transcript: DuplexTranscript
     ) -> tuple[VerifyCarry, DuplexTranscript, Array]:
+        # Both are set by StackingVerifierStage.
+        assert carry.u is not None and carry.stacking_openings is not None
         u = carry.u
         u_cube = [u[0]]
         for _ in range(self._params.l_skip - 1):

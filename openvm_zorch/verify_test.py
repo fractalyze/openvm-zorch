@@ -144,7 +144,12 @@ class VerifyTest(parameterized.TestCase):
         sponge, comp = babybear16_hasher()
         cls.sponge, cls.comp = sponge, comp
         _, cls.proof = prove(
-            new_transcript(), sponge, comp, cls.params, cls.meta["vk_pre_hash"], cls.airs
+            new_transcript(),
+            sponge,
+            comp,
+            cls.params,
+            cls.meta["vk_pre_hash"],
+            cls.airs,
         )
 
     def _verify(self, proof) -> None:

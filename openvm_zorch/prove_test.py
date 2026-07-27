@@ -124,7 +124,8 @@ class ProveEndToEndTest(absltest.TestCase):
             gkr_meta["logup_pow_witness"],
         )
         np.testing.assert_array_equal(
-            _ef_limbs(proof.gkr_proof.q0_claim)[0], np.load(_GKR / "outputs" / "q0_claim.npy")
+            _ef_limbs(proof.gkr_proof.q0_claim)[0],
+            np.load(_GKR / "outputs" / "q0_claim.npy"),
         )
         np.testing.assert_array_equal(
             _ef_limbs(fnp.stack(proof.xi)), np.load(_GKR / "outputs" / "xi.npy")

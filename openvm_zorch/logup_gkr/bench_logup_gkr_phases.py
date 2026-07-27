@@ -31,12 +31,10 @@ diverge from what the real prove sees.
 """
 
 import argparse
-import dataclasses
 import json
 from collections.abc import Iterable
 from pathlib import Path
 
-import frx
 import frx.numpy as fnp
 import numpy as np
 from frx import lax

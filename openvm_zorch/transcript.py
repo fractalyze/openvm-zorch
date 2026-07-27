@@ -24,10 +24,10 @@ import frx.numpy as fnp
 from frx import Array, lax
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
-
-from openvm_zorch.poseidon2.babybear16 import babybear16_params
 from zorch.hash.poseidon2.poseidon2 import Poseidon2
 from zorch.transcript import DuplexTranscript, sample_challenge
+
+from openvm_zorch.poseidon2.babybear16 import babybear16_params
 
 RATE = 8
 # BabyBear⁴ basis coefficients per extension element.
@@ -75,14 +75,14 @@ def grind(
     return transcript.grind(pow_bits)
 
 
-def sample_bits(transcript: DuplexTranscript, bits: int) -> tuple[DuplexTranscript, int]:
+def sample_bits(
+    transcript: DuplexTranscript, bits: int
+) -> tuple[DuplexTranscript, int]:
     """One base squeeze masked to its low ``bits`` canonical bits
     (``FiatShamirTranscript::sample_bits``) — a host int, since it indexes
     Merkle queries."""
     transcript, got = transcript.sample(1)
-    canonical = int(
-        fnp.asarray(lax.bitcast_convert_type(got, F).astype(fnp.uint32))[0]
-    )
+    canonical = int(fnp.asarray(lax.bitcast_convert_type(got, F).astype(fnp.uint32))[0])
     return transcript, canonical & ((1 << bits) - 1)
 
 

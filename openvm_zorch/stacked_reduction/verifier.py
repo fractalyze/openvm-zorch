@@ -13,6 +13,8 @@ from typing import Sequence
 
 import frx.numpy as fnp
 from frx import Array
+from zorch.poly.univariate import eval_coeffs
+from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.commit.stacking import StackedLayout
 from openvm_zorch.fields import f_const, f_to_ef
@@ -28,8 +30,6 @@ from openvm_zorch.poly_common import (
 )
 from openvm_zorch.stacked_reduction.prover import StackingProof
 from openvm_zorch.transcript import sample_ext
-from zorch.poly.univariate import eval_coeffs
-from zorch.transcript import DuplexTranscript
 
 
 def verify_stacked_reduction(
