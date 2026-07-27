@@ -45,9 +45,12 @@ from openvm_zorch.transcript import sample_ext
 # GKR's round loop carries no per-round PoW grind (unlike WHIR, whose grind
 # host-reads and breaks the trace), so the transcript threads through @jit
 # cleanly. Byte-identical: jit fuses without reassociating field/Poseidon2 ops.
-# The transcript runs through the shape-stable `_observe`/`_sample` islands rather
-# than bundled into the variable-width round arithmetic — a compile lever explained
-# at `_round_poly` (Poseidon2 lowered once, not once per layer width).
+# Each layer's whole sumcheck — λ sample, every round's poly/observe/sample/fold,
+# claims, μ — is ONE fused `_prove_layer` zone (transcript threaded inside), so
+# the host dispatches once per layer, not ~3× per round: the stage is
+# host-launch-bound on GPU, and the O(rounds²) island launches dominated it.
+# The price is Poseidon2 re-lowering once per layer width at compile time —
+# amortized by FRX_COMPILATION_CACHE_DIR (#120).
 #
 # Round poly degree: eq (deg 1) * projective fraction addition (deg 2) = 3, so
 # four evals {0,1,2,3} determine it — but the prover sends only {1,2,3} (the
@@ -84,43 +87,57 @@ def _observe_sample(
 ) -> tuple[DuplexTranscript, Array]:
     """Absorb ``values`` then squeeze one challenge in a SINGLE fused Poseidon2
     region — one dispatch in place of a separate ``_observe`` then ``_sample``.
-
-    The per-layer sumcheck is host-launch-bound on GPU: the O(rounds²) binding
-    loop fires hundreds of tiny sequential kernels, so each saved launch counts.
-    Every absorb on the hot path is immediately followed by its squeeze
-    (round-poly → challenge, claims → μ), so fusing the pair halves the
-    transcript launches there. Byte-identical to ``_sample(_observe(...))`` — the
-    same Poseidon2 absorb/squeeze ops in the same order, just one jit boundary.
-    ``values`` is shape-stable per call site ((3,) round polys, (4,) claims), so
-    Poseidon2 still lowers once per site, not per round width."""
+    Used for the floor claims → μ₁ (the per-layer rounds run inside
+    ``_prove_layer``). Byte-identical to ``_sample(_observe(...))`` — the same
+    Poseidon2 absorb/squeeze ops in the same order, just one jit boundary."""
     return sample_ext(transcript.observe(values))
 
 
-# The round splits into two variable-width arithmetic islands (`_round_poly`,
-# `_round_fold`) with the Fiat-Shamir transcript run between them via the
-# shape-stable `_observe`/`_sample` islands above. Keeping the width-16 Poseidon2
-# OUT of the per-round arithmetic is a COMPILE lever, not a warm one: the layer
-# loop feeds widths 2^1..2^(rounds-1), so anything jitted with the state re-lowers
-# once per width — and the Poseidon2 composite (sponge state / (3,) poly / (4,)
-# challenge, all width-invariant) is ~3.6 s to lower vs ~0.1 s for the bare
-# arithmetic (measured). Bundling it into the round step re-paid that ~3.6 s every
-# width (~90% of GKR compile); routing the transcript through the stable islands
-# lowers Poseidon2 ONCE. Warm runtime is unchanged — both keep one fused permutation
-# kernel per round — and the split is byte-identical (same ops, same order).
-@frx.jit
 def _round_poly(state: list[Array], lam: Array) -> Array:
     """The sent round poly s(1,2,3). λ weights the denominator term — opposite of
     logup_combine. Binds the LSB: pairs adjacent entries (the reference's MLE
-    fold). No transcript: only this cheap arithmetic re-lowers per layer width."""
+    fold)."""
     eq, p0, q0, p1, q1 = (_lift_sent(a[0::2], a[1::2]) for a in state)
     return fnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
 
 
-@frx.jit
 def _round_fold(state: list[Array], r: Array) -> list[Array]:
-    """Fold each MLE at challenge r over the same LSB pairing as `_round_poly`.
-    Variable width, no transcript."""
+    """Fold each MLE at challenge r over the same LSB pairing as `_round_poly`."""
     return [fold(a, r, msb=False) for a in state]
+
+
+@frx.jit
+def _prove_layer(
+    transcript: DuplexTranscript,
+    xi: list[Array],
+    n0: Array,
+    d0: Array,
+    n1: Array,
+    d1: Array,
+) -> tuple[DuplexTranscript, Array, Array, list[Array], Array, Array]:
+    """One layer's whole sumcheck as a single fused zone.
+
+    ``len(xi)`` — the layer's round count — is pytree STRUCTURE, so the round
+    loop unrolls statically at trace time and frx retraces once per layer
+    (widths and xi length differ layer to layer). No ``lax.scan``: a runtime
+    While is a fusion barrier that leaves one launch per round; unrolled, XLA
+    fuses the inter-round Fiat-Shamir glue and the host dispatches once per
+    layer. Op-for-op the same sequence as the former per-round islands —
+    byte-identical."""
+    transcript, lam = sample_ext(transcript)
+    state = [_eq_table(xi), n0, d0, n1, d1]
+    rho: list[Array] = []
+    round_polys = []
+    for _ in range(len(xi)):
+        s_evals = _round_poly(state, lam)
+        transcript, r_round = sample_ext(transcript.observe(s_evals))
+        state = _round_fold(state, r_round)
+        rho.append(r_round)
+        round_polys.append(s_evals)
+    # Wire order (p_xi_0, q_xi_0, p_xi_1, q_xi_1); each folded MLE is length 1.
+    claims = fnp.stack([state[1][0], state[2][0], state[3][0], state[4][0]])
+    transcript, mu = sample_ext(transcript.observe(claims))
+    return transcript, lam, fnp.stack(round_polys), rho, claims, mu
 
 
 @dataclass(frozen=True)
@@ -136,7 +153,6 @@ class FracSumcheckProof:
     rhos: list[list[Array]]
 
 
-@frx.jit
 def _eq_table(xi: list[Array]) -> Array:
     """eq(ξ, y) for y on the hypercube, little-endian in ξ (ξ[0] ↔ bit 0)."""
     point = fnp.stack(xi[::-1])
@@ -221,39 +237,20 @@ def fractional_sumcheck(
     rhos: list[list[Array]] = []
     for round_ in range(1, total_rounds):
         layer = layers[total_rounds - 1 - round_]  # MLEs of length 2^round_
-        transcript, lam = _sample(transcript)
-        lambdas.append(lam)
-
-        state = [
-            _eq_table(xi),
+        transcript, lam, round_polys, rho, claims, mu = _prove_layer(
+            transcript,
+            xi,
             layer.numerator_0,
             layer.denominator_0,
             layer.numerator_1,
             layer.denominator_1,
-        ]
-        rho: list[Array] = []
-        round_polys = []
-        for _ in range(round_):
-            s_evals = _round_poly(state, lam)
-            transcript, r_round = _observe_sample(transcript, s_evals)
-            state = _round_fold(state, r_round)
-            rho.append(r_round)
-            round_polys.append(s_evals)
-
-        folded = GkrLayer(
-            numerator_0=state[1],
-            numerator_1=state[3],
-            denominator_0=state[2],
-            denominator_1=state[4],
-            num_batch_variables=0,
         )
-        claims = layer_claims(folded)
-        transcript, mu = _observe_sample(transcript, claims)
         # ξ^{(j)} = (μ_j, ρ): the merge challenge is the new first coordinate.
         xi = [mu] + rho
 
         claims_per_layer.append(claims)
-        sumcheck_polys.append(fnp.stack(round_polys))
+        sumcheck_polys.append(round_polys)
+        lambdas.append(lam)
         mus.append(mu)
         rhos.append(rho)
 
