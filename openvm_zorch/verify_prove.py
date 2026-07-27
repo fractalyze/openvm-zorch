@@ -1,6 +1,6 @@
 """Byte-match harness for the assembled ``prove`` chain -- a runnable.
 
-Runs ``prove_chain`` (commit -> LogUp-GKR -> zerocheck
+Runs the SWIRL prover (commit -> LogUp-GKR -> zerocheck
 -> stacked reduction -> WHIR) over a production-shaped fixture and seals the
 assembled proof against the reference: every proof component is byte-matched
 (canonical-u32 exact) against the fixture's ``outputs/`` dump, the same
@@ -14,7 +14,7 @@ zerocheck round-0 (#32), and a cuda-dep'd target cannot even import on a
 driverless CI box. This runnable deps the cuda plugin and runs on whatever
 backend FRX selects, so it is the way to gate GPU byte-match at scale.
 
-Each Stage is wrapped in a ``_TimedRound`` that prints its wall-clock
+Each role is wrapped in a ``_TimedStage`` that prints its wall-clock
 on every run, so the compile-vs-runtime split is visible alongside the
 byte-match (proof messages are plain dataclasses, opaque to
 ``block_until_ready``, so block on their array leaves by hand). Wall-clock is
@@ -41,21 +41,19 @@ import numpy as np
 from absl import app, flags
 from frx import lax
 from zk_dtypes import babybear_mont as F
-from zorch.round import ProverRound, prove_rounds
 
 from openvm_zorch.bench_common import array_leaves
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 from openvm_zorch.prove import (
     AirInstance,
-    CommitStage,
-    GkrStage,
+    LogupGkrProver,
     Proof,
-    StackingStage,
+    StackedWhirPcs,
+    StackingProver,
     SystemParams,
-    WhirStage,
-    ZeroCheckStage,
-    prove_chain,
+    ZerocheckProver,
+    build_prover,
 )
 from openvm_zorch.transcript import new_transcript
 from openvm_zorch.whir.prover import WhirConfig
@@ -72,7 +70,7 @@ _BASELINE = flags.DEFINE_string(
     "baseline",
     None,
     "Optional native-prover baseline JSON (see docs/development.md). When "
-    "set, the chain is run a second (warm) time and its per-stage _TimedRound "
+    "set, the prover is run a second (warm) time and its per-role _TimedStage "
     "sum is printed against the native e2e prove time, with the delta.",
 )
 
@@ -106,47 +104,64 @@ _PROVE = Path(__file__).parent / "testdata" / "prove"
 # labels back to class names. Keyed by the class, a rename that misses this
 # map cannot import.
 _STAGE_LABELS = {
-    CommitStage: "commit",
-    GkrStage: "GKR",
-    ZeroCheckStage: "zerocheck",
-    StackingStage: "stacking",
-    WhirStage: "WHIR",
+    StackedWhirPcs: "WHIR",
+    LogupGkrProver: "GKR",
+    ZerocheckProver: "zerocheck",
+    StackingProver: "stacking",
 }
+# The commit half shares its class with the opening half, so it is labelled at
+# the call site rather than by type.
+_COMMIT_LABEL = "commit"
 
 
-def _rounds_through(rounds, stop_label):
-    """The chain rounds up to and including the stage named ``stop_label``
-    (``None`` keeps the whole chain). Matched against ``_STAGE_LABELS`` so the
-    flag takes friendly names, not class names."""
+class _StopAfter(Exception):
+    """Raised by the timing wrapper once the --stop_after role has run, to cut
+    the composite short without giving the role itself a stop parameter."""
+
+
+def _check_stop_label(stop_label):
     if stop_label is None:
-        return list(rounds)
-    for i, rnd in enumerate(rounds):
-        if _STAGE_LABELS.get(type(rnd)) == stop_label:
-            return list(rounds[: i + 1])
-    choices = sorted(set(_STAGE_LABELS.values()))
-    raise ValueError(
-        f"--stop_after={stop_label!r} matched no stage; pick from {choices}"
-    )
+        return
+    choices = sorted(set(_STAGE_LABELS.values()) | {_COMMIT_LABEL})
+    if stop_label not in choices:
+        raise ValueError(
+            f"--stop_after={stop_label!r} matched no stage; pick from {choices}"
+        )
 
 
-class _TimedRound:
-    """Print each stage's wall-clock so the compile-vs-runtime split is visible
-    on every run. Blocking is mandatory -- async dispatch returns before the
-    device finishes, so an unblocked timing would attribute this stage's
-    compute to the next timed section; the message is a plain dataclass, opaque
-    to ``block_until_ready``, so block on its array leaves by hand.
+class _TimedStage:
+    """Wrap a prover role so each reduction's wall-clock prints on every run,
+    making the compile-vs-runtime split visible. Blocking is mandatory --
+    async dispatch returns before the device finishes, so an unblocked timing
+    would attribute this role's compute to the next timed section; the result
+    is a plain dataclass, opaque to ``block_until_ready``, so block on its
+    array leaves by hand.
 
     When a ``record`` dict is passed, each call also stores ``label -> seconds``
-    so the caller can sum the per-stage warm runtime for the ``--baseline``
-    comparison."""
+    so the caller can sum the per-role warm runtime for the ``--baseline``
+    comparison. ``stop_after`` raises ``_StopAfter`` once the named role has
+    been timed, which is how --stop_after truncates the run without the
+    composite knowing about it."""
 
-    def __init__(self, inner: ProverRound, record: dict | None = None) -> None:
+    def __init__(self, inner, label, record=None, stop_after=None, commit_label=None):
         self._inner = inner
+        self._label = label
+        # The PCS's two halves share one object, so they carry separate labels.
+        self._commit_label = commit_label
         self._record = record
+        self._stop_after = stop_after
 
-    def __call__(self, carry, transcript):
+    def prove(self, claim, witness, transcript):
+        return self._timed(
+            self._label, lambda: self._inner.prove(claim, witness, transcript)
+        )
+
+    def commit(self, witness):
+        return self._timed(self._commit_label, lambda: self._inner.commit(witness))
+
+    def _timed(self, label, run):
         t0 = time.monotonic()
-        out = self._inner(carry, transcript)
+        out = run()
         # Dispatch-return: async execution returns here before the device is
         # done, so this span is the host cost -- the trace-cached executable
         # launch plus any eager Python glue around it. The remainder up to the
@@ -157,7 +172,6 @@ class _TimedRound:
         t_dispatch = time.monotonic() - t0
         frx.block_until_ready(array_leaves(out))
         dt = time.monotonic() - t0
-        label = _STAGE_LABELS.get(type(self._inner), type(self._inner).__name__)
         if self._record is not None:
             self._record[label] = dt
         print(
@@ -166,7 +180,25 @@ class _TimedRound:
             f"device {(dt - t_dispatch) * 1e3:.1f}ms]",
             flush=True,
         )
+        if self._stop_after == label:
+            raise _StopAfter
         return out
+
+
+def _instrument(prover, record=None, stop_after=None):
+    """Wrap each of the composite's roles in a timing shim.
+
+    The composite calls its children through these attributes, so replacing
+    them times every reduction without the composite carrying a profiling
+    parameter it would otherwise have to thread into production `prove`."""
+    prover.pcs = _TimedStage(
+        prover.pcs, "WHIR", record, stop_after, commit_label=_COMMIT_LABEL
+    )
+    for attr in ("gkr", "zerocheck", "stacking"):
+        inner = getattr(prover, attr)
+        label = _STAGE_LABELS[type(inner)]
+        setattr(prover, attr, _TimedStage(inner, label, record, stop_after))
+    return prover
 
 
 def _load_instance(prove_dir):
@@ -430,51 +462,51 @@ def main(argv) -> None:
         f"whir_rounds={len(params.whir.num_queries)}"
     )
 
-    # Per-stage timings print as the chain runs (see _TimedRound). The first
-    # (cold) pass carries the reference observation-log so CommitStage diffs the
-    # prelude element-by-element (issue #59); the warm pass below omits it.
-    chain, carry = prove_chain(sponge, comp, params, vk_pre_hash, airs, obs_log=obs_log)
-    chain = [_TimedRound(rnd) for rnd in _rounds_through(chain, _STOP_AFTER.value)]
+    # Per-role timings print as the composite runs (see _TimedStage). The first
+    # (cold) pass carries the reference observation-log so the prelude is diffed
+    # element-by-element (issue #59); the warm pass below omits it.
+    _check_stop_label(_STOP_AFTER.value)
+    prover, claim, witness = build_prover(
+        sponge, comp, params, vk_pre_hash, airs, obs_log=obs_log
+    )
+    _instrument(prover, stop_after=_STOP_AFTER.value)
 
     t0 = time.monotonic()
-    _, _, msgs = prove_rounds(chain, carry, new_transcript())
-    print(f"chain run: {time.monotonic() - t0:.1f}s")
+    proof = None
+    try:
+        proof = prover.prove(claim, witness, new_transcript()).reduction_proof
+    except _StopAfter:
+        pass
+    print(f"prove run: {time.monotonic() - t0:.1f}s")
 
-    if _STOP_AFTER.value is not None:
+    if proof is None:
         print(f"[stopped after {_STOP_AFTER.value}; byte-match skipped]", flush=True)
     else:
-        root, gkr, bcp, stacking_proof, whir_proof = msgs
-        # Assemble the Proof exactly as prove() does, then byte-match it.
-        proof = Proof(
-            common_main_commit=root,
-            logup_pow_witness=gkr.logup_pow_witness,
-            gkr_proof=gkr.gkr_proof,
-            xi=gkr.xi,
-            batch_constraint_proof=bcp,
-            stacking_proof=stacking_proof,
-            whir_proof=whir_proof,
-        )
         if not _byte_match(proof, prove_dir / "outputs"):
             sys.exit(1)
         print("prove chain byte-match: ALL OK")
 
-    # The first chain run above pays the XLA compile; for the baseline
-    # comparison we want warm per-stage runtime, so run the (now-compiled)
-    # chain a second time and capture each stage's wall-clock. --stop_after
-    # alone also triggers it (per-stage profiling needs no baseline).
+    # The first run above pays the XLA compile; for the baseline comparison we
+    # want warm per-role runtime, so run the (now-compiled) composite a second
+    # time and capture each role's wall-clock. --stop_after alone also triggers
+    # it (per-role profiling needs no baseline).
     if _BASELINE.value or _STOP_AFTER.value is not None:
-        warm_chain, warm_carry = prove_chain(sponge, comp, params, vk_pre_hash, airs)
-        base_rounds = _rounds_through(warm_chain, _STOP_AFTER.value)
         n_runs = max(_RUNS.value, 1)
-        # Report the per-stage MINIMUM across warm passes: the first warm pass
+        # Report the per-role MINIMUM across warm passes: the first warm pass
         # has not settled and reads high, so the min approximates the converged
         # steady state (the number worth pinning).
         stage_times: dict = {}
         print(f"\n[warm pass{'es' if n_runs > 1 else ''}]", flush=True)
         for _ in range(n_runs):
             st: dict = {}
-            warm_chain = [_TimedRound(rnd, record=st) for rnd in base_rounds]
-            prove_rounds(warm_chain, warm_carry, new_transcript())
+            warm, warm_claim, warm_witness = build_prover(
+                sponge, comp, params, vk_pre_hash, airs
+            )
+            _instrument(warm, record=st, stop_after=_STOP_AFTER.value)
+            try:
+                warm.prove(warm_claim, warm_witness, new_transcript())
+            except _StopAfter:
+                pass
             for label, dt in st.items():
                 stage_times[label] = min(stage_times.get(label, dt), dt)
         if n_runs > 1:

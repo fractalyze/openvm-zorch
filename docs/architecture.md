@@ -14,12 +14,29 @@ SWIRL proves a multi-AIR system in five stages, each a Round composition
 threading one Fiat-Shamir transcript (zorch `DuplexTranscript` ↔ Rust
 `DuplexSponge<BabyBear, Poseidon2, 16, 8>`).
 
-"Stage" is zorch's granularity, not a local coinage
-([Stage / Bridge / `Round`](https://github.com/fractalyze/zorch#building-blocks)).
-No standalone **Bridge** exists here yet: the LogUp PoW grind and the ξ padding
-are folded into `GkrStage`, the prelude into `CommitStage` — splitting them out
-moves the Fiat-Shamir schedule, so the verifier chain has to mirror it
-round-for-round.
+**"Stage 1..5" is the reference's numbering of the SWIRL protocol, not zorch's
+notion of a stage.** zorch defines what a stage, a round, a committer and a
+shared function are, and how they compose — see
+[`docs/composition/stage-composition.md`](https://github.com/fractalyze/zorch/blob/main/docs/composition/stage-composition.md);
+that definition is not restated here. The two vocabularies collide on the word
+"stage", so the mapping is worth stating outright:
+
+| Reference stage | What it is in zorch's terms | This repo |
+| --- | --- | --- |
+| Stage 1 (commit) | the PCS **commit half** — it runs before any claim exists | `StackedWhirPcs.commit` |
+| — (prelude) | a **shared function** both roles call; it only absorbs | `bind_commitment` |
+| Stage 2 (LogUp-GKR) | a **stage**: one claim reduction | `LogupGkrProver` |
+| Stage 3 (zerocheck) | a **stage** | `ZerocheckProver` |
+| Stage 4 (stacking) | a **stage** | `StackingProver` |
+| Stage 5 (WHIR) | the PCS **open half**, discharging the final claim | `StackedWhirPcs.prove` |
+
+So three of the five reference stages are zorch stages; the first and last are
+the two halves of one PCS role, held apart by Fiat-Shamir. The cached-main
+commitments are a **committer**, taken in build scope before any claim exists.
+
+The LogUp PoW grind and the ξ padding are folded into the LogUp-GKR reduction,
+and the prelude into `bind_commitment` — splitting them out moves the
+Fiat-Shamir schedule, so the verifier has to mirror it step for step.
 
 | # | Stage | Rust entry point (crates/stark-backend/src/) | This repo |
 |---|-------|----------------------------------------------|-----------|
@@ -238,10 +255,10 @@ transcript.
 
 ## Verifier (implemented)
 
-`openvm_zorch/verify.py` is the Python `verify` — a `VerifyChain` of one
-verifier Stage per prover stage (the dual of `prove_chain`), each driving its
-stage's `verifier.py`; the commit Stage only replays the preamble, its check
-deferred to WHIR's Merkle openings. From the proof plus a
+`openvm_zorch/verify.py` is the Python `verify` — `SwirlVerifier`, one verifier
+role per prover role (the dual of `SwirlProver`), each driving its protocol's
+`verifier.py`; the preamble is only replayed, its check deferred to WHIR's
+Merkle openings. From the proof plus a
 verifying key (per-AIR constraint DAG, log height, common-main width, public
 values — no traces) it re-derives every challenge from the same preamble and
 checks each stage's relation, mirroring `crates/stark-backend/src/verifier`:

@@ -1,4 +1,4 @@
-"""Stage-2 verifier: the dual of ``GkrStage`` (verifier/gkr.rs).
+"""LogUp-GKR verifier math: the dual of ``LogupGkrProver`` (verifier/gkr.rs).
 
 ``verify_gkr_stage`` checks the LogUp PoW witness, re-derives α/β, verifies
 the GKR fractional sumcheck (``verify_gkr``), and pads ξ — the stage math
@@ -86,14 +86,14 @@ def verify_gkr_stage(
     gkr_proof: FracSumcheckProof,
     logup_pow_witness: Array,
 ) -> tuple[DuplexTranscript, Array, Array, list[Array], Array, Array]:
-    """Stage 2 verifier — the dual of ``GkrStage``: check the LogUp PoW witness,
+    """The dual of ``LogupGkrProver``: check the LogUp PoW witness,
     re-derive α/β, verify the GKR fractional sumcheck, and pad ξ to
     ``l_skip + n_global``. Returns α, β, the padded point ξ, and the reduced
     GKR numerator/denominator claims (``p_xi`` / ``q_xi``) the ZeroCheck stage
     reduces the per-air sum claims against. ``n_logup`` / ``n_global`` are the
     protocol-derived sizes ``verify_chain`` binds, and ``total_interactions``
     the derived count it gates the GKR verify on (the same values the prover's
-    ``prove_chain`` derives)."""
+    ``SystemShape`` derives)."""
     transcript, ok = check_witness(transcript, logup_pow_bits, logup_pow_witness)
     if not bool(ok):
         raise VerificationError("invalid LogUp PoW witness")

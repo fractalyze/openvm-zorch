@@ -1,4 +1,4 @@
-"""Stage-3 verifier: the dual of ``ZeroCheckStage`` (verifier/zerocheck.rs).
+"""Zerocheck verifier math: the dual of ``ZerocheckProver`` (verifier/zerocheck.rs).
 
 ``verify_zerocheck_stage`` replays the batched ZeroCheck + LogUp sumcheck and
 closes it by re-evaluating the constraint/interaction claim at the folded
@@ -62,7 +62,7 @@ def verify_zerocheck_stage(
     p_xi: Array,
     q_xi: Array,
 ) -> tuple[DuplexTranscript, list[Array]]:
-    """Stage 3 verifier — the dual of ``ZeroCheckStage``: the batched ZeroCheck
+    """The dual of ``ZerocheckProver``: the batched ZeroCheck
     + LogUp sumcheck. Consumes the Stage-2 outputs off the carry (α/β, the
     padded point ξ, and the GKR claims ``p_xi`` / ``q_xi``), re-evaluates the
     constraint/interaction claim at the folded point from the proof's column

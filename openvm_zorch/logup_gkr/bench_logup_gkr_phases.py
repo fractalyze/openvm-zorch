@@ -1,21 +1,21 @@
 """LogUp-GKR stage phase ablation over a prove fixture (zkbench).
 
-Phases mirror GkrStage's body in ``openvm_zorch/prove.py``: ``grind`` (LogUp
+Phases mirror LogupGkrProver's body in ``openvm_zorch/prove.py``: ``grind`` (LogUp
 PoW), ``input_evals`` (the DAG-built ``(count, denom)`` input layer over all
 AIRs), ``frac_sumcheck`` (the fractional-sumcheck round chain), plus ``total``
-(the whole GkrStage). ``total`` is the op that joins the milestone-4 per-stage
+(the whole reduction). ``total`` is the op that joins the milestone-4 per-stage
 report; the three sub-phases are this prover's own ablation.
 
 Structure mirrors sp1-zorch's ``bench_logup_gkr_phases.py`` so the per-stage
 benches read the same across repos. The harness is zkbench's ``FrxBenchmark``:
 it runs ``--warmup`` then ``--iterations`` timed runs and reports warm latency
-(GkrStage has no single ``lowered.compile()`` — a host-loop grind plus jit
+(the role has no single ``lowered.compile()`` — a host-loop grind plus jit
 islands across a Python round loop — so no ``lower`` thunk is given and the op
 carries no zkbench compile metric; observe COMPILE out of band, see below).
 
 File loading, the chain build, and every phase's entry state stay outside the
 timers. Phase inputs are re-derived from the post-commit transcript (GkrStage
-reads only ``carry.sorted_airs`` + that transcript, never CommitStage's carry
+reads only the witness traces + that transcript, never the commit half's data
 outputs) and the run aborts before timing if ``total``'s ``q0_claim`` drifts
 from the fixture's ``outputs/q0_claim.npy``, so the phases cannot silently
 diverge from what the real prove sees.
@@ -46,7 +46,12 @@ from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import fractional_sumcheck
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
-from openvm_zorch.prove import AirInstance, SystemParams, prove_chain
+from openvm_zorch.prove import (
+    AirInstance,
+    SystemParams,
+    bind_commitment,
+    build_prover,
+)
 from openvm_zorch.transcript import grind, new_transcript, sample_ext
 from openvm_zorch.whir.prover import WhirConfig
 
@@ -130,11 +135,21 @@ class LogupGkrPhasesBenchmark(FrxBenchmark):
         params, vk_pre_hash, airs = _load_instance(prove_dir)
         sponge, comp = babybear16_hasher()
 
-        chain, carry0 = prove_chain(sponge, comp, params, vk_pre_hash, airs)
-        commit, gkr = chain[0], chain[1]
-        c1, t1, _ = commit(carry0, new_transcript())  # advance past the trace commit
+        prover, claim, witness = build_prover(sponge, comp, params, vk_pre_hash, airs)
+        gkr = prover.gkr
+        # Advance past the trace commit: the PCS commit half, then the prelude
+        # both roles absorb.
+        commitment, _ = prover.pcs.commit(witness)
+        t1 = bind_commitment(
+            new_transcript(),
+            claim,
+            commitment,
+            witness.cached,
+            vk_pre_hash=vk_pre_hash,
+        )
 
-        sorted_airs = c1.sorted_airs
+        sorted_airs = witness.sorted_airs
+        n_logup = claim.shape.n_logup
         traces = [a.trace for a in sorted_airs]
         dags = [a.dag for a in sorted_airs]
         pubs = [a.public_values for a in sorted_airs]
@@ -142,16 +157,16 @@ class LogupGkrPhasesBenchmark(FrxBenchmark):
         cached = [a.cached_mains for a in sorted_airs]
 
         # Phase-entry states (untimed): grind -> sample alpha/beta -> input layer.
-        tg, _ = grind(t1, gkr._logup_pow_bits)
+        tg, _ = grind(t1, params.logup_pow_bits)
         ta, alpha = sample_ext(tg)
         tb, beta = sample_ext(ta)
         num, den = gkr_input_evals(
-            gkr._l_skip, gkr._n_logup, traces, dags, pubs, nxt, cached, alpha, beta
+            params.l_skip, n_logup, traces, dags, pubs, nxt, cached, alpha, beta
         )
 
         # Anchor: total's q0_claim must match the fixture, or we'd time the
         # wrong computation (mirrors sp1-zorch's check_match gate).
-        _, _, msg = gkr(c1, t1)
+        msg = gkr.prove(claim, witness, t1).reduction_proof
         got = _ef_limbs(msg.gkr_proof.q0_claim)[0]
         want = np.load(prove_dir / "outputs" / "q0_claim.npy")
         if not np.array_equal(got, want):
@@ -163,7 +178,7 @@ class LogupGkrPhasesBenchmark(FrxBenchmark):
             "fixture": prove_dir.name,
             "field": "babybear",
             "num_airs": str(len(sorted_airs)),
-            "n_logup": str(gkr._n_logup),
+            "n_logup": str(n_logup),
         }
         total_rows = sum(int(a.trace.shape[0]) for a in sorted_airs)
 
@@ -177,13 +192,13 @@ class LogupGkrPhasesBenchmark(FrxBenchmark):
             )
 
         if "grind" in ops:
-            yield _op("logup_gkr_grind", lambda: grind(t1, gkr._logup_pow_bits))
+            yield _op("logup_gkr_grind", lambda: grind(t1, params.logup_pow_bits))
         if "input_evals" in ops:
             yield _op(
                 "logup_gkr_input_evals",
                 lambda: gkr_input_evals(
-                    gkr._l_skip,
-                    gkr._n_logup,
+                    params.l_skip,
+                    n_logup,
                     traces,
                     dags,
                     pubs,
@@ -198,7 +213,7 @@ class LogupGkrPhasesBenchmark(FrxBenchmark):
                 "logup_gkr_frac_sumcheck", lambda: fractional_sumcheck(tb, num, den)
             )
         if "total" in ops:
-            yield _op("logup_gkr_total", lambda: gkr(c1, t1))
+            yield _op("logup_gkr_total", lambda: gkr.prove(claim, witness, t1))
 
 
 def main() -> int:
