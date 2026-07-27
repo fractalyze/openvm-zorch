@@ -89,11 +89,11 @@ def verify_gkr_stage(
     """The dual of ``LogupGkrProver``: check the LogUp PoW witness,
     re-derive α/β, verify the GKR fractional sumcheck, and pad ξ to
     ``l_skip + n_global``. Returns α, β, the padded point ξ, and the reduced
-    GKR numerator/denominator claims (``p_xi`` / ``q_xi``) the ZeroCheck stage
-    reduces the per-air sum claims against. ``n_logup`` / ``n_global`` are the
-    protocol-derived sizes ``verify_chain`` binds, and ``total_interactions``
-    the derived count it gates the GKR verify on (the same values the prover's
-    ``SystemShape`` derives)."""
+    GKR numerator/denominator claims (``p_xi`` / ``q_xi``) the zerocheck
+    reduces the per-air sum claims against. ``n_logup`` / ``n_global`` are
+    protocol-derived sizes, and ``total_interactions`` the derived count that
+    gates the GKR verify — all of them off the claim's ``SystemShape``, which
+    both roles derive through the same code."""
     transcript, ok = check_witness(transcript, logup_pow_bits, logup_pow_witness)
     if not bool(ok):
         raise VerificationError("invalid LogUp PoW witness")

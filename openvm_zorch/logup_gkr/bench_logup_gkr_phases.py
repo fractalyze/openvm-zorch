@@ -13,10 +13,10 @@ it runs ``--warmup`` then ``--iterations`` timed runs and reports warm latency
 islands across a Python round loop — so no ``lower`` thunk is given and the op
 carries no zkbench compile metric; observe COMPILE out of band, see below).
 
-File loading, the chain build, and every phase's entry state stay outside the
-timers. Phase inputs are re-derived from the post-commit transcript (GkrStage
-reads only the witness traces + that transcript, never the commit half's data
-outputs) and the run aborts before timing if ``total``'s ``q0_claim`` drifts
+File loading, the role build, and every phase's entry state stay outside the
+timers. Phase inputs are re-derived from the post-commit transcript
+(``LogupGkrProver`` reads only the witness traces + that transcript, never the
+commit half's data) and the run aborts before timing if ``total``'s ``q0_claim`` drifts
 from the fixture's ``outputs/q0_claim.npy``, so the phases cannot silently
 diverge from what the real prove sees.
 

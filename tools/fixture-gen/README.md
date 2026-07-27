@@ -89,5 +89,5 @@ makes the LogUp PoW grind non-deterministic and breaks fixture reproducibility.
 It is for `--baseline-out` only.
 
 See the Benchmarking section of [`docs/development.md`](../../docs/development.md)
-for what is timed (the prove step alone, matching `prove_chain`'s scope) and
+for what is timed (the prove step alone, matching `SwirlProver.prove`'s scope) and
 how `verify_prove --baseline` consumes the JSON.

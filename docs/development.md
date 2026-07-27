@@ -91,7 +91,7 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
 The bar is the **native (Rust) reference prover** — openvm-stark-backend
 `v2.0.0` (`16d60de7`), the exact prover this repo byte-matches — proving
 the same instance at the same params. The timed unit on both sides is the
-prove step alone (trace-in → proof-out, `prove_chain`'s scope): keygen,
+prove step alone (trace-in → proof-out, `SwirlProver.prove`'s scope): keygen,
 tracegen, and device transport are one-time setup, recorded separately under
 `setup_s`, never folded into the prove number.
 

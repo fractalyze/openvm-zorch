@@ -80,7 +80,7 @@ The dumped `meta.json` also carries (under `--ref-prove`) the full vk-prelude
 structure (`vk_prelude`: per vk position `present` / `is_required` /
 `has_preprocessed` / `num_cached_mains` / `n_public_values`) and the raw
 reference observation-log prefix (`obs_log`: canonical-u32 `values` + `samples`
-through the grind boundary), so zorch's `CommitStage` can diff its prelude
+through the grind boundary), so zorch's prelude absorb can be diffed
 transcript element-by-element instead of inferring divergence from cascaded
 `MISMATCH` labels.
 
@@ -107,7 +107,7 @@ milestone #4's per-stage "beat native" issues (#43/#44/#45/#46) measure against.
 It builds the tapped ctx exactly as `--ref-prove` does (RowMajor→ColMajor +
 `stacked_commit` cached mains, factored into `build_ref_ctx`), then runs a warm
 loop timing `prover.prove(&d_pk, d_ctx)` ALONE — trace-in → proof-out, exactly
-zorch `prove_chain`'s scope — with a non-recording `DuplexSponge` (the recorder
+zorch `SwirlProver.prove`'s scope — with a non-recording `DuplexSponge` (the recorder
 is pure overhead; the proof is byte-identical). Env knobs: `BENCH_RUNS`
 (default 3), `BENCH_PLATFORM_LABEL`.
 
@@ -161,7 +161,7 @@ enough to serialize the parallel prover and inflate the phase spans themselves.
 
 Note `prover.main_trace_commit` times the **common-main** commit only — native
 commits cached mains during *tracegen* (the span just observes the precomputed
-`cd.commitment`), unlike zorch's `CommitStage`, which recomputes them in-stage.
+`cd.commitment`), unlike zorch's cached-main committer, which recomputes them.
 
 ## Fixture format
 
