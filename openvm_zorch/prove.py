@@ -161,10 +161,8 @@ class SystemClaim:
     """Every present AIR's trace satisfies its constraints, and the LogUp
     interactions across all of them balance.
 
-    The root statement a SWIRL proof discharges. It carries only what varies
-    per block — which vk AIRs are present, how tall each is, what public values
-    it exposes — while the circuit-fixed properties (constraint DAGs, column
-    counts, security parameters) configure the roles.
+    The root statement a SWIRL proof discharges; it carries only what varies per
+    block, the circuit-fixed properties being role configuration.
     """
 
     air_shapes: tuple[AirShape, ...]  # input (verifying-key) order
@@ -176,12 +174,9 @@ class LogupClaim:
     """The system's LogUp fraction sums collapse, under the batching challenges
     α and β, to a single fraction-sum claim at the point ξ.
 
-    What LogUp-GKR leaves for zerocheck: the interaction argument has come down
-    to one claim about the input layer, which zerocheck ties back to the traces'
-    own columns. The claimed numerator and denominator are not carried — the
-    verifier re-derives them from the reduction proof while checking it, and the
-    prover recomputes the input layer from the witness, so neither role reads
-    them off a shared field.
+    The claimed numerator and denominator are not carried: the verifier
+    re-derives them from the reduction proof and the prover recomputes the input
+    layer, so neither reads them off a shared field.
     """
 
     system: SystemClaim
@@ -193,13 +188,7 @@ class LogupClaim:
 @dataclass(frozen=True, kw_only=True)
 class ColumnOpeningClaim:
     """Each AIR's columns open to ``column_openings`` at the zerocheck point
-    ``r``.
-
-    What zerocheck leaves for the stacked reduction: the constraint and
-    interaction claims have been discharged down to per-column evaluation
-    claims, which are statements about committed data rather than about the
-    AIRs' algebra.
-    """
+    ``r``."""
 
     system: SystemClaim
     r: list[Array]
@@ -209,12 +198,7 @@ class ColumnOpeningClaim:
 @dataclass(frozen=True, kw_only=True)
 class StackedOpeningClaim:
     """The committed stacked matrix's columns open to ``stacking_openings`` at
-    the point ``u``.
-
-    What the stacked reduction leaves for the PCS: one opening claim per
-    stacked column against ``commitment``, which the PCS discharges into the
-    trivial claim.
-    """
+    the point ``u`` — the claim the PCS discharges."""
 
     commitment: Array
     u: list[Array]
@@ -466,14 +450,9 @@ class StackedWhirPcs:
     """The stacked polynomial commitment scheme: commit the traces, open them
     at a point with WHIR.
 
-    Two halves of one role, held apart by Fiat-Shamir — the commitment must
+    The halves sit apart because Fiat-Shamir requires it — the commitment must
     bind the transcript before LogUp-GKR draws a challenge, and the opening
-    needs the point the stacked reduction produces. ``StackedCommitData`` names
-    what crosses between them.
-
-    Reduces a stacked opening claim to the trivial claim: WHIR is terminal, so
-    the whole SWIRL proof is a complete argument rather than one link in a
-    chain.
+    needs the point the stacked reduction produces.
     """
 
     def __init__(
@@ -713,15 +692,9 @@ class SwirlProver(ProverStage[SystemClaim, SystemWitness, TrivialClaim, Proof]):
     """The SWIRL prover: the stacked PCS commit, then three reductions, then the
     opening.
 
-    A composite role, so the wiring has one definition and ``prove``, the
-    byte-match runnable and the benchmark cannot drift on it. LogUp-GKR,
-    zerocheck and the stacked reduction each reduce the previous claim; the PCS
-    brackets them, binding the traces up front and discharging the final
-    opening claim at the end, with ``StackedCommitData`` held here in between
-    because it belongs to neither claim.
-
-    Reduces to the trivial claim: the WHIR opening is terminal, so a SWIRL
-    proof is a complete argument rather than one link in a chain.
+    One definition of the wiring, so ``prove``, the byte-match runnable and the
+    benchmark cannot drift on it. ``StackedCommitData`` is held here between the
+    PCS halves because it belongs to neither claim.
     """
 
     def __init__(
