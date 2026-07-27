@@ -59,14 +59,18 @@ from openvm_zorch.transcript import sample_ext
 _SENT_US = (1, 2, 3)
 
 
-def _lift_sent(lo: Array, hi: Array) -> Array:
-    """Lift a split pair to the SENT eval domain ``{1,2,3}`` (skips u=0).
+def _lift_sent(state: Array) -> Array:
+    """Lift the paired state to the SENT eval domain ``{1,2,3}`` (skips u=0).
 
-    ``f[u] = lo + u*(hi - lo)``, shape ``(3, *lo.shape)``. ``us`` uses
+    ``state`` is the stacked ``(5, W)`` round state; the LSB pairing splits it
+    to ``lo``/``hi`` ``(5, W/2)`` and ``f[u] = lo + u*(hi - lo)`` lifts all
+    five MLEs in ONE broadcast FMA, shape ``(3, 5, W/2)`` — a kernel-count
+    lever: the per-MLE lift was 5 slices + 5 FMAs per round. ``us`` uses
     ``fnp.stack`` (not ``fnp.arange``, whose iota is unsupported for extension
     dtypes)."""
+    lo, hi = state[:, 0::2], state[:, 1::2]
     us = fnp.stack([fnp.array(u, dtype=lo.dtype) for u in _SENT_US])
-    return lo + us.reshape((-1,) + (1,) * lo.ndim) * (hi - lo)
+    return lo + us.reshape((-1, 1, 1)) * (hi - lo)
 
 
 @frx.jit
@@ -93,17 +97,14 @@ def _observe_sample(
     return sample_ext(transcript.observe(values))
 
 
-def _round_poly(state: list[Array], lam: Array) -> Array:
+def _round_poly(state: Array, lam: Array) -> Array:
     """The sent round poly s(1,2,3). λ weights the denominator term — opposite of
     logup_combine. Binds the LSB: pairs adjacent entries (the reference's MLE
-    fold)."""
-    eq, p0, q0, p1, q1 = (_lift_sent(a[0::2], a[1::2]) for a in state)
+    fold). Field ops are exact, so the batched lift/products are byte-identical
+    to the former per-MLE form."""
+    f = _lift_sent(state)  # (3, 5, W/2)
+    eq, p0, q0, p1, q1 = (f[:, i] for i in range(5))
     return fnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
-
-
-def _round_fold(state: list[Array], r: Array) -> list[Array]:
-    """Fold each MLE at challenge r over the same LSB pairing as `_round_poly`."""
-    return [fold(a, r, msb=False) for a in state]
 
 
 @frx.jit
@@ -122,20 +123,22 @@ def _prove_layer(
     (widths and xi length differ layer to layer). No ``lax.scan``: a runtime
     While is a fusion barrier that leaves one launch per round; unrolled, XLA
     fuses the inter-round Fiat-Shamir glue and the host dispatches once per
-    layer. Op-for-op the same sequence as the former per-round islands —
-    byte-identical."""
+    layer. Same field algebra in the same transcript order as the former
+    per-round islands — byte-identical (field ops are exact)."""
     transcript, lam = sample_ext(transcript)
-    state = [_eq_table(xi), n0, d0, n1, d1]
+    # One (5, W) stack so each round's lift and fold are ONE broadcast op over
+    # all five MLEs, not five — `fold` is ndim-agnostic over the last axis.
+    state = fnp.stack([_eq_table(xi), n0, d0, n1, d1])
     rho: list[Array] = []
     round_polys = []
     for _ in range(len(xi)):
         s_evals = _round_poly(state, lam)
         transcript, r_round = sample_ext(transcript.observe(s_evals))
-        state = _round_fold(state, r_round)
+        state = fold(state, r_round, msb=False)
         rho.append(r_round)
         round_polys.append(s_evals)
     # Wire order (p_xi_0, q_xi_0, p_xi_1, q_xi_1); each folded MLE is length 1.
-    claims = fnp.stack([state[1][0], state[2][0], state[3][0], state[4][0]])
+    claims = state[1:, 0]
     transcript, mu = sample_ext(transcript.observe(claims))
     return transcript, lam, fnp.stack(round_polys), rho, claims, mu
 
