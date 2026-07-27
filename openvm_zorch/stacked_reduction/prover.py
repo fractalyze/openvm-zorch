@@ -35,7 +35,7 @@ from zorch.poly.univariate import powers
 from zorch.prove import fold_rounds
 from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
 from zorch.sumcheck.prover import RoundMsg, StandardRound
-from zorch.transcript import DuplexTranscript, Transcript
+from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, F, f_const, f_to_ef
@@ -272,7 +272,7 @@ class _StackingSummand:
         return self.combine((), *factors)
 
 
-class _StackingRound(StandardRound):
+class _StackingRound(StandardRound[DuplexTranscript]):
     """``StandardRound`` that also surfaces the challenge it sampled.
 
     ``StandardRound`` returns its round poly alone, but Stage 4's proof carries
@@ -282,8 +282,8 @@ class _StackingRound(StandardRound):
     in ``EF``)."""
 
     def __call__(
-        self, folded: Array, transcript: Transcript
-    ) -> tuple[Array, Transcript, RoundMsg]:
+        self, folded: Array, transcript: DuplexTranscript
+    ) -> tuple[Array, DuplexTranscript, RoundMsg]:
         msg = self._round_poly(folded)
         transcript, r = self.challenges.observe_and_sample(transcript, msg)
         return fold(folded, r), transcript, RoundMsg(msg, r)
@@ -479,7 +479,12 @@ def _sumcheck_rounds(
     summand = _StackingSummand()
     # {1, 2} — the natural {0, 1, 2} domain minus s(0), which the verifier
     # reconstructs from the running claim rather than reading off the wire.
-    domain = EvalDomain(natural_domain(summand.degree, EF).nodes[1:])
+    natural = natural_domain(summand.degree, EF).nodes
+    # `EvalDomain.nodes` is optional because `None` means the implicit naturals;
+    # `natural_domain` is the constructor that materialises them, so this branch
+    # cannot be taken.
+    assert natural is not None
+    domain = EvalDomain(natural[1:])
     folded, transcript, msgs = fold_rounds(
         _StackingRound(summand, domain, challenges=ChallengePolicy(EF)),
         fnp.stack([q_cols, eqw_cols]),

@@ -446,7 +446,15 @@ def commit_cached_mains(
     )
 
 
-class StackedWhirPcs:
+class StackedWhirPcs(
+    ProverStage[
+        StackedOpeningClaim,
+        StackedCommitData,
+        TrivialClaim,
+        WhirProof,
+        DuplexTranscript,
+    ]
+):
     """The stacked polynomial commitment scheme: commit the traces, open them
     at a point with WHIR.
 
@@ -493,7 +501,7 @@ class StackedWhirPcs:
         claim: StackedOpeningClaim,
         witness: StackedCommitData,
         transcript: DuplexTranscript,
-    ) -> ProveResult[TrivialClaim, WhirProof]:
+    ) -> ProveResult[TrivialClaim, WhirProof, DuplexTranscript]:
         """Open the committed matrices at ``u_cube`` — the stacking → WHIR
         handoff ``u_cube = (u₀ squarings over the skip domain) ‖ u[1..]``
         (reference ``prove_openings``)."""
@@ -525,7 +533,7 @@ class StackedWhirPcs:
 
 
 class LogupGkrProver(
-    ProverStage[SystemClaim, SystemWitness, LogupClaim, LogupGkrProof]
+    ProverStage[SystemClaim, SystemWitness, LogupClaim, LogupGkrProof, DuplexTranscript]
 ):
     """Reduce the system's interaction claim to one fraction-sum claim at ξ.
 
@@ -542,7 +550,7 @@ class LogupGkrProver(
         claim: SystemClaim,
         witness: SystemWitness,
         transcript: DuplexTranscript,
-    ) -> ProveResult[LogupClaim, LogupGkrProof]:
+    ) -> ProveResult[LogupClaim, LogupGkrProof, DuplexTranscript]:
         shape = claim.shape
         airs = witness.sorted_airs
         transcript, logup_pow_witness = grind(transcript, self._logup_pow_bits)
@@ -578,7 +586,13 @@ class LogupGkrProver(
 
 
 class ZerocheckProver(
-    ProverStage[LogupClaim, SystemWitness, ColumnOpeningClaim, BatchConstraintProof]
+    ProverStage[
+        LogupClaim,
+        SystemWitness,
+        ColumnOpeningClaim,
+        BatchConstraintProof,
+        DuplexTranscript,
+    ]
 ):
     """Reduce the constraint and LogUp claims to per-column opening claims at
     ``r``.
@@ -596,7 +610,7 @@ class ZerocheckProver(
         claim: LogupClaim,
         witness: SystemWitness,
         transcript: DuplexTranscript,
-    ) -> ProveResult[ColumnOpeningClaim, BatchConstraintProof]:
+    ) -> ProveResult[ColumnOpeningClaim, BatchConstraintProof, DuplexTranscript]:
         transcript, bcp = prove_batch_constraints(
             transcript,
             self._l_skip,
@@ -629,7 +643,11 @@ class ZerocheckProver(
 
 class StackingProver(
     ProverStage[
-        ColumnOpeningClaim, StackedCommitData, StackedOpeningClaim, StackingProof
+        ColumnOpeningClaim,
+        StackedCommitData,
+        StackedOpeningClaim,
+        StackingProof,
+        DuplexTranscript,
     ]
 ):
     """Reduce per-column opening claims at ``r`` to stacked-column opening
@@ -654,7 +672,7 @@ class StackingProver(
         claim: ColumnOpeningClaim,
         witness: StackedCommitData,
         transcript: DuplexTranscript,
-    ) -> ProveResult[StackedOpeningClaim, StackingProof]:
+    ) -> ProveResult[StackedOpeningClaim, StackingProof, DuplexTranscript]:
         # The commit half committed the common main plus each cached main as its
         # own stacked commitment; the opening reduction runs over all of them,
         # common main first (reference ``device.rs`` prove_openings:154-167).
@@ -688,7 +706,9 @@ class StackingProver(
         )
 
 
-class SwirlProver(ProverStage[SystemClaim, SystemWitness, TrivialClaim, Proof]):
+class SwirlProver(
+    ProverStage[SystemClaim, SystemWitness, TrivialClaim, Proof, DuplexTranscript]
+):
     """The SWIRL prover: the stacked PCS commit, then three reductions, then the
     opening.
 
@@ -738,7 +758,7 @@ class SwirlProver(ProverStage[SystemClaim, SystemWitness, TrivialClaim, Proof]):
         claim: SystemClaim,
         witness: SystemWitness,
         transcript: DuplexTranscript,
-    ) -> ProveResult[TrivialClaim, Proof]:
+    ) -> ProveResult[TrivialClaim, Proof, DuplexTranscript]:
         commitment, commit_data = self.pcs.commit(witness)
         transcript = bind_commitment(
             transcript,

@@ -103,7 +103,9 @@ class VerifiedLogupClaim(LogupClaim):
     denominator: Array
 
 
-class LogupGkrVerifier(VerifierStage[SystemClaim, LogupClaim, LogupGkrProof]):
+class LogupGkrVerifier(
+    VerifierStage[SystemClaim, VerifiedLogupClaim, LogupGkrProof, DuplexTranscript]
+):
     """The dual of ``LogupGkrProver``: check the LogUp PoW witness, re-derive
     α/β and ξ, and verify the fractional sumcheck."""
 
@@ -115,7 +117,7 @@ class LogupGkrVerifier(VerifierStage[SystemClaim, LogupClaim, LogupGkrProof]):
         claim: SystemClaim,
         reduction_proof: LogupGkrProof,
         transcript: DuplexTranscript,
-    ) -> VerifyResult[VerifiedLogupClaim]:
+    ) -> VerifyResult[VerifiedLogupClaim, DuplexTranscript]:
         shape = claim.shape
         transcript, alpha, beta, xi, p_xi, q_xi = verify_gkr_stage(
             transcript,
@@ -142,7 +144,12 @@ class LogupGkrVerifier(VerifierStage[SystemClaim, LogupClaim, LogupGkrProof]):
 
 
 class ZerocheckVerifier(
-    VerifierStage[VerifiedLogupClaim, ColumnOpeningClaim, BatchConstraintProof]
+    VerifierStage[
+        VerifiedLogupClaim,
+        ColumnOpeningClaim,
+        BatchConstraintProof,
+        DuplexTranscript,
+    ]
 ):
     """The dual of ``ZerocheckProver``: verify the batched ZeroCheck + LogUp
     sumcheck and produce the per-column opening claims at ``r``.
@@ -160,7 +167,7 @@ class ZerocheckVerifier(
         claim: VerifiedLogupClaim,
         reduction_proof: BatchConstraintProof,
         transcript: DuplexTranscript,
-    ) -> VerifyResult[ColumnOpeningClaim]:
+    ) -> VerifyResult[ColumnOpeningClaim, DuplexTranscript]:
         shape = claim.system.shape
         sorted_vks = [self._air_vks[i] for i in shape.order]
         transcript, r = verify_zerocheck_stage(
@@ -189,7 +196,9 @@ class ZerocheckVerifier(
 
 
 class StackingVerifier(
-    VerifierStage[ColumnOpeningClaim, StackedOpeningClaim, StackingProof]
+    VerifierStage[
+        ColumnOpeningClaim, StackedOpeningClaim, StackingProof, DuplexTranscript
+    ]
 ):
     """The dual of ``StackingProver``: rebuild the stacked layout from the
     verifying keys, batch the incoming column openings, and verify the stacked
@@ -213,7 +222,7 @@ class StackingVerifier(
         claim: ColumnOpeningClaim,
         reduction_proof: StackingProof,
         transcript: DuplexTranscript,
-    ) -> VerifyResult[StackedOpeningClaim]:
+    ) -> VerifyResult[StackedOpeningClaim, DuplexTranscript]:
         sorted_vks = [self._air_vks[i] for i in claim.system.shape.order]
         layout = StackedLayout.new(
             self._params.l_skip,
@@ -242,7 +251,7 @@ class StackingVerifier(
 
 
 class StackedWhirPcsVerifier(
-    VerifierStage[StackedOpeningClaim, TrivialClaim, WhirProof]
+    VerifierStage[StackedOpeningClaim, TrivialClaim, WhirProof, DuplexTranscript]
 ):
     """The open half of the stacked PCS, verifier side: form ``u_cube`` from
     the claim's opening point — the same handoff the prover does — and check
@@ -264,7 +273,7 @@ class StackedWhirPcsVerifier(
         claim: StackedOpeningClaim,
         reduction_proof: WhirProof,
         transcript: DuplexTranscript,
-    ) -> VerifyResult[TrivialClaim]:
+    ) -> VerifyResult[TrivialClaim, DuplexTranscript]:
         u_cube = [claim.u[0]]
         for _ in range(self._params.l_skip - 1):
             u_cube.append(u_cube[-1] * u_cube[-1])
@@ -285,7 +294,7 @@ class StackedWhirPcsVerifier(
         return VerifyResult(TrivialClaim(), transcript, fnp.bool_(True))
 
 
-class SwirlVerifier(VerifierStage[SystemClaim, TrivialClaim, Proof]):
+class SwirlVerifier(VerifierStage[SystemClaim, TrivialClaim, Proof, DuplexTranscript]):
     """The SWIRL verifier: bind the commitment, then check three reductions and
     the PCS opening.
 
@@ -315,7 +324,7 @@ class SwirlVerifier(VerifierStage[SystemClaim, TrivialClaim, Proof]):
         claim: SystemClaim,
         reduction_proof: Proof,
         transcript: DuplexTranscript,
-    ) -> VerifyResult[TrivialClaim]:
+    ) -> VerifyResult[TrivialClaim, DuplexTranscript]:
         transcript = bind_commitment(
             transcript,
             claim,
