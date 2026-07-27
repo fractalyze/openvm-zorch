@@ -1,5 +1,5 @@
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
 load("@openvm_zorch_pip//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 # OpenVM's concrete Poseidon2 instance over zorch's agnostic engine.
 py_library(

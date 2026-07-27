@@ -55,6 +55,23 @@ python -c "import frx, openvm_zorch; print(frx.devices()); print(openvm_zorch.__
 bazel test //...                              # hermetic, CPU by default
 ```
 
+Install the git hooks with both stages named. Plain `pre-commit install` wires
+only the `pre-commit` stage, which leaves the commit-message linter inactive —
+a malformed commit message then sails through to CI:
+
+```sh
+pre-commit install --install-hooks --hook-type pre-commit --hook-type commit-msg
+```
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org):
+a valid type, a lowercase summary with no trailing period, a header of at most
+80 characters, and a body on everything but `docs`. The scope is the package the
+change lives in — `commit`, `logup_gkr`, `logup_zerocheck`, `poseidon2`,
+`stacked_reduction`, `whir` — or one of `prove`, `verify`, `verify_prove`,
+`transcript`, `fields`, `poly_common`, `bench_common`, `release` for the modules
+directly under `openvm_zorch/`. A change spanning several takes no scope. The
+same linter runs in CI over every commit in a pull request and over the PR title.
+
 Regenerate golden fixtures (requires Rust toolchain; pinned to the reference
 tag, so output is reproducible):
 

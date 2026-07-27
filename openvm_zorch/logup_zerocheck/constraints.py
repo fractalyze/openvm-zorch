@@ -159,7 +159,9 @@ def acc_interactions(
     """Interactions accumulated under their ``eq(ξ_3, b)`` weights as a
     (numerator, denominator) pair (single.rs ``acc_interactions``)."""
     pairs = eval_interactions(dag, node_vals, beta_pows)
-    numer = fnp.zeros((), eq_3bs[0].dtype) if eq_3bs else fnp.zeros((), beta_pows[0].dtype)
+    numer = (
+        fnp.zeros((), eq_3bs[0].dtype) if eq_3bs else fnp.zeros((), beta_pows[0].dtype)
+    )
     denom = numer
     for eq_3b, (count, h_beta) in zip(eq_3bs, pairs):
         numer = numer + eq_3b * _promote(count)

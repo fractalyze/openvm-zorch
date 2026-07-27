@@ -28,13 +28,13 @@ from dataclasses import dataclass
 import frx
 import frx.numpy as fnp
 from frx import Array
-
-from openvm_zorch.transcript import sample_ext
 from zorch.logup_gkr.circuit import GkrLayer, build_pyramid
 from zorch.poly.eq import expand_eq_to_hypercube
 from zorch.sumcheck.domain import fold
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
+
+from openvm_zorch.transcript import sample_ext
 
 # Stage-2 ran fully eager, and the per-round Fiat-Shamir dominated it: a single
 # eager `observe + sample_ext` dispatches the width-16 Poseidon2 permutation as
@@ -189,7 +189,10 @@ def fractional_sumcheck(
 
     # Root fraction: p must vanish (LogUp balance); only q goes on the wire.
     floor = layers[-1]
-    p_root = floor.numerator_0 * floor.denominator_1 + floor.numerator_1 * floor.denominator_0
+    p_root = (
+        floor.numerator_0 * floor.denominator_1
+        + floor.numerator_1 * floor.denominator_0
+    )
     q_root = floor.denominator_0 * floor.denominator_1
     if int(fnp.sum(p_root != 0)) != 0:
         raise ValueError("non-zero root sum: interactions do not balance")

@@ -33,22 +33,17 @@ class TraceCommitByteMatchTest(absltest.TestCase):
         super().setUpClass()
         cls.meta = json.loads((_FIXTURE / "meta.json").read_text())
         cls.traces = [
-            _load(f"inputs/trace_{i}.npy")
-            for i in range(len(cls.meta["trace_dims"]))
+            _load(f"inputs/trace_{i}.npy") for i in range(len(cls.meta["trace_dims"]))
         ]
 
     def test_stacked_matrix_matches(self) -> None:
         mat, _ = stacked_matrix(self.meta["l_skip"], self.meta["n_stack"], self.traces)
-        self.assertTrue(
-            bool(fnp.array_equal(mat, _load("outputs/stacked_matrix.npy")))
-        )
+        self.assertTrue(bool(fnp.array_equal(mat, _load("outputs/stacked_matrix.npy"))))
 
     def test_codeword_matches(self) -> None:
         mat = _load("outputs/stacked_matrix.npy")
         codeword = rs_code_matrix(self.meta["l_skip"], self.meta["log_blowup"], mat)
-        self.assertTrue(
-            bool(fnp.array_equal(codeword, _load("outputs/codeword.npy")))
-        )
+        self.assertTrue(bool(fnp.array_equal(codeword, _load("outputs/codeword.npy"))))
 
     def test_commit_matches(self) -> None:
         sponge, comp = babybear16_hasher()
@@ -64,9 +59,7 @@ class TraceCommitByteMatchTest(absltest.TestCase):
         for level, layer in enumerate(data.tree.digest_layers):
             self.assertTrue(
                 bool(
-                    fnp.array_equal(
-                        layer, _load(f"outputs/digest_layer_{level}.npy")
-                    )
+                    fnp.array_equal(layer, _load(f"outputs/digest_layer_{level}.npy"))
                 ),
                 msg=f"digest layer {level} diverges",
             )

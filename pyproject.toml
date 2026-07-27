@@ -67,3 +67,18 @@ include = ["openvm_zorch*"]
 # setuptools can exclude packages, not individual modules within one.
 [tool.setuptools.package-data]
 openvm_zorch = ["testdata/**/*"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["openvm_zorch"]
+# Annotations are not required yet; turning these on is a typing pass of its own.
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# Untyped or statically unresolvable third parties. zorch arrives through the
+# bazel git_override, so it is not importable where mypy runs.
+[[tool.mypy.overrides]]
+module = ["frx.*", "frxlib.*", "zk_dtypes.*", "zkbench.*", "absl.*", "zorch.*", "openvm.*"]
+ignore_missing_imports = true

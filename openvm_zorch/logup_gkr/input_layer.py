@@ -37,6 +37,7 @@ from frx import Array
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
 from zk_dtypes import pfinfo
+from zorch.utils.bits import log2_strict_usize
 
 from openvm_zorch.commit.stacking import StackedLayout
 from openvm_zorch.fields import f_to_ef
@@ -45,7 +46,6 @@ from openvm_zorch.logup_zerocheck.constraints import (
     eval_interactions,
     eval_nodes,
 )
-from zorch.utils.bits import log2_strict_usize
 
 # Per-AIR jitted DAG evaluators, keyed by DAG identity. The per-AIR
 # eval_nodes + eval_interactions must be jitted (one kernel per AIR) or they run

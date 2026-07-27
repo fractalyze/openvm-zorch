@@ -1,0 +1,21 @@
+roots = ["openvm_zorch"]
+require_scope = false
+exempt_paths = [
+  "docs", "README.md", "CLAUDE.md", "LICENSE", ".github", ".gitignore",
+  ".bazelrc", ".python-version", "tools", "pyproject.toml", "requirements.in",
+  "requirements_lock_3_11.txt", "MODULE.bazel", "MODULE.bazel.lock",
+  "BUILD.bazel", ".pre-commit-config.yaml", ".fractal-commit-lint.toml",
+  "openvm_zorch/BUILD.bazel",
+  "openvm_zorch/testdata",
+]
+[scopes]
+stacking = ["openvm_zorch/stacked_reduction"]
+zerocheck = ["openvm_zorch/logup_zerocheck"]
+prove = ["openvm_zorch/prove.py", "openvm_zorch/prove_test.py"]
+verify = ["openvm_zorch/verify.py", "openvm_zorch/verify_test.py"]
+verify_prove = ["openvm_zorch/verify_prove.py"]
+transcript = ["openvm_zorch/transcript.py", "openvm_zorch/transcript_test.py"]
+fields = ["openvm_zorch/fields.py"]
+poly_common = ["openvm_zorch/poly_common.py"]
+bench_common = ["openvm_zorch/bench_common.py", "openvm_zorch/bench_common_test.py"]
+release = ["openvm_zorch/__init__.py"]

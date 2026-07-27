@@ -13,9 +13,9 @@ import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest
 from zk_dtypes import babybear_mont as F
+from zorch.hash.poseidon2.poseidon2 import Poseidon2
 
 from openvm_zorch.poseidon2.babybear16 import babybear16_hasher, babybear16_params
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
 
 _FIXTURE = (
     Path(__file__).parent.parent / "commit" / "testdata" / "stacked_commit" / "outputs"

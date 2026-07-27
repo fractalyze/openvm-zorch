@@ -1,4 +1,7 @@
-"""openvm-zorch — a lean OpenVM (SWIRL) prover built on zorch's scheme-agnostic blocks."""
+"""openvm-zorch — a lean OpenVM (SWIRL) prover.
+
+Built on zorch's scheme-agnostic blocks.
+"""
 
 # Single source of truth for the packaged version: pyproject.toml carries no
 # literal of its own (it derives this one via `attr =`), and release.yml refuses

@@ -38,7 +38,9 @@ def _replay_log(values: np.ndarray, is_sample: np.ndarray, end: int):
     while idx < end:
         if is_sample[idx]:
             t, got = t.sample(1)
-            got = int(np.asarray(lax.bitcast_convert_type(got, F).astype(fnp.uint32))[0])
+            got = int(
+                np.asarray(lax.bitcast_convert_type(got, F).astype(fnp.uint32))[0]
+            )
             assert got == int(values[idx]), f"sample mismatch at {idx}"
             idx += 1
         else:

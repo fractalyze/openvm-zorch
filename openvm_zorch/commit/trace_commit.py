@@ -16,12 +16,12 @@ from typing import Sequence
 
 import frx
 from frx import Array
+from zorch.hash.compression import Compression
+from zorch.hash.sponge import Sponge
 
 from openvm_zorch.commit.rs_message import rs_code_matrix
 from openvm_zorch.commit.stacked_merkle import StackedMerkleTree, stacked_merkle_commit
 from openvm_zorch.commit.stacking import StackedLayout, stacked_matrix
-from zorch.hash.compression import Compression
-from zorch.hash.sponge import Sponge
 
 
 @dataclass(frozen=True)

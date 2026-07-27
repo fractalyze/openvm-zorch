@@ -15,11 +15,6 @@ from typing import Sequence
 
 import frx.numpy as fnp
 from frx import Array, lax
-
-from openvm_zorch.fields import F
-from openvm_zorch.poly_common import VerificationError
-from openvm_zorch.whir.prover import WhirConfig, WhirProof
-from openvm_zorch.whir.scheme import SwirlWhirScheme
 from zorch.coding.reed_solomon import ReedSolomon
 from zorch.commit.merkle import Opening
 from zorch.commit.strided_merkle import StridedMerkleTree
@@ -29,6 +24,11 @@ from zorch.pcs.whir.config import WhirParams
 from zorch.pcs.whir.config import WhirProof as GenericWhirProof
 from zorch.pcs.whir.verifier import WhirVerifier
 from zorch.transcript import DuplexTranscript
+
+from openvm_zorch.fields import F
+from openvm_zorch.poly_common import VerificationError
+from openvm_zorch.whir.prover import WhirConfig, WhirProof
+from openvm_zorch.whir.scheme import SwirlWhirScheme
 
 
 def _stack_paths(paths: Sequence[Array]) -> list[Array]:

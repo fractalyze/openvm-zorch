@@ -41,6 +41,7 @@ import numpy as np
 from absl import app, flags
 from frx import lax
 from zk_dtypes import babybear_mont as F
+from zorch.round import Round
 
 from openvm_zorch.bench_common import array_leaves
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
@@ -58,7 +59,6 @@ from openvm_zorch.prove import (
 )
 from openvm_zorch.transcript import new_transcript
 from openvm_zorch.whir.prover import WhirConfig
-from zorch.round import Round
 
 _FIXTURE_DIR = flags.DEFINE_string(
     "fixture_dir",
@@ -162,7 +162,8 @@ class _TimedRound(Round):
             self._record[label] = dt
         print(
             f"[stage {label}] {dt:.1f}s  "
-            f"[host/dispatch {t_dispatch * 1e3:.1f}ms + device {(dt - t_dispatch) * 1e3:.1f}ms]",
+            f"[host/dispatch {t_dispatch * 1e3:.1f}ms + "
+            f"device {(dt - t_dispatch) * 1e3:.1f}ms]",
             flush=True,
         )
         return out
@@ -395,7 +396,9 @@ def _compare_baseline(baseline_path: str, params, stage_times: dict) -> None:
             e = per_stage.get(name)
             return e["s"] if isinstance(e, dict) else e
 
-        gkr_n, zclog_n = _span("fractional_sumcheck"), _span("prove_zerocheck_and_logup")
+        gkr_n, zclog_n = _span("fractional_sumcheck"), _span(
+            "prove_zerocheck_and_logup"
+        )
         native_stage = {
             "commit": _span("prover.main_trace_commit"),
             "GKR": gkr_n,
@@ -477,7 +480,9 @@ def main(argv) -> None:
             for label, dt in st.items():
                 stage_times[label] = min(stage_times.get(label, dt), dt)
         if n_runs > 1:
-            summary = "  ".join(f"{k} {stage_times[k] * 1e3:.1f}ms" for k in stage_times)
+            summary = "  ".join(
+                f"{k} {stage_times[k] * 1e3:.1f}ms" for k in stage_times
+            )
             print(f"[converged min over {n_runs} passes] {summary}", flush=True)
         # The e2e sum-vs-native comparison is only meaningful for the full chain.
         if _BASELINE.value and _STOP_AFTER.value is None:

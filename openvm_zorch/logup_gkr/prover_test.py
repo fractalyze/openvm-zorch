@@ -21,7 +21,12 @@ from zk_dtypes import babybear_mont as F
 from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.logup_gkr.prover import fractional_sumcheck, pad_xi
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
-from openvm_zorch.transcript import check_witness, ef_from_limbs, new_transcript, sample_ext
+from openvm_zorch.transcript import (
+    check_witness,
+    ef_from_limbs,
+    new_transcript,
+    sample_ext,
+)
 
 _FIXTURE = Path(__file__).parent / "testdata" / "logup_gkr"
 # Interactions are expression-valued (DAG node indices); the constraint DAGs of
