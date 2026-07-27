@@ -35,6 +35,7 @@ from zorch.prove import fold_rounds
 from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
 from zorch.sumcheck.prover import RoundMsg, StandardRound
 from zorch.transcript import DuplexTranscript, Transcript, sample_challenge
+from zorch.utils.bits import log2_strict_usize
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, F, f_const, f_to_ef
@@ -289,6 +290,29 @@ class _StackingRound(StandardRound):
         return fold(folded, r), transcript, RoundMsg(msg, r)
 
 
+@frx.jit
+def _fold_rounds_fused(state: Array, transcript: Transcript):
+    """All the stage's sumcheck rounds as ONE fused jit zone.
+
+    Eager, ``fold_rounds`` dispatched ~3 launches per round (poly / Poseidon2
+    observe+sample / fold) with the host on the critical path — the stage's
+    largest warm region (#134's ``rounds.fold``), parked there behind #44's
+    capture lever; #44 has since measured capture as a dead end and landed the
+    fused-unrolled-zone form instead (GKR, then zerocheck). Fused, the host
+    dispatches once and XLA fuses the inter-round Fiat-Shamir glue. The round
+    count is ``log2`` of the (static) cube axis, so the loop unrolls at trace
+    time and the state halves naturally per round — the module is bounded and
+    the ops are the eager path's own, byte-identical. The domain/round objects
+    are rebuilt under trace: protocol constants, not per-prove values, so the
+    trace cache stays valid across proves."""
+    summand = _StackingSummand()
+    # {1, 2} — the natural {0, 1, 2} domain minus s(0), which the verifier
+    # reconstructs from the running claim rather than reading off the wire.
+    domain = EvalDomain(natural_domain(summand.degree, EF).nodes[1:])
+    rnd = _StackingRound(summand, domain, ext_dtype=EF)
+    return fold_rounds(rnd, state, transcript, log2_strict_usize(state.shape[-1]))
+
+
 @functools.lru_cache(maxsize=128)
 def _eqw_gather_index(key: tuple) -> Array:
     """Device gather index placing each view's weight block into the
@@ -427,12 +451,10 @@ def _sumcheck_rounds(
     state each round, so the rounds are not fixed-shape and do not fit a
     ``lax.scan`` without padding every round back to full width and masking the
     dead lanes — which is what this stage did before it moved onto the shared
-    round. Byte-identical either way (the masked tail was exactly zero), and
-    cheaper here: this stage runs eager, where a ``lax.scan`` re-traces and
-    recompiles its body on every call while the unrolled ops hit the dispatch
-    cache (~8x at the production ``n_stack`` of 16, ~100x at the suite's 8).
-    Jitting the stage would invert that — an unrolled module grows with the
-    round count, where one scan body does not."""
+    round (byte-identical either way, the masked tail was exactly zero — and a
+    scan's runtime While would pay the per-iteration command-buffer re-record
+    tax besides). The unrolled chain runs inside ``_fold_rounds_fused``'s
+    single jit zone; see its docstring for the dispatch/compile tradeoff."""
     u = list(u)
     widths = [q.shape[1] for q in q_evals]
 
@@ -476,15 +498,8 @@ def _sumcheck_rounds(
     eqw_cols = lax.bit_reverse(eqw_cols, dimensions=(1,))
     prof.mark("rounds.eqw_build", q_cols, eqw_cols)
 
-    summand = _StackingSummand()
-    # {1, 2} — the natural {0, 1, 2} domain minus s(0), which the verifier
-    # reconstructs from the running claim rather than reading off the wire.
-    domain = EvalDomain(natural_domain(summand.degree, EF).nodes[1:])
-    folded, transcript, msgs = fold_rounds(
-        _StackingRound(summand, domain, ext_dtype=EF),
-        fnp.stack([q_cols, eqw_cols]),
-        transcript,
-        n_stack,
+    folded, transcript, msgs = _fold_rounds_fused(
+        fnp.stack([q_cols, eqw_cols]), transcript
     )
     round_polys = [m.round_poly for m in msgs]
     u = u + [m.challenge for m in msgs]
