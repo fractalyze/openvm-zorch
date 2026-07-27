@@ -281,11 +281,13 @@ class Proof:
 
 
 @dataclass(frozen=True)
-class GkrStageMsg:
-    """The LogUp-GKR reduction proof: the grind witness, the fractional-sumcheck
-    proof, and the padded evaluation point. ``xi`` is on the reduced claim too —
-    zerocheck reads it there — but it is a proof field as well, so it rides the
-    reduction proof for assembly."""
+class LogupGkrProof:
+    """Discharges the system claim into the LogUp fraction-sum claim at ξ: the
+    LogUp PoW witness, the fractional-sumcheck proof, and the padded evaluation
+    point.
+
+    ``xi`` is on the reduced claim too — zerocheck reads it there — but it is a
+    wire field as well, so it rides the reduction proof for assembly."""
 
     logup_pow_witness: Array
     gkr_proof: FracSumcheckProof
@@ -543,7 +545,9 @@ class StackedWhirPcs:
         return ProveResult(TrivialClaim(), whir_proof, transcript)
 
 
-class LogupGkrProver(ProverStage[SystemClaim, SystemWitness, LogupClaim, GkrStageMsg]):
+class LogupGkrProver(
+    ProverStage[SystemClaim, SystemWitness, LogupClaim, LogupGkrProof]
+):
     """Reduce the system's interaction claim to one fraction-sum claim at ξ.
 
     Grinds the LogUp PoW, samples α/β, builds the GKR input layer from the
@@ -559,7 +563,7 @@ class LogupGkrProver(ProverStage[SystemClaim, SystemWitness, LogupClaim, GkrStag
         claim: SystemClaim,
         witness: SystemWitness,
         transcript: DuplexTranscript,
-    ) -> ProveResult[LogupClaim, GkrStageMsg]:
+    ) -> ProveResult[LogupClaim, LogupGkrProof]:
         shape = claim.shape
         airs = witness.sorted_airs
         transcript, logup_pow_witness = grind(transcript, self._logup_pow_bits)
@@ -589,7 +593,7 @@ class LogupGkrProver(ProverStage[SystemClaim, SystemWitness, LogupClaim, GkrStag
         transcript, xi = pad_xi(transcript, xi, self._l_skip + shape.n_global)
         return ProveResult(
             LogupClaim(system=claim, alpha=alpha, beta=beta, xi=xi),
-            GkrStageMsg(logup_pow_witness, gkr_proof, xi),
+            LogupGkrProof(logup_pow_witness, gkr_proof, xi),
             transcript,
         )
 

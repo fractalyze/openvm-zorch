@@ -60,8 +60,8 @@ from openvm_zorch.prove import (
     AirShape,
     CachedMainCommitments,
     ColumnOpeningClaim,
-    GkrStageMsg,
     LogupClaim,
+    LogupGkrProof,
     Proof,
     StackedOpeningClaim,
     SystemClaim,
@@ -103,7 +103,7 @@ class VerifiedLogupClaim(LogupClaim):
     denominator: Array
 
 
-class LogupGkrVerifier(VerifierStage[SystemClaim, LogupClaim, GkrStageMsg]):
+class LogupGkrVerifier(VerifierStage[SystemClaim, LogupClaim, LogupGkrProof]):
     """The dual of ``LogupGkrProver``: check the LogUp PoW witness, re-derive
     α/β and ξ, and verify the fractional sumcheck."""
 
@@ -113,7 +113,7 @@ class LogupGkrVerifier(VerifierStage[SystemClaim, LogupClaim, GkrStageMsg]):
     def verify(
         self,
         claim: SystemClaim,
-        reduction_proof: GkrStageMsg,
+        reduction_proof: LogupGkrProof,
         transcript: DuplexTranscript,
     ) -> VerifyResult[VerifiedLogupClaim]:
         shape = claim.shape
@@ -328,7 +328,7 @@ class SwirlVerifier(VerifierStage[SystemClaim, TrivialClaim, Proof]):
         )
         gkr = self.gkr.verify(
             claim,
-            GkrStageMsg(
+            LogupGkrProof(
                 reduction_proof.logup_pow_witness,
                 reduction_proof.gkr_proof,
                 reduction_proof.xi,
