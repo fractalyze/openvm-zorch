@@ -30,11 +30,12 @@ import frx
 import frx.numpy as fnp
 import numpy as np
 from frx import Array, lax
+from zorch.challenge import ChallengePolicy
 from zorch.poly.univariate import powers
 from zorch.prove import fold_rounds
 from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
 from zorch.sumcheck.prover import RoundMsg, StandardRound
-from zorch.transcript import DuplexTranscript, Transcript, sample_challenge
+from zorch.transcript import DuplexTranscript, Transcript
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, F, f_const, f_to_ef
@@ -284,8 +285,7 @@ class _StackingRound(StandardRound):
         self, folded: Array, transcript: Transcript
     ) -> tuple[Array, Transcript, RoundMsg]:
         msg = self._round_poly(folded)
-        transcript = transcript.observe(msg)
-        transcript, r = sample_challenge(transcript, self.ext_dtype, self.limbs)
+        transcript, r = self.challenges.observe_and_sample(transcript, msg)
         return fold(folded, r), transcript, RoundMsg(msg, r)
 
 
@@ -481,7 +481,7 @@ def _sumcheck_rounds(
     # reconstructs from the running claim rather than reading off the wire.
     domain = EvalDomain(natural_domain(summand.degree, EF).nodes[1:])
     folded, transcript, msgs = fold_rounds(
-        _StackingRound(summand, domain, ext_dtype=EF),
+        _StackingRound(summand, domain, challenges=ChallengePolicy(EF)),
         fnp.stack([q_cols, eqw_cols]),
         transcript,
         n_stack,

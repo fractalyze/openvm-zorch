@@ -23,14 +23,14 @@ Reference: `Coordinator::prove` (prover/coordinator.rs) and
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Sequence
+from typing import Any, Sequence
 
 import frx.numpy as fnp
 from frx import Array
 from zk_dtypes import babybear_mont as F
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
-from zorch.round import ProveChain, Stage
+from zorch.round import ProverRound, prove_rounds
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
@@ -235,7 +235,7 @@ def _commit_cached_mains(
     return cached_by_air, pre_cached
 
 
-class CommitStage(Stage):
+class CommitStage:
     """Stage 1 + prelude: commit the stacked PCS, then absorb the prelude
     stream (vk pre-hash, the commitment, then per AIR in *input* order an
     optional present flag, log height, and public values). The prelude schedule
@@ -335,7 +335,7 @@ class CommitStage(Stage):
         return carry, transcript, root
 
 
-class GkrStage(Stage):
+class GkrStage:
     """Stage 2: LogUp-GKR. Grinds the LogUp PoW, samples α/β, builds the GKR
     input layer, and runs the fractional sumcheck. Writes β + the padded point
     ξ onto the carry for ZeroCheck."""
@@ -387,7 +387,7 @@ class GkrStage(Stage):
         return carry, transcript, GkrStageMsg(logup_pow_witness, gkr_proof, xi)
 
 
-class ZeroCheckStage(Stage):
+class ZeroCheckStage:
     """Stage 3: batched ZeroCheck + LogUp sumcheck over
     ``prove_batch_constraints``, consuming ξ and β off the carry. Writes the
     sumcheck point ``r`` for the stacking stage."""
@@ -427,7 +427,7 @@ class ZeroCheckStage(Stage):
         return carry, transcript, bcp
 
 
-class StackingStage(Stage):
+class StackingStage:
     """Stage 4: stacked opening reduction, consuming the committed matrix/layout
     and the ZeroCheck point off the carry. Writes the opening point ``u`` for
     WHIR."""
@@ -466,7 +466,7 @@ class StackingStage(Stage):
         return carry, transcript, stacking_proof
 
 
-class WhirStage(Stage):
+class WhirStage:
     """Stage 5: WHIR opening at ``u_cube``, the Stage-4 → Stage-5 handoff
     ``u_cube = (u₀ squarings over the skip domain) ‖ u[1..]``
     (reference ``prove_openings``). Reads the committed matrix/tree and the
@@ -530,10 +530,11 @@ def prove_chain(
     *,
     jit: bool = True,
     obs_log: dict | None = None,
-) -> tuple[ProveChain, ProveCarry]:
-    """Build the SWIRL prover as one ``ProveChain`` of Stages plus its
-    initial carry. One definition of the stage wiring so ``prove`` and the
-    benchmark cannot drift on it (sp1-zorch's ``prove_shard_chain`` pattern).
+) -> tuple[list[ProverRound[ProveCarry, Any]], ProveCarry]:
+    """Build the SWIRL prover's stage sequence plus its initial carry. One
+    definition of the stage wiring so ``prove`` and the benchmark cannot drift
+    on it (sp1-zorch's ``prove_shard_chain`` pattern). Drive it with
+    ``zorch.round.prove_rounds``.
 
     The protocol-derived sizes the reference ``Coordinator::prove`` owns
     (stacking order, ``n_logup`` / ``n_max`` / ``n_global``) are computed here
@@ -569,41 +570,39 @@ def prove_chain(
     n_max = max(max(lh - l_skip, 0) for lh in log_heights)
     n_global = max(n_max, n_logup)
 
-    chain = ProveChain(
-        [
-            CommitStage(
-                sponge,
-                compressor,
-                l_skip=l_skip,
-                n_stack=params.n_stack,
-                log_blowup=params.log_blowup,
-                k=params.whir.k,
-                vk_pre_hash=vk_pre_hash,
-                obs_log=obs_log,
-            ),
-            GkrStage(
-                l_skip=l_skip,
-                n_logup=n_logup,
-                n_global=n_global,
-                logup_pow_bits=params.logup_pow_bits,
-                total_interactions=total_interactions,
-            ),
-            ZeroCheckStage(
-                l_skip=l_skip,
-                n_logup=n_logup,
-                max_constraint_degree=params.max_constraint_degree,
-            ),
-            StackingStage(l_skip=l_skip, n_stack=params.n_stack),
-            WhirStage(
-                sponge,
-                compressor,
-                l_skip=l_skip,
-                log_blowup=params.log_blowup,
-                whir=params.whir,
-                jit=jit,
-            ),
-        ]
-    )
+    chain: list[ProverRound[ProveCarry, Any]] = [
+        CommitStage(
+            sponge,
+            compressor,
+            l_skip=l_skip,
+            n_stack=params.n_stack,
+            log_blowup=params.log_blowup,
+            k=params.whir.k,
+            vk_pre_hash=vk_pre_hash,
+            obs_log=obs_log,
+        ),
+        GkrStage(
+            l_skip=l_skip,
+            n_logup=n_logup,
+            n_global=n_global,
+            logup_pow_bits=params.logup_pow_bits,
+            total_interactions=total_interactions,
+        ),
+        ZeroCheckStage(
+            l_skip=l_skip,
+            n_logup=n_logup,
+            max_constraint_degree=params.max_constraint_degree,
+        ),
+        StackingStage(l_skip=l_skip, n_stack=params.n_stack),
+        WhirStage(
+            sponge,
+            compressor,
+            l_skip=l_skip,
+            log_blowup=params.log_blowup,
+            whir=params.whir,
+            jit=jit,
+        ),
+    ]
     return chain, ProveCarry(
         airs=airs,
         sorted_airs=sorted_airs,
@@ -622,11 +621,11 @@ def prove(
 ) -> tuple[DuplexTranscript, Proof]:
     """Prove the multi-AIR system end-to-end from a fresh transcript.
 
-    A thin driver over ``prove_chain``: run the chain, then assemble the
+    A thin driver over ``prove_chain``: run the stages, then assemble the
     ``Proof`` from the per-stage message list (``[root, gkr, bcp, stacking,
     whir]``, in stage order)."""
     chain, carry = prove_chain(sponge, compressor, params, vk_pre_hash, airs)
-    _, transcript, msgs = chain(carry, transcript)
+    _, transcript, msgs = prove_rounds(chain, carry, transcript)
     root, gkr, bcp, stacking_proof, whir_proof = msgs
     return transcript, Proof(
         common_main_commit=root,

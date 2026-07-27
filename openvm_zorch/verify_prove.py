@@ -1,6 +1,6 @@
 """Byte-match harness for the assembled ``prove`` chain -- a runnable.
 
-Runs ``prove_chain`` (the ``ProveChain`` of commit -> LogUp-GKR -> zerocheck
+Runs ``prove_chain`` (commit -> LogUp-GKR -> zerocheck
 -> stacked reduction -> WHIR) over a production-shaped fixture and seals the
 assembled proof against the reference: every proof component is byte-matched
 (canonical-u32 exact) against the fixture's ``outputs/`` dump, the same
@@ -41,7 +41,7 @@ import numpy as np
 from absl import app, flags
 from frx import lax
 from zk_dtypes import babybear_mont as F
-from zorch.round import Round
+from zorch.round import ProverRound, prove_rounds
 
 from openvm_zorch.bench_common import array_leaves
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
@@ -129,7 +129,7 @@ def _rounds_through(rounds, stop_label):
     )
 
 
-class _TimedRound(Round):
+class _TimedRound:
     """Print each stage's wall-clock so the compile-vs-runtime split is visible
     on every run. Blocking is mandatory -- async dispatch returns before the
     device finishes, so an unblocked timing would attribute this stage's
@@ -140,7 +140,7 @@ class _TimedRound(Round):
     so the caller can sum the per-stage warm runtime for the ``--baseline``
     comparison."""
 
-    def __init__(self, inner: Round, record: dict | None = None) -> None:
+    def __init__(self, inner: ProverRound, record: dict | None = None) -> None:
         self._inner = inner
         self._record = record
 
@@ -434,12 +434,10 @@ def main(argv) -> None:
     # (cold) pass carries the reference observation-log so CommitStage diffs the
     # prelude element-by-element (issue #59); the warm pass below omits it.
     chain, carry = prove_chain(sponge, comp, params, vk_pre_hash, airs, obs_log=obs_log)
-    chain.rounds = [
-        _TimedRound(rnd) for rnd in _rounds_through(chain.rounds, _STOP_AFTER.value)
-    ]
+    chain = [_TimedRound(rnd) for rnd in _rounds_through(chain, _STOP_AFTER.value)]
 
     t0 = time.monotonic()
-    _, _, msgs = chain(carry, new_transcript())
+    _, _, msgs = prove_rounds(chain, carry, new_transcript())
     print(f"chain run: {time.monotonic() - t0:.1f}s")
 
     if _STOP_AFTER.value is not None:
@@ -466,7 +464,7 @@ def main(argv) -> None:
     # alone also triggers it (per-stage profiling needs no baseline).
     if _BASELINE.value or _STOP_AFTER.value is not None:
         warm_chain, warm_carry = prove_chain(sponge, comp, params, vk_pre_hash, airs)
-        base_rounds = _rounds_through(warm_chain.rounds, _STOP_AFTER.value)
+        base_rounds = _rounds_through(warm_chain, _STOP_AFTER.value)
         n_runs = max(_RUNS.value, 1)
         # Report the per-stage MINIMUM across warm passes: the first warm pass
         # has not settled and reads high, so the min approximates the converged
@@ -475,8 +473,8 @@ def main(argv) -> None:
         print(f"\n[warm pass{'es' if n_runs > 1 else ''}]", flush=True)
         for _ in range(n_runs):
             st: dict = {}
-            warm_chain.rounds = [_TimedRound(rnd, record=st) for rnd in base_rounds]
-            warm_chain(warm_carry, new_transcript())
+            warm_chain = [_TimedRound(rnd, record=st) for rnd in base_rounds]
+            prove_rounds(warm_chain, warm_carry, new_transcript())
             for label, dt in st.items():
                 stage_times[label] = min(stage_times.get(label, dt), dt)
         if n_runs > 1:

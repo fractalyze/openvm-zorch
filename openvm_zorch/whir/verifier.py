@@ -20,6 +20,7 @@ from zorch.commit.merkle import Opening
 from zorch.commit.strided_merkle import StridedMerkleTree
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
+from zorch.pcs.stage import OpeningClaim, OpeningProof
 from zorch.pcs.whir.config import WhirParams
 from zorch.pcs.whir.config import WhirProof as GenericWhirProof
 from zorch.pcs.whir.verifier import WhirVerifier
@@ -126,7 +127,11 @@ def verify_whir(
         final_poly=proof.final_poly,
     )
 
-    ok, transcript = verifier.verify(commitments[0], [z], values, gproof, transcript)
-    if not bool(ok):
+    result = verifier.verify(
+        OpeningClaim(commitments[0], [z]),
+        OpeningProof(values, gproof),
+        transcript,
+    )
+    if not bool(result.ok):
         raise VerificationError("WHIR verification failed")
-    return transcript
+    return result.transcript

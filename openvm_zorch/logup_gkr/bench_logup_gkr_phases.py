@@ -131,7 +131,7 @@ class LogupGkrPhasesBenchmark(FrxBenchmark):
         sponge, comp = babybear16_hasher()
 
         chain, carry0 = prove_chain(sponge, comp, params, vk_pre_hash, airs)
-        commit, gkr = chain.rounds[0], chain.rounds[1]
+        commit, gkr = chain[0], chain[1]
         c1, t1, _ = commit(carry0, new_transcript())  # advance past the trace commit
 
         sorted_airs = c1.sorted_airs
