@@ -1,10 +1,7 @@
 # Copyright 2026 The openvm-zorch Authors. SPDX-License-Identifier: Apache-2.0
 """The system's claims, witnesses and wire types.
 
-Separate from `prove.py` so a verifier reads a claim or a proof section without
-importing the prover that produced it. The two roles of a claim reduction are
-separately deployable (`zorch.stage`), which a shared type module is what makes
-possible.
+Both roles of a reduction read these, so neither imports the other to do it.
 """
 
 from __future__ import annotations
@@ -21,8 +18,6 @@ if TYPE_CHECKING:
     from openvm_zorch.logup_zerocheck.prover import BatchConstraintProof
     from openvm_zorch.stacked_reduction.prover import StackingProof
     from openvm_zorch.whir.prover import WhirConfig, WhirProof
-
-# --- Vocabulary: per-AIR shape and the commitments a proof carries. -------
 
 
 @dataclass(frozen=True)
@@ -170,9 +165,6 @@ class StackedCommitData:
     cached: CachedMainCommitments
 
 
-# --- The system statement and the trace that satisfies it. ----------------
-
-
 @dataclass(frozen=True, kw_only=True)
 class SystemClaim:
     """Every present AIR's trace satisfies its constraints, and the LogUp
@@ -193,9 +185,6 @@ class SystemWitness:
 
     sorted_airs: tuple[AirInstance, ...]
     cached: CachedMainCommitments
-
-
-# --- Reduction 1: LogUp-GKR — bus balance to column openings. -------------
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -243,9 +232,6 @@ class LogupGkrProof:
     xi: list[Array]
 
 
-# --- Reduction 2: zerocheck — constraints to column openings. -------------
-
-
 @dataclass(frozen=True, kw_only=True)
 class ColumnOpeningClaim:
     """Each AIR's columns open to ``column_openings`` at the zerocheck point
@@ -256,9 +242,6 @@ class ColumnOpeningClaim:
     column_openings: Sequence[Sequence[Array]]
 
 
-# --- Reduction 3: stacking, then the WHIR PCS open. -----------------------
-
-
 @dataclass(frozen=True, kw_only=True)
 class StackedOpeningClaim:
     """The committed stacked matrix's columns open to ``stacking_openings`` at
@@ -267,9 +250,6 @@ class StackedOpeningClaim:
     commitment: Array
     u: list[Array]
     stacking_openings: Sequence[Sequence[Array]]
-
-
-# --- The composite, naming each reduction's proof. ------------------------
 
 
 @dataclass(frozen=True)
