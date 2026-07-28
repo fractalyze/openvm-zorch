@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from openvm_zorch.stacked_reduction.prover import StackingProof
     from openvm_zorch.whir.prover import WhirConfig, WhirProof
 
+# --- Vocabulary: per-AIR shape and the commitments a proof carries. -------
+
 
 @dataclass(frozen=True)
 class AirInstance:
@@ -47,18 +49,6 @@ class AirInstance:
     air_idx: int | None = None
 
 
-@dataclass(frozen=True)
-class SystemParams:
-    """The reference ``SystemParams`` fields the prover consumes."""
-
-    l_skip: int
-    n_stack: int
-    log_blowup: int
-    logup_pow_bits: int
-    max_constraint_degree: int
-    whir: WhirConfig
-
-
 @dataclass(frozen=True, kw_only=True)
 class AirShape:
     """One AIR's public structure for this block.
@@ -72,6 +62,31 @@ class AirShape:
     public_values: tuple[int, ...]
     is_required: bool
     air_idx: int | None
+
+
+@dataclass(frozen=True)
+class AirVk:
+    """Per-AIR verifying-key shape the verifier consumes, in input order."""
+
+    dag: ConstraintsDag
+    log_height: int
+    width: int  # common-main column count
+    public_values: tuple[int, ...]
+    constraint_degree: int
+    needs_next: bool
+    is_required: bool
+
+
+@dataclass(frozen=True)
+class SystemParams:
+    """The reference ``SystemParams`` fields the prover consumes."""
+
+    l_skip: int
+    n_stack: int
+    log_blowup: int
+    logup_pow_bits: int
+    max_constraint_degree: int
+    whir: WhirConfig
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -119,55 +134,6 @@ class SystemShape:
 
 
 @dataclass(frozen=True, kw_only=True)
-class SystemClaim:
-    """Every present AIR's trace satisfies its constraints, and the LogUp
-    interactions across all of them balance.
-
-    The root statement a SWIRL proof discharges; it carries only what varies per
-    block, the circuit-fixed properties being role configuration.
-    """
-
-    air_shapes: tuple[AirShape, ...]  # input (verifying-key) order
-    shape: SystemShape
-
-
-@dataclass(frozen=True, kw_only=True)
-class LogupClaim:
-    """The system's LogUp fraction sums collapse, under the batching challenges
-    α and β, to a single fraction-sum claim at the point ξ.
-
-    The claimed numerator and denominator are not carried: the verifier
-    re-derives them from the reduction proof and the prover recomputes the input
-    layer, so neither reads them off a shared field.
-    """
-
-    system: SystemClaim
-    alpha: Array
-    beta: Array
-    xi: list[Array]
-
-
-@dataclass(frozen=True, kw_only=True)
-class ColumnOpeningClaim:
-    """Each AIR's columns open to ``column_openings`` at the zerocheck point
-    ``r``."""
-
-    system: SystemClaim
-    r: list[Array]
-    column_openings: Sequence[Sequence[Array]]
-
-
-@dataclass(frozen=True, kw_only=True)
-class StackedOpeningClaim:
-    """The committed stacked matrix's columns open to ``stacking_openings`` at
-    the point ``u`` — the claim the PCS discharges."""
-
-    commitment: Array
-    u: list[Array]
-    stacking_openings: Sequence[Sequence[Array]]
-
-
-@dataclass(frozen=True, kw_only=True)
 class CachedMainCommitments:
     """The cached/preprocessed main commitments, committed before any claim
     exists.
@@ -192,15 +158,6 @@ class CachedMainCommitments:
 
 
 @dataclass(frozen=True, kw_only=True)
-class SystemWitness:
-    """The traces the system claim is about, in stacking order, with the
-    cached-main commitments already taken."""
-
-    sorted_airs: tuple[AirInstance, ...]
-    cached: CachedMainCommitments
-
-
-@dataclass(frozen=True, kw_only=True)
 class StackedCommitData:
     """What the stacked PCS retains between its commit and open halves.
 
@@ -213,17 +170,63 @@ class StackedCommitData:
     cached: CachedMainCommitments
 
 
-@dataclass(frozen=True)
-class Proof:
-    """The three reduction proofs plus the commitment and the PCS opening."""
+# --- The system statement and the trace that satisfies it. ----------------
 
-    common_main_commit: Array  # (8,) F
-    logup_pow_witness: Array
-    gkr_proof: FracSumcheckProof
-    xi: list[Array]  # padded to l_skip + n_global
-    batch_constraint_proof: BatchConstraintProof
-    stacking_proof: StackingProof
-    whir_proof: WhirProof
+
+@dataclass(frozen=True, kw_only=True)
+class SystemClaim:
+    """Every present AIR's trace satisfies its constraints, and the LogUp
+    interactions across all of them balance.
+
+    The root statement a SWIRL proof discharges; it carries only what varies per
+    block, the circuit-fixed properties being role configuration.
+    """
+
+    air_shapes: tuple[AirShape, ...]  # input (verifying-key) order
+    shape: SystemShape
+
+
+@dataclass(frozen=True, kw_only=True)
+class SystemWitness:
+    """The traces the system claim is about, in stacking order, with the
+    cached-main commitments already taken."""
+
+    sorted_airs: tuple[AirInstance, ...]
+    cached: CachedMainCommitments
+
+
+# --- Reduction 1: LogUp-GKR — bus balance to column openings. -------------
+
+
+@dataclass(frozen=True, kw_only=True)
+class LogupClaim:
+    """The system's LogUp fraction sums collapse, under the batching challenges
+    α and β, to a single fraction-sum claim at the point ξ.
+
+    The claimed numerator and denominator are not carried: the verifier
+    re-derives them from the reduction proof and the prover recomputes the input
+    layer, so neither reads them off a shared field.
+    """
+
+    system: SystemClaim
+    alpha: Array
+    beta: Array
+    xi: list[Array]
+
+
+@dataclass(frozen=True, kw_only=True)
+class VerifiedLogupClaim(LogupClaim):
+    """``LogupClaim`` plus the fraction sums the verifier derived at ξ.
+
+    The verifier knows strictly more than the prover here: it recovers the
+    claimed numerator and denominator by replaying the reduction proof, where
+    the prover recomputes the input layer from the witness and never needs
+    them. Naming that as its own type keeps the extra data out of the shared
+    claim without hiding it in mutable role state.
+    """
+
+    numerator: Array
+    denominator: Array
 
 
 @dataclass(frozen=True)
@@ -240,29 +243,43 @@ class LogupGkrProof:
     xi: list[Array]
 
 
-@dataclass(frozen=True)
-class AirVk:
-    """Per-AIR verifying-key shape the verifier consumes, in input order."""
-
-    dag: ConstraintsDag
-    log_height: int
-    width: int  # common-main column count
-    public_values: tuple[int, ...]
-    constraint_degree: int
-    needs_next: bool
-    is_required: bool
+# --- Reduction 2: zerocheck — constraints to column openings. -------------
 
 
 @dataclass(frozen=True, kw_only=True)
-class VerifiedLogupClaim(LogupClaim):
-    """``LogupClaim`` plus the fraction sums the verifier derived at ξ.
+class ColumnOpeningClaim:
+    """Each AIR's columns open to ``column_openings`` at the zerocheck point
+    ``r``."""
 
-    The verifier knows strictly more than the prover here: it recovers the
-    claimed numerator and denominator by replaying the reduction proof, where
-    the prover recomputes the input layer from the witness and never needs
-    them. Naming that as its own type keeps the extra data out of the shared
-    claim without hiding it in mutable role state.
-    """
+    system: SystemClaim
+    r: list[Array]
+    column_openings: Sequence[Sequence[Array]]
 
-    numerator: Array
-    denominator: Array
+
+# --- Reduction 3: stacking, then the WHIR PCS open. -----------------------
+
+
+@dataclass(frozen=True, kw_only=True)
+class StackedOpeningClaim:
+    """The committed stacked matrix's columns open to ``stacking_openings`` at
+    the point ``u`` — the claim the PCS discharges."""
+
+    commitment: Array
+    u: list[Array]
+    stacking_openings: Sequence[Sequence[Array]]
+
+
+# --- The composite, naming each reduction's proof. ------------------------
+
+
+@dataclass(frozen=True)
+class Proof:
+    """The three reduction proofs plus the commitment and the PCS opening."""
+
+    common_main_commit: Array  # (8,) F
+    logup_pow_witness: Array
+    gkr_proof: FracSumcheckProof
+    xi: list[Array]  # padded to l_skip + n_global
+    batch_constraint_proof: BatchConstraintProof
+    stacking_proof: StackingProof
+    whir_proof: WhirProof
