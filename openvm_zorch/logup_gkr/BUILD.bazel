@@ -37,6 +37,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//openvm_zorch:transcript",
+        "//openvm_zorch:types",
         "@zorch//zorch:transcript",
         "@zorch//zorch/logup_gkr",
         "@zorch//zorch/poly",
@@ -58,6 +59,7 @@ py_library(
         ":prover",
         "//openvm_zorch:poly_common",
         "//openvm_zorch:transcript",
+        "//openvm_zorch:types",
         "@zorch//zorch:transcript",
         requirement("frx"),
     ],

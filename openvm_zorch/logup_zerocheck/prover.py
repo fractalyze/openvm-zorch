@@ -104,6 +104,15 @@ class AirData:
     cached_mains: tuple[Array, ...] = ()
 
 
+from zorch.stage import ProveResult, ProverStage
+
+from openvm_zorch.types import (
+    ColumnOpeningClaim,
+    LogupClaim,
+    SystemWitness,
+)
+
+
 @dataclass(frozen=True)
 class BatchConstraintProof:
     """The reference ``BatchConstraintProof`` plus the sampled challenges
@@ -1318,3 +1327,59 @@ def prove_batch_constraints(
     cached_mains = [list(a.cached_mains) for a in airs]
     transcript, arrays = run(transcript, xi, beta, traces, cached_mains)
     return transcript, _assemble_proof(arrays)
+
+
+class ZerocheckProver(
+    ProverStage[
+        LogupClaim,
+        SystemWitness,
+        ColumnOpeningClaim,
+        BatchConstraintProof,
+        DuplexTranscript,
+    ]
+):
+    """Reduce the constraint and LogUp claims to per-column opening claims at
+    ``r``.
+
+    The batched ZeroCheck + LogUp sumcheck over ``prove_batch_constraints``,
+    consuming ξ and β off the incoming claim.
+    """
+
+    def __init__(self, *, l_skip: int, max_constraint_degree: int) -> None:
+        self._l_skip = l_skip
+        self._max_constraint_degree = max_constraint_degree
+
+    def prove(
+        self,
+        claim: LogupClaim,
+        witness: SystemWitness,
+        transcript: DuplexTranscript,
+    ) -> ProveResult[ColumnOpeningClaim, BatchConstraintProof, DuplexTranscript]:
+        transcript, bcp = prove_batch_constraints(
+            transcript,
+            self._l_skip,
+            claim.system.shape.n_logup,
+            [
+                AirData(
+                    trace=a.trace,
+                    dag=a.dag,
+                    public_values=a.public_values,
+                    constraint_degree=a.constraint_degree,
+                    needs_next=a.needs_next,
+                    cached_mains=a.cached_mains,
+                )
+                for a in witness.sorted_airs
+            ],
+            claim.xi,
+            claim.beta,
+            self._max_constraint_degree,
+        )
+        return ProveResult(
+            ColumnOpeningClaim(
+                system=claim.system,
+                r=bcp.r,
+                column_openings=bcp.column_openings,
+            ),
+            bcp,
+            transcript,
+        )

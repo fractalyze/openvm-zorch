@@ -47,12 +47,14 @@ from openvm_zorch.logup_gkr.prover import fractional_sumcheck
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 from openvm_zorch.prove import (
-    AirInstance,
-    SystemParams,
     bind_commitment,
     build_prover,
 )
 from openvm_zorch.transcript import grind, new_transcript, sample_ext
+from openvm_zorch.types import (
+    AirInstance,
+    SystemParams,
+)
 from openvm_zorch.whir.prover import WhirConfig
 
 _OPS = ("grind", "input_evals", "frac_sumcheck", "total")

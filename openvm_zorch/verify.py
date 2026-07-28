@@ -40,258 +40,30 @@ verified against the committed roots.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Sequence
 
-import frx.numpy as fnp
 from frx import Array
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
 from zorch.stage import TrivialClaim, VerifierStage, VerifyResult
 from zorch.transcript import DuplexTranscript
 
-from openvm_zorch.commit.stacking import StackedLayout
-from openvm_zorch.logup_gkr.verifier import verify_gkr_stage
-from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
-from openvm_zorch.logup_zerocheck.prover import BatchConstraintProof
-from openvm_zorch.logup_zerocheck.verifier import verify_zerocheck_stage
+from openvm_zorch.logup_gkr.verifier import LogupGkrVerifier
+from openvm_zorch.logup_zerocheck.verifier import ZerocheckVerifier
 from openvm_zorch.poly_common import VerificationError
-from openvm_zorch.prove import (
+from openvm_zorch.prove import bind_commitment
+from openvm_zorch.stacked_reduction.verifier import StackingVerifier
+from openvm_zorch.types import (
     AirShape,
+    AirVk,
     CachedMainCommitments,
-    ColumnOpeningClaim,
-    LogupClaim,
     LogupGkrProof,
     Proof,
-    StackedOpeningClaim,
     SystemClaim,
     SystemParams,
     SystemShape,
-    bind_commitment,
 )
-from openvm_zorch.stacked_reduction.prover import StackingProof
-from openvm_zorch.stacked_reduction.verifier import verify_stacked_reduction
-from openvm_zorch.whir.prover import WhirProof
-from openvm_zorch.whir.verifier import verify_whir
-
-
-@dataclass(frozen=True)
-class AirVk:
-    """Per-AIR verifying-key shape the verifier consumes, in input order."""
-
-    dag: ConstraintsDag
-    log_height: int
-    width: int  # common-main column count
-    public_values: tuple[int, ...]
-    constraint_degree: int
-    needs_next: bool
-    is_required: bool
-
-
-@dataclass(frozen=True, kw_only=True)
-class VerifiedLogupClaim(LogupClaim):
-    """``LogupClaim`` plus the fraction sums the verifier derived at ξ.
-
-    The verifier knows strictly more than the prover here: it recovers the
-    claimed numerator and denominator by replaying the reduction proof, where
-    the prover recomputes the input layer from the witness and never needs
-    them. Naming that as its own type keeps the extra data out of the shared
-    claim without hiding it in mutable role state.
-    """
-
-    numerator: Array
-    denominator: Array
-
-
-class LogupGkrVerifier(
-    VerifierStage[SystemClaim, VerifiedLogupClaim, LogupGkrProof, DuplexTranscript]
-):
-    """The dual of ``LogupGkrProver``: check the LogUp PoW witness, re-derive
-    α/β and ξ, and verify the fractional sumcheck."""
-
-    def __init__(self, *, params: SystemParams) -> None:
-        self._params = params
-
-    def verify(
-        self,
-        claim: SystemClaim,
-        reduction_proof: LogupGkrProof,
-        transcript: DuplexTranscript,
-    ) -> VerifyResult[VerifiedLogupClaim, DuplexTranscript]:
-        shape = claim.shape
-        transcript, alpha, beta, xi, p_xi, q_xi = verify_gkr_stage(
-            transcript,
-            self._params.l_skip,
-            self._params.logup_pow_bits,
-            shape.total_interactions,
-            shape.n_logup,
-            shape.n_global,
-            reduction_proof.gkr_proof,
-            reduction_proof.logup_pow_witness,
-        )
-        return VerifyResult(
-            VerifiedLogupClaim(
-                system=claim,
-                alpha=alpha,
-                beta=beta,
-                xi=xi,
-                numerator=p_xi,
-                denominator=q_xi,
-            ),
-            transcript,
-            fnp.bool_(True),
-        )
-
-
-class ZerocheckVerifier(
-    VerifierStage[
-        VerifiedLogupClaim,
-        ColumnOpeningClaim,
-        BatchConstraintProof,
-        DuplexTranscript,
-    ]
-):
-    """The dual of ``ZerocheckProver``: verify the batched ZeroCheck + LogUp
-    sumcheck and produce the per-column opening claims at ``r``.
-
-    The column openings come off the reduction proof — the prover reads the
-    committed matrix, the verifier reads the values the proof claims for it.
-    """
-
-    def __init__(self, *, params: SystemParams, air_vks: Sequence[AirVk]) -> None:
-        self._params = params
-        self._air_vks = air_vks
-
-    def verify(
-        self,
-        claim: VerifiedLogupClaim,
-        reduction_proof: BatchConstraintProof,
-        transcript: DuplexTranscript,
-    ) -> VerifyResult[ColumnOpeningClaim, DuplexTranscript]:
-        shape = claim.system.shape
-        sorted_vks = [self._air_vks[i] for i in shape.order]
-        transcript, r = verify_zerocheck_stage(
-            transcript,
-            self._params.l_skip,
-            self._params.max_constraint_degree,
-            sorted_vks,
-            shape.n_logup,
-            shape.n_max,
-            reduction_proof,
-            claim.alpha,
-            claim.beta,
-            claim.xi,
-            claim.numerator,
-            claim.denominator,
-        )
-        return VerifyResult(
-            ColumnOpeningClaim(
-                system=claim.system,
-                r=r,
-                column_openings=reduction_proof.column_openings,
-            ),
-            transcript,
-            fnp.bool_(True),
-        )
-
-
-class StackingVerifier(
-    VerifierStage[
-        ColumnOpeningClaim, StackedOpeningClaim, StackingProof, DuplexTranscript
-    ]
-):
-    """The dual of ``StackingProver``: rebuild the stacked layout from the
-    verifying keys, batch the incoming column openings, and verify the stacked
-    opening reduction."""
-
-    def __init__(
-        self,
-        *,
-        params: SystemParams,
-        air_vks: Sequence[AirVk],
-        commitment: Array,
-    ) -> None:
-        self._params = params
-        self._air_vks = air_vks
-        # The commitment the opening claim is about. It reaches the verifier
-        # alongside the proof rather than inside it, so it is bound here.
-        self._commitment = commitment
-
-    def verify(
-        self,
-        claim: ColumnOpeningClaim,
-        reduction_proof: StackingProof,
-        transcript: DuplexTranscript,
-    ) -> VerifyResult[StackedOpeningClaim, DuplexTranscript]:
-        sorted_vks = [self._air_vks[i] for i in claim.system.shape.order]
-        layout = StackedLayout.new(
-            self._params.l_skip,
-            self._params.l_skip + self._params.n_stack,
-            [(vk.width, vk.log_height) for vk in sorted_vks],
-        )
-        transcript, u = verify_stacked_reduction(
-            transcript,
-            self._params.l_skip,
-            self._params.n_stack,
-            reduction_proof,
-            layout,
-            [vk.needs_next for vk in sorted_vks],
-            claim.column_openings,
-            claim.r,
-        )
-        return VerifyResult(
-            StackedOpeningClaim(
-                commitment=self._commitment,
-                u=u,
-                stacking_openings=reduction_proof.stacking_openings,
-            ),
-            transcript,
-            fnp.bool_(True),
-        )
-
-
-class StackedWhirPcsVerifier(
-    VerifierStage[StackedOpeningClaim, TrivialClaim, WhirProof, DuplexTranscript]
-):
-    """The open half of the stacked PCS, verifier side: form ``u_cube`` from
-    the claim's opening point — the same handoff the prover does — and check
-    WHIR against the claim's commitment and opening values.
-
-    Discharges the opening claim into the trivial claim, which is what makes a
-    SWIRL proof a complete argument.
-    """
-
-    def __init__(
-        self, sponge: Sponge, compressor: Compression, *, params: SystemParams
-    ) -> None:
-        self._sponge = sponge
-        self._compressor = compressor
-        self._params = params
-
-    def verify(
-        self,
-        claim: StackedOpeningClaim,
-        reduction_proof: WhirProof,
-        transcript: DuplexTranscript,
-    ) -> VerifyResult[TrivialClaim, DuplexTranscript]:
-        u_cube = [claim.u[0]]
-        for _ in range(self._params.l_skip - 1):
-            u_cube.append(u_cube[-1] * u_cube[-1])
-        u_cube.extend(claim.u[1:])
-        transcript = verify_whir(
-            transcript,
-            self._sponge,
-            self._compressor,
-            self._params.l_skip,
-            self._params.n_stack,
-            self._params.log_blowup,
-            self._params.whir,
-            reduction_proof,
-            claim.stacking_openings,
-            [claim.commitment],
-            u_cube,
-        )
-        return VerifyResult(TrivialClaim(), transcript, fnp.bool_(True))
+from openvm_zorch.whir.verifier import StackedWhirPcsVerifier
 
 
 class SwirlVerifier(VerifierStage[SystemClaim, TrivialClaim, Proof, DuplexTranscript]):

@@ -9,7 +9,9 @@ other stage duals in ``openvm_zorch/verify.py``, mirroring sp1-zorch's
 
 from __future__ import annotations
 
+import frx.numpy as fnp
 from frx import Array
+from zorch.stage import VerifierStage, VerifyResult
 from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.logup_gkr.prover import FracSumcheckProof
@@ -22,6 +24,12 @@ from openvm_zorch.poly_common import (
     interp_linear_01,
 )
 from openvm_zorch.transcript import check_witness, sample_ext
+from openvm_zorch.types import (
+    LogupGkrProof,
+    SystemClaim,
+    SystemParams,
+    VerifiedLogupClaim,
+)
 
 
 def verify_gkr(
@@ -111,3 +119,43 @@ def verify_gkr_stage(
         xi.append(extra)
 
     return transcript, alpha, beta, xi, p_xi, q_xi
+
+
+class LogupGkrVerifier(
+    VerifierStage[SystemClaim, VerifiedLogupClaim, LogupGkrProof, DuplexTranscript]
+):
+    """The dual of ``LogupGkrProver``: check the LogUp PoW witness, re-derive
+    α/β and ξ, and verify the fractional sumcheck."""
+
+    def __init__(self, *, params: SystemParams) -> None:
+        self._params = params
+
+    def verify(
+        self,
+        claim: SystemClaim,
+        reduction_proof: LogupGkrProof,
+        transcript: DuplexTranscript,
+    ) -> VerifyResult[VerifiedLogupClaim, DuplexTranscript]:
+        shape = claim.shape
+        transcript, alpha, beta, xi, p_xi, q_xi = verify_gkr_stage(
+            transcript,
+            self._params.l_skip,
+            self._params.logup_pow_bits,
+            shape.total_interactions,
+            shape.n_logup,
+            shape.n_global,
+            reduction_proof.gkr_proof,
+            reduction_proof.logup_pow_witness,
+        )
+        return VerifyResult(
+            VerifiedLogupClaim(
+                system=claim,
+                alpha=alpha,
+                beta=beta,
+                xi=xi,
+                numerator=p_xi,
+                denominator=q_xi,
+            ),
+            transcript,
+            fnp.bool_(True),
+        )

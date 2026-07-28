@@ -46,16 +46,18 @@ from openvm_zorch.bench_common import array_leaves
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
 from openvm_zorch.prove import (
-    AirInstance,
     LogupGkrProver,
-    Proof,
     StackedWhirPcs,
     StackingProver,
-    SystemParams,
     ZerocheckProver,
     build_prover,
 )
 from openvm_zorch.transcript import new_transcript
+from openvm_zorch.types import (
+    AirInstance,
+    Proof,
+    SystemParams,
+)
 from openvm_zorch.whir.prover import WhirConfig
 
 _FIXTURE_DIR = flags.DEFINE_string(

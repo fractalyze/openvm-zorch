@@ -17,8 +17,12 @@ from zk_dtypes import babybear_mont as F
 
 from openvm_zorch.logup_zerocheck.constraints import ConstraintsDag
 from openvm_zorch.poseidon2.babybear16 import babybear16_hasher
-from openvm_zorch.prove import AirInstance, SystemParams, prove
+from openvm_zorch.prove import prove
 from openvm_zorch.transcript import new_transcript
+from openvm_zorch.types import (
+    AirInstance,
+    SystemParams,
+)
 from openvm_zorch.verify import AirVk, VerificationError, verify
 from openvm_zorch.whir.prover import WhirConfig
 

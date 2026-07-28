@@ -33,6 +33,7 @@ from frx import Array, lax
 from zorch.challenge import ChallengePolicy
 from zorch.poly.univariate import powers
 from zorch.prove import fold_rounds
+from zorch.stage import ProveResult, ProverStage
 from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
 from zorch.sumcheck.prover import RoundMsg, StandardRound
 from zorch.transcript import DuplexTranscript
@@ -41,6 +42,11 @@ from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, F, f_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.transcript import sample_ext
+from openvm_zorch.types import (
+    ColumnOpeningClaim,
+    StackedCommitData,
+    StackedOpeningClaim,
+)
 
 _STACKING_PROFILE = os.environ.get("OPENVM_STACKING_PROFILE") == "1"
 
@@ -709,3 +715,68 @@ def prove_stacked_opening_reduction(
         stacking_openings=openings,
         u=u,
     )
+
+
+class StackingProver(
+    ProverStage[
+        ColumnOpeningClaim,
+        StackedCommitData,
+        StackedOpeningClaim,
+        StackingProof,
+        DuplexTranscript,
+    ]
+):
+    """Reduce per-column opening claims at ``r`` to stacked-column opening
+    claims at ``u``.
+
+    Its witness is the PCS's retained commit data: the reduction runs over the
+    committed matrices themselves, which belong to the scheme rather than to
+    any claim.
+    """
+
+    def __init__(
+        self, *, l_skip: int, n_stack: int, needs_next: Sequence[bool]
+    ) -> None:
+        self._l_skip = l_skip
+        self._n_stack = n_stack
+        # Rotation is a property of each AIR's constraints, fixed by the
+        # circuit, so it configures the role rather than riding the claim.
+        self._needs_next = list(needs_next)
+
+    def prove(
+        self,
+        claim: ColumnOpeningClaim,
+        witness: StackedCommitData,
+        transcript: DuplexTranscript,
+    ) -> ProveResult[StackedOpeningClaim, StackingProof, DuplexTranscript]:
+        # The commit half committed the common main plus each cached main as its
+        # own stacked commitment; the opening reduction runs over all of them,
+        # common main first (reference ``device.rs`` prove_openings:154-167).
+        stacked_per_commit = [(witness.common.matrix, witness.common.layout)] + [
+            (d.matrix, d.layout) for d in witness.cached.stacking_order
+        ]
+        # need_rot for a cached commit is the owning AIR's need_rot — its cached
+        # columns share the AIR's rotation claim. An empty cached prefix (the
+        # synthetic fixture) leaves this exactly the single-commit call (#59).
+        need_rot_per_commit: list[list[bool]] = [list(self._needs_next)]
+        for position, air_idx in enumerate(claim.system.shape.order):
+            need_rot_per_commit.extend(
+                [self._needs_next[position]] for _ in witness.cached.by_air[air_idx]
+            )
+        transcript, stacking_proof = prove_stacked_opening_reduction(
+            transcript,
+            self._l_skip,
+            self._n_stack,
+            stacked_per_commit,
+            need_rot_per_commit,
+            claim.r,
+        )
+        return ProveResult(
+            StackedOpeningClaim(
+                commitment=witness.common.commit,
+                u=stacking_proof.u,
+                stacking_openings=stacking_proof.stacking_openings,
+            ),
+            stacking_proof,
+            transcript,
+        )

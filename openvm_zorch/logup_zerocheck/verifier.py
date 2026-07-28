@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Sequence
 import frx.numpy as fnp
 from frx import Array
 from zorch.poly.univariate import eval_coeffs
+from zorch.stage import VerifierStage, VerifyResult
 from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.fields import MODULUS, f_const, f_inv_const, f_to_ef
@@ -35,6 +36,11 @@ from openvm_zorch.poly_common import (
     progression_exp_2,
 )
 from openvm_zorch.transcript import sample_ext
+from openvm_zorch.types import (
+    ColumnOpeningClaim,
+    SystemParams,
+    VerifiedLogupClaim,
+)
 
 if TYPE_CHECKING:
     from openvm_zorch.verify import AirVk
@@ -219,3 +225,55 @@ def verify_zerocheck_stage(
         raise VerificationError("Stage-3 final claim mismatch")
 
     return transcript, rs
+
+
+class ZerocheckVerifier(
+    VerifierStage[
+        VerifiedLogupClaim,
+        ColumnOpeningClaim,
+        BatchConstraintProof,
+        DuplexTranscript,
+    ]
+):
+    """The dual of ``ZerocheckProver``: verify the batched ZeroCheck + LogUp
+    sumcheck and produce the per-column opening claims at ``r``.
+
+    The column openings come off the reduction proof — the prover reads the
+    committed matrix, the verifier reads the values the proof claims for it.
+    """
+
+    def __init__(self, *, params: SystemParams, air_vks: Sequence[AirVk]) -> None:
+        self._params = params
+        self._air_vks = air_vks
+
+    def verify(
+        self,
+        claim: VerifiedLogupClaim,
+        reduction_proof: BatchConstraintProof,
+        transcript: DuplexTranscript,
+    ) -> VerifyResult[ColumnOpeningClaim, DuplexTranscript]:
+        shape = claim.system.shape
+        sorted_vks = [self._air_vks[i] for i in shape.order]
+        transcript, r = verify_zerocheck_stage(
+            transcript,
+            self._params.l_skip,
+            self._params.max_constraint_degree,
+            sorted_vks,
+            shape.n_logup,
+            shape.n_max,
+            reduction_proof,
+            claim.alpha,
+            claim.beta,
+            claim.xi,
+            claim.numerator,
+            claim.denominator,
+        )
+        return VerifyResult(
+            ColumnOpeningClaim(
+                system=claim.system,
+                r=r,
+                column_openings=reduction_proof.column_openings,
+            ),
+            transcript,
+            fnp.bool_(True),
+        )
