@@ -153,19 +153,6 @@ class CachedMainCommitments:
 
 
 @dataclass(frozen=True, kw_only=True)
-class StackedCommitData:
-    """What the stacked PCS retains between its commit and open halves.
-
-    Not prover-only: the common-main root reaches the wire verbatim as the
-    proof's commitment, and each Merkle tree's opened rows and paths ride the
-    WHIR proof.
-    """
-
-    common: StackedPcsData
-    cached: CachedMainCommitments
-
-
-@dataclass(frozen=True, kw_only=True)
 class SystemClaim:
     """Every present AIR's trace satisfies its constraints, and the LogUp
     interactions across all of them balance.
@@ -240,6 +227,19 @@ class ColumnOpeningClaim:
     system: SystemClaim
     r: list[Array]
     column_openings: Sequence[Sequence[Array]]
+
+
+@dataclass(frozen=True, kw_only=True)
+class StackedCommitData:
+    """What the stacked PCS retains between its commit and open halves.
+
+    Not prover-only: the common-main root reaches the wire verbatim as the
+    proof's commitment, and each Merkle tree's opened rows and paths ride the
+    WHIR proof.
+    """
+
+    common: StackedPcsData
+    cached: CachedMainCommitments
 
 
 @dataclass(frozen=True, kw_only=True)
