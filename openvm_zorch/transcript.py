@@ -56,7 +56,7 @@ def check_witness(
     """
     if pow_bits == 0:
         return transcript, fnp.bool_(True)
-    return transcript.check_witness(pow_bits, witness)
+    return transcript.check_witness(witness, pow_bits=pow_bits)
 
 
 def grind(

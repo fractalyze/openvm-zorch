@@ -19,6 +19,7 @@ py_library(
     deps = [
         "//openvm_zorch:fields",
         "//openvm_zorch:transcript",
+        "//openvm_zorch:types",
         "//openvm_zorch/commit:stacking",
         "//openvm_zorch/logup_zerocheck:prism",
         "@zorch//zorch:prove",
@@ -43,6 +44,7 @@ py_library(
         "//openvm_zorch:fields",
         "//openvm_zorch:poly_common",
         "//openvm_zorch:transcript",
+        "//openvm_zorch:types",
         "//openvm_zorch/commit:stacking",
         "//openvm_zorch/logup_zerocheck:prism",
         "//openvm_zorch/logup_zerocheck:verifier",

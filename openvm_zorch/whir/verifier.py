@@ -1,11 +1,11 @@
-"""Stage-5 verifier: the dual of ``WhirStage`` over the generic ``WhirVerifier``.
+"""WHIR verifier math: the open half of the stacked PCS, over zorch's ``WhirVerifier``.
 
 ``verify_whir`` is the inverse of ``openvm_zorch.whir.prover.prove_whir_opening``:
 repackage the reference ``WhirProof`` (per-query lists of opened rows and Merkle
 paths) into the generic ``WhirProof`` (``Opening`` pytrees vmapped over the
 queries), rebuild the same ``WhirVerifier`` the prover drove, and replay one
-``verify`` — the stage math only. The chain Stage that drives it
-(``WhirVerifierStage``) lives with the other stage duals in
+``verify`` — the opening math only. The verifier role that drives it
+(``StackedWhirPcsVerifier``) lives with the other duals in
 ``openvm_zorch/verify.py``.
 """
 
@@ -20,13 +20,16 @@ from zorch.commit.merkle import Opening
 from zorch.commit.strided_merkle import StridedMerkleTree
 from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
+from zorch.pcs.stage import OpeningClaim, OpeningProof
 from zorch.pcs.whir.config import WhirParams
 from zorch.pcs.whir.config import WhirProof as GenericWhirProof
 from zorch.pcs.whir.verifier import WhirVerifier
+from zorch.stage import TrivialClaim, VerifierStage, VerifyResult
 from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.fields import F
 from openvm_zorch.poly_common import VerificationError
+from openvm_zorch.types import StackedOpeningClaim, SystemParams
 from openvm_zorch.whir.prover import WhirConfig, WhirProof
 from openvm_zorch.whir.scheme import SwirlWhirScheme
 
@@ -126,7 +129,55 @@ def verify_whir(
         final_poly=proof.final_poly,
     )
 
-    ok, transcript = verifier.verify(commitments[0], [z], values, gproof, transcript)
-    if not bool(ok):
+    result = verifier.verify(
+        OpeningClaim(commitments[0], [z]),
+        OpeningProof(values, gproof),
+        transcript,
+    )
+    if not bool(result.ok):
         raise VerificationError("WHIR verification failed")
-    return transcript
+    return result.transcript
+
+
+class StackedWhirPcsVerifier(
+    VerifierStage[StackedOpeningClaim, TrivialClaim, WhirProof, DuplexTranscript]
+):
+    """The open half of the stacked PCS, verifier side: form ``u_cube`` from
+    the claim's opening point — the same handoff the prover does — and check
+    WHIR against the claim's commitment and opening values.
+
+    Discharges the opening claim into the trivial claim, which is what makes a
+    SWIRL proof a complete argument.
+    """
+
+    def __init__(
+        self, sponge: Sponge, compressor: Compression, *, params: SystemParams
+    ) -> None:
+        self._sponge = sponge
+        self._compressor = compressor
+        self._params = params
+
+    def verify(
+        self,
+        claim: StackedOpeningClaim,
+        reduction_proof: WhirProof,
+        transcript: DuplexTranscript,
+    ) -> VerifyResult[TrivialClaim, DuplexTranscript]:
+        u_cube = [claim.u[0]]
+        for _ in range(self._params.l_skip - 1):
+            u_cube.append(u_cube[-1] * u_cube[-1])
+        u_cube.extend(claim.u[1:])
+        transcript = verify_whir(
+            transcript,
+            self._sponge,
+            self._compressor,
+            self._params.l_skip,
+            self._params.n_stack,
+            self._params.log_blowup,
+            self._params.whir,
+            reduction_proof,
+            claim.stacking_openings,
+            [claim.commitment],
+            u_cube,
+        )
+        return VerifyResult(TrivialClaim(), transcript, fnp.bool_(True))

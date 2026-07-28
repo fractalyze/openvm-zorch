@@ -109,6 +109,21 @@ py_test(
 )
 
 # End-to-end SWIRL prover: the five stage modules composed into one prove().
+# The system's claims, witnesses and wire types — shared by both roles of every
+# claim reduction, so neither has to import the other to read them.
+py_library(
+    name = "types",
+    srcs = [
+        "__init__.py",
+        "types.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("zk_dtypes"),
+    ],
+)
+
 py_library(
     name = "prove",
     srcs = [
@@ -118,6 +133,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":transcript",
+        "//openvm_zorch:types",
         "//openvm_zorch/commit:trace_commit",
         "//openvm_zorch/logup_gkr:input_layer",
         "//openvm_zorch/logup_gkr:prover",
@@ -172,6 +188,7 @@ py_library(
         ":fields",
         ":poly_common",
         ":prove",
+        "//openvm_zorch:types",
         "//openvm_zorch/commit:stacking",
         "//openvm_zorch/logup_gkr:verifier",
         "//openvm_zorch/logup_zerocheck:constraints",

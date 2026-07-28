@@ -1,9 +1,10 @@
-"""Stage-4 verifier: the dual of ``StackingStage`` (verifier/stacked_reduction.rs).
+"""Stacked-reduction verifier math: the dual of ``StackingProver``
+(verifier/stacked_reduction.rs).
 
 ``verify_stacked_reduction`` re-derives λ, checks s₀ against the λ-batched
 opening claims, replays the quadratic sumcheck, and closes on the
 stacking-opening claim via the per-column eq/κ_rot prism kernels — the stage
-math only. The chain Stage that drives it (``StackingVerifierStage``) lives
+math only. The verifier role that drives it (``StackingVerifier``) lives
 with the other stage duals in ``openvm_zorch/verify.py``.
 """
 
@@ -14,6 +15,7 @@ from typing import Sequence
 import frx.numpy as fnp
 from frx import Array
 from zorch.poly.univariate import eval_coeffs
+from zorch.stage import VerifierStage, VerifyResult
 from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.commit.stacking import StackedLayout
@@ -30,6 +32,12 @@ from openvm_zorch.poly_common import (
 )
 from openvm_zorch.stacked_reduction.prover import StackingProof
 from openvm_zorch.transcript import sample_ext
+from openvm_zorch.types import (
+    AirVk,
+    ColumnOpeningClaim,
+    StackedOpeningClaim,
+    SystemParams,
+)
 
 
 def verify_stacked_reduction(
@@ -124,3 +132,58 @@ def verify_stacked_reduction(
         raise VerificationError("Stage-4 final sum mismatch")
 
     return transcript, [u[j] for j in range(n_stack + 1)]
+
+
+class StackingVerifier(
+    VerifierStage[
+        ColumnOpeningClaim, StackedOpeningClaim, StackingProof, DuplexTranscript
+    ]
+):
+    """The dual of ``StackingProver``: rebuild the stacked layout from the
+    verifying keys, batch the incoming column openings, and verify the stacked
+    opening reduction."""
+
+    def __init__(
+        self,
+        *,
+        params: SystemParams,
+        air_vks: Sequence[AirVk],
+        commitment: Array,
+    ) -> None:
+        self._params = params
+        self._air_vks = air_vks
+        # The commitment the opening claim is about. It reaches the verifier
+        # alongside the proof rather than inside it, so it is bound here.
+        self._commitment = commitment
+
+    def verify(
+        self,
+        claim: ColumnOpeningClaim,
+        reduction_proof: StackingProof,
+        transcript: DuplexTranscript,
+    ) -> VerifyResult[StackedOpeningClaim, DuplexTranscript]:
+        sorted_vks = [self._air_vks[i] for i in claim.system.shape.order]
+        layout = StackedLayout.new(
+            self._params.l_skip,
+            self._params.l_skip + self._params.n_stack,
+            [(vk.width, vk.log_height) for vk in sorted_vks],
+        )
+        transcript, u = verify_stacked_reduction(
+            transcript,
+            self._params.l_skip,
+            self._params.n_stack,
+            reduction_proof,
+            layout,
+            [vk.needs_next for vk in sorted_vks],
+            claim.column_openings,
+            claim.r,
+        )
+        return VerifyResult(
+            StackedOpeningClaim(
+                commitment=self._commitment,
+                u=u,
+                stacking_openings=reduction_proof.stacking_openings,
+            ),
+            transcript,
+            fnp.bool_(True),
+        )

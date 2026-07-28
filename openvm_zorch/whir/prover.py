@@ -34,12 +34,15 @@ from zorch.hash.compression import Compression
 from zorch.hash.sponge import Sponge
 from zorch.pcs.whir.config import WhirParams
 from zorch.pcs.whir.prover import WhirProver, WhirProverData
+from zorch.stage import ProveResult, ProverStage, TrivialClaim
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
 from openvm_zorch.commit.stacked_merkle import StackedMerkleTree
+from openvm_zorch.commit.trace_commit import stacked_commit
 from openvm_zorch.fields import F
 from openvm_zorch.transcript import ef_from_limbs, grind, sample_ext
+from openvm_zorch.types import StackedCommitData, StackedOpeningClaim, SystemWitness
 from openvm_zorch.whir.scheme import SwirlWhirScheme
 
 
@@ -187,3 +190,89 @@ def prove_whir_opening(
         final_poly=gproof.final_poly,
         mu=mu,
     )
+
+
+class StackedWhirPcs(
+    ProverStage[
+        StackedOpeningClaim,
+        StackedCommitData,
+        TrivialClaim,
+        WhirProof,
+        DuplexTranscript,
+    ]
+):
+    """The stacked polynomial commitment scheme: commit the traces, open them
+    at a point with WHIR.
+
+    The halves sit apart because Fiat-Shamir requires it — the commitment must
+    bind the transcript before LogUp-GKR draws a challenge, and the opening
+    needs the point the stacked reduction produces.
+    """
+
+    def __init__(
+        self,
+        sponge: Sponge,
+        compressor: Compression,
+        *,
+        l_skip: int,
+        n_stack: int,
+        log_blowup: int,
+        whir: WhirConfig,
+        jit: bool = True,
+    ) -> None:
+        self._sponge = sponge
+        self._compressor = compressor
+        self._l_skip = l_skip
+        self._n_stack = n_stack
+        self._log_blowup = log_blowup
+        self._whir = whir
+        self._jit = jit
+
+    def commit(self, witness: SystemWitness) -> tuple[Array, StackedCommitData]:
+        """Commit the common main. The cached mains were committed earlier, in
+        build scope, and ride the witness."""
+        root, pcs_data = stacked_commit(
+            self._sponge,
+            self._compressor,
+            self._l_skip,
+            self._n_stack,
+            self._log_blowup,
+            self._whir.k,
+            [a.trace for a in witness.sorted_airs],
+        )
+        return root, StackedCommitData(common=pcs_data, cached=witness.cached)
+
+    def prove(
+        self,
+        claim: StackedOpeningClaim,
+        witness: StackedCommitData,
+        transcript: DuplexTranscript,
+    ) -> ProveResult[TrivialClaim, WhirProof, DuplexTranscript]:
+        """Open the committed matrices at ``u_cube`` — the stacking → WHIR
+        handoff ``u_cube = (u₀ squarings over the skip domain) ‖ u[1..]``
+        (reference ``prove_openings``)."""
+        u_cube = [claim.u[0]]
+        for _ in range(self._l_skip - 1):
+            u_cube.append(u_cube[-1] * u_cube[-1])
+        u_cube.extend(claim.u[1:])
+        transcript, whir_proof = prove_whir_opening(
+            transcript,
+            self._sponge,
+            self._compressor,
+            self._l_skip,
+            self._log_blowup,
+            self._whir,
+            # Common main first, then each cached/preprocessed commitment (the
+            # WHIR μ-batch spans all their columns; round 0 opens each tree). An
+            # empty cached prefix (synthetic) leaves the single-commitment path.
+            [(witness.common.matrix, witness.common.tree)]
+            + [(d.matrix, d.tree) for d in witness.cached.stacking_order],
+            u_cube,
+            # Lower each WHIR device island to one fused kernel (byte-identical
+            # — whir prover_test gates both paths). The strided merkle_commit
+            # marker only fuses under jit; eager dispatch decomposes it, so this
+            # flip is what turns the strided merkle_commit fusion into an actual
+            # compute win.
+            jit=self._jit,
+        )
+        return ProveResult(TrivialClaim(), whir_proof, transcript)

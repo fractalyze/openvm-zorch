@@ -30,16 +30,23 @@ import frx
 import frx.numpy as fnp
 import numpy as np
 from frx import Array, lax
+from zorch.challenge import ChallengePolicy
 from zorch.poly.univariate import powers
 from zorch.prove import fold_rounds
+from zorch.stage import ProveResult, ProverStage
 from zorch.sumcheck.domain import EvalDomain, fold, natural_domain
 from zorch.sumcheck.prover import RoundMsg, StandardRound
-from zorch.transcript import DuplexTranscript, Transcript, sample_challenge
+from zorch.transcript import DuplexTranscript
 
 from openvm_zorch.commit.stacking import StackedLayout, StackedSlice
 from openvm_zorch.fields import EF, MODULUS, F, f_const, f_to_ef
 from openvm_zorch.logup_zerocheck import prism
 from openvm_zorch.transcript import sample_ext
+from openvm_zorch.types import (
+    ColumnOpeningClaim,
+    StackedCommitData,
+    StackedOpeningClaim,
+)
 
 _STACKING_PROFILE = os.environ.get("OPENVM_STACKING_PROFILE") == "1"
 
@@ -271,7 +278,7 @@ class _StackingSummand:
         return self.combine((), *factors)
 
 
-class _StackingRound(StandardRound):
+class _StackingRound(StandardRound[DuplexTranscript]):
     """``StandardRound`` that also surfaces the challenge it sampled.
 
     ``StandardRound`` returns its round poly alone, but Stage 4's proof carries
@@ -281,11 +288,10 @@ class _StackingRound(StandardRound):
     in ``EF``)."""
 
     def __call__(
-        self, folded: Array, transcript: Transcript
-    ) -> tuple[Array, Transcript, RoundMsg]:
+        self, folded: Array, transcript: DuplexTranscript
+    ) -> tuple[Array, DuplexTranscript, RoundMsg]:
         msg = self._round_poly(folded)
-        transcript = transcript.observe(msg)
-        transcript, r = sample_challenge(transcript, self.ext_dtype, self.limbs)
+        transcript, r = self.challenges.observe_and_sample(transcript, msg)
         return fold(folded, r), transcript, RoundMsg(msg, r)
 
 
@@ -479,9 +485,14 @@ def _sumcheck_rounds(
     summand = _StackingSummand()
     # {1, 2} — the natural {0, 1, 2} domain minus s(0), which the verifier
     # reconstructs from the running claim rather than reading off the wire.
-    domain = EvalDomain(natural_domain(summand.degree, EF).nodes[1:])
+    natural = natural_domain(summand.degree, EF).nodes
+    # `EvalDomain.nodes` is optional because `None` means the implicit naturals;
+    # `natural_domain` is the constructor that materialises them, so this branch
+    # cannot be taken.
+    assert natural is not None
+    domain = EvalDomain(natural[1:])
     folded, transcript, msgs = fold_rounds(
-        _StackingRound(summand, domain, ext_dtype=EF),
+        _StackingRound(summand, domain, challenges=ChallengePolicy(EF)),
         fnp.stack([q_cols, eqw_cols]),
         transcript,
         n_stack,
@@ -704,3 +715,68 @@ def prove_stacked_opening_reduction(
         stacking_openings=openings,
         u=u,
     )
+
+
+class StackingProver(
+    ProverStage[
+        ColumnOpeningClaim,
+        StackedCommitData,
+        StackedOpeningClaim,
+        StackingProof,
+        DuplexTranscript,
+    ]
+):
+    """Reduce per-column opening claims at ``r`` to stacked-column opening
+    claims at ``u``.
+
+    Its witness is the PCS's retained commit data: the reduction runs over the
+    committed matrices themselves, which belong to the scheme rather than to
+    any claim.
+    """
+
+    def __init__(
+        self, *, l_skip: int, n_stack: int, needs_next: Sequence[bool]
+    ) -> None:
+        self._l_skip = l_skip
+        self._n_stack = n_stack
+        # Rotation is a property of each AIR's constraints, fixed by the
+        # circuit, so it configures the role rather than riding the claim.
+        self._needs_next = list(needs_next)
+
+    def prove(
+        self,
+        claim: ColumnOpeningClaim,
+        witness: StackedCommitData,
+        transcript: DuplexTranscript,
+    ) -> ProveResult[StackedOpeningClaim, StackingProof, DuplexTranscript]:
+        # The commit half committed the common main plus each cached main as its
+        # own stacked commitment; the opening reduction runs over all of them,
+        # common main first (reference ``device.rs`` prove_openings:154-167).
+        stacked_per_commit = [(witness.common.matrix, witness.common.layout)] + [
+            (d.matrix, d.layout) for d in witness.cached.stacking_order
+        ]
+        # need_rot for a cached commit is the owning AIR's need_rot — its cached
+        # columns share the AIR's rotation claim. An empty cached prefix (the
+        # synthetic fixture) leaves this exactly the single-commit call (#59).
+        need_rot_per_commit: list[list[bool]] = [list(self._needs_next)]
+        for position, air_idx in enumerate(claim.system.shape.order):
+            need_rot_per_commit.extend(
+                [self._needs_next[position]] for _ in witness.cached.by_air[air_idx]
+            )
+        transcript, stacking_proof = prove_stacked_opening_reduction(
+            transcript,
+            self._l_skip,
+            self._n_stack,
+            stacked_per_commit,
+            need_rot_per_commit,
+            claim.r,
+        )
+        return ProveResult(
+            StackedOpeningClaim(
+                commitment=witness.common.commit,
+                u=stacking_proof.u,
+                stacking_openings=stacking_proof.stacking_openings,
+            ),
+            stacking_proof,
+            transcript,
+        )

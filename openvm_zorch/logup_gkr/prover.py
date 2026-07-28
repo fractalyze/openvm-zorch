@@ -30,11 +30,19 @@ import frx.numpy as fnp
 from frx import Array
 from zorch.logup_gkr.circuit import GkrLayer, build_pyramid
 from zorch.poly.eq import expand_eq_to_hypercube
+from zorch.stage import ProveResult, ProverStage
 from zorch.sumcheck.domain import fold
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
-from openvm_zorch.transcript import sample_ext
+from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
+from openvm_zorch.transcript import grind, sample_ext
+from openvm_zorch.types import (
+    LogupClaim,
+    LogupGkrProof,
+    SystemClaim,
+    SystemWitness,
+)
 
 # Stage-2 ran fully eager, and the per-round Fiat-Shamir dominated it: a single
 # eager `observe + sample_ext` dispatches the width-16 Poseidon2 permutation as
@@ -282,3 +290,56 @@ def pad_xi(
         transcript, extra = _sample(transcript)
         xi.append(extra)
     return transcript, xi
+
+
+class LogupGkrProver(
+    ProverStage[SystemClaim, SystemWitness, LogupClaim, LogupGkrProof, DuplexTranscript]
+):
+    """Reduce the system's interaction claim to one fraction-sum claim at ξ.
+
+    Grinds the LogUp PoW, samples α/β, builds the GKR input layer from the
+    traces, and runs the fractional sumcheck.
+    """
+
+    def __init__(self, *, l_skip: int, logup_pow_bits: int) -> None:
+        self._l_skip = l_skip
+        self._logup_pow_bits = logup_pow_bits
+
+    def prove(
+        self,
+        claim: SystemClaim,
+        witness: SystemWitness,
+        transcript: DuplexTranscript,
+    ) -> ProveResult[LogupClaim, LogupGkrProof, DuplexTranscript]:
+        shape = claim.shape
+        airs = witness.sorted_airs
+        transcript, logup_pow_witness = grind(transcript, self._logup_pow_bits)
+        transcript, alpha = sample_ext(transcript)
+        transcript, beta = sample_ext(transcript)
+        if shape.total_interactions > 0:
+            num, den = gkr_input_evals(
+                self._l_skip,
+                shape.n_logup,
+                [a.trace for a in airs],
+                [a.dag for a in airs],
+                [a.public_values for a in airs],
+                [a.needs_next for a in airs],
+                [a.cached_mains for a in airs],
+                alpha,
+                beta,
+            )
+            transcript, gkr_proof, xi = fractional_sumcheck(transcript, num, den)
+        else:
+            # No interactions: the reference builds an empty GKR input layer, so
+            # ``fractional_sumcheck`` is a no-op — it neither absorbs into the
+            # transcript nor produces any ξ. The verifier gates ``verify_gkr`` on
+            # the same ``total_interactions == 0`` (verifier/batch_constraints.rs),
+            # so skipping it here keeps both sides' transcript and ξ in lockstep.
+            gkr_proof = empty_frac_sumcheck_proof(alpha.dtype)
+            xi = []
+        transcript, xi = pad_xi(transcript, xi, self._l_skip + shape.n_global)
+        return ProveResult(
+            LogupClaim(system=claim, alpha=alpha, beta=beta, xi=xi),
+            LogupGkrProof(logup_pow_witness, gkr_proof, xi),
+            transcript,
+        )

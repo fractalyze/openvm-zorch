@@ -28,7 +28,7 @@ from typing import Sequence
 import frx.numpy as fnp
 from frx import Array
 from zorch.poly.univariate import eval_coeffs
-from zorch.transcript import Transcript
+from zorch.transcript import TranscriptT
 
 from openvm_zorch.commit.rs_message import eval_to_coeff_rs_message, mle_coeffs_to_evals
 from openvm_zorch.fields import EF, f_to_ef
@@ -73,8 +73,8 @@ class SwirlWhirScheme:
     l_skip: int
 
     def bind(
-        self, transcript: Transcript, commitment: Array, values: Array
-    ) -> Transcript:
+        self, transcript: TranscriptT, commitment: Array, values: Array
+    ) -> TranscriptT:
         # The common-main commitment was bound in Stage 1; WHIR opens against it
         # and must not re-absorb the root or the (implicit) claimed values.
         return transcript
