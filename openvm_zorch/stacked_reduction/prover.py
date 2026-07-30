@@ -450,6 +450,41 @@ def _round0_s0_zone(l_skip: int, num_cosets: int, s_0_deg: int):
     return run
 
 
+@functools.lru_cache(maxsize=8)
+def _fold_ple_zone(l_skip: int, omega: int, lhts: tuple):
+    """The PLE fold + kernel-table update (round 0 → rounds bridge) as one cached
+    jit: the per-commit ``fold_ple_evals`` and the per-``log_height``
+    ``_kernel_tables_update`` (already jitted, inlined here) issue as one dispatch
+    instead of one per commit / height. Closes over the static structure (the
+    ``eq_tables`` key order ``lhts``, host-int ``l_eff``/``omega_eff`` per height);
+    the device arrays thread through. Byte-identical to the eager loops."""
+
+    @frx.jit
+    def run(mats, u_0, eq_values, r_0, eq_const):
+        q_evals = [prism.fold_ple_evals(l_skip, mat, u_0) for mat in mats]
+        eq_uni_u01 = prism.eval_eq_uni_at_one(l_skip, u_0)
+        new_eq, k_rot = [], []
+        for lht, eq in zip(lhts, eq_values):
+            n = lht - l_skip
+            l_eff, omega_eff, r_uni = _uni_kernel_args(l_skip, n, omega, r_0)
+            eqt, krt = _kernel_tables_update(
+                l_skip,
+                l_eff,
+                n,
+                eq,
+                u_0,
+                r_uni,
+                _ef_const(omega_eff),
+                eq_const,
+                eq_uni_u01,
+            )
+            new_eq.append(eqt)
+            k_rot.append(krt)
+        return q_evals, new_eq, k_rot
+
+    return run
+
+
 def _sumcheck_rounds(
     transcript: DuplexTranscript,
     q_evals: Sequence[Array],
@@ -707,23 +742,16 @@ def prove_stacked_opening_reduction(
     u = [u_0]
 
     # --- Fold the PLEs (q and both kernels) at u_0 ---
-    q_evals = [prism.fold_ple_evals(l_skip, mat, u_0) for mat, _ in stacked_per_commit]
-    eq_uni_u01 = prism.eval_eq_uni_at_one(l_skip, u_0)
-    k_rot_tables: dict[int, Array] = {}
-    for lht, eq in eq_tables.items():
-        n = lht - l_skip
-        l_eff, omega_eff, r_uni = _uni_kernel_args(l_skip, n, omega, r_0)
-        eq_tables[lht], k_rot_tables[lht] = _kernel_tables_update(
-            l_skip,
-            l_eff,
-            n,
-            eq,
-            u_0,
-            r_uni,
-            _ef_const(omega_eff),
-            eq_const,
-            eq_uni_u01,
-        )
+    lht_keys = tuple(eq_tables.keys())
+    q_evals, new_eq, k_rot = _fold_ple_zone(l_skip, omega, lht_keys)(
+        [mat for mat, _ in stacked_per_commit],
+        u_0,
+        [eq_tables[lht] for lht in lht_keys],
+        r_0,
+        eq_const,
+    )
+    eq_tables = dict(zip(lht_keys, new_eq, strict=True))
+    k_rot_tables: dict[int, Array] = dict(zip(lht_keys, k_rot, strict=True))
     prof.mark(
         "fold_ple+tables",
         q_evals,
