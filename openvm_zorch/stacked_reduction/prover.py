@@ -432,6 +432,24 @@ def _stacking_rounds_zone(n_stack: int):
     return run
 
 
+@functools.lru_cache(maxsize=8)
+def _round0_s0_zone(l_skip: int, num_cosets: int, s_0_deg: int):
+    """Round 0's coefficient interpolation + Fiat-Shamir observe as one cached
+    jit. ``geometric_cosets_to_coeffs``'s host-int geom / iDFT weights
+    constant-fold once the caller prewarms them (``prewarm_geom_weights`` +
+    ``prewarm_coset_weights``, #45), so s_0 and its observe issue as one dispatch
+    instead of a coeff-op storm. Byte-identical to the eager path."""
+
+    @frx.jit
+    def run(s_evals, transcript):
+        s_0 = fnp.stack(
+            prism.geometric_cosets_to_coeffs(l_skip, s_evals, num_cosets)[: s_0_deg + 1]
+        )
+        return s_0, transcript.observe(s_0)
+
+    return run
+
+
 def _sumcheck_rounds(
     transcript: DuplexTranscript,
     q_evals: Sequence[Array],
@@ -679,10 +697,10 @@ def prove_stacked_opening_reduction(
         prof.acc("r0.contrib", s_evals)
     prof.flush()
     s_0_deg = num_cosets * (size - 1)
-    s_0 = fnp.stack(
-        prism.geometric_cosets_to_coeffs(l_skip, s_evals, num_cosets)[: s_0_deg + 1]
-    )
-    transcript = transcript.observe(s_0)
+    # Warm the geom-weight cache so the coeff interpolation constant-folds in the
+    # zone (prewarm_coset_weights above already covers the iDFT path).
+    prism.prewarm_geom_weights(l_skip, num_cosets)
+    s_0, transcript = _round0_s0_zone(l_skip, num_cosets, s_0_deg)(s_evals, transcript)
     prof.mark("r0.s0_coeffs+observe", s_0, transcript.state)
 
     transcript, u_0 = sample_ext(transcript)
