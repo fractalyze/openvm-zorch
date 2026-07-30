@@ -140,8 +140,11 @@ class _TraceView:
 @functools.cache
 def _ef_const(value: int) -> Array:
     # A few distinct host ints (ω and its powers) recur across the groups; each
-    # miss builds a device scalar, so cache them.
-    return f_to_ef(f_const(value))
+    # miss builds a device scalar, so cache them. Built outside any ambient
+    # trace: a miss under the whole-stage jit would otherwise cache that
+    # trace's tracer and poison every later trace that hits the same key.
+    with frx.ensure_compile_time_eval():
+        return f_to_ef(f_const(value))
 
 
 def _exp_power_of_2(x: Array, k: int) -> Array:
@@ -317,7 +320,10 @@ def _eqw_gather_index(key: tuple) -> Array:
     if dest:
         dest_flat = np.concatenate(dest)
         gather[dest_flat] = np.arange(dest_flat.size) + 1
-    return fnp.asarray(gather)
+    # Outside any ambient trace, so a miss under the whole-stage jit caches a
+    # constant, not that trace's tracer (see _ef_const).
+    with frx.ensure_compile_time_eval():
+        return fnp.asarray(gather)
 
 
 def _eqw_columns(
@@ -397,7 +403,10 @@ def _q_cols_gather_index(key: tuple) -> Array:
         + (row_idx + np.arange(lifted)) * mat_widths[com_idx]
         for com_idx, row_idx, col_idx, _lht in views
     ]
-    return fnp.asarray(np.stack(cols, axis=1).reshape(-1))
+    # Outside any ambient trace, so a miss under the whole-stage jit caches a
+    # constant, not that trace's tracer (see _ef_const).
+    with frx.ensure_compile_time_eval():
+        return fnp.asarray(np.stack(cols, axis=1).reshape(-1))
 
 
 def _sumcheck_rounds(
@@ -434,11 +443,10 @@ def _sumcheck_rounds(
     ``lax.scan`` without padding every round back to full width and masking the
     dead lanes — which is what this stage did before it moved onto the shared
     round. Byte-identical either way (the masked tail was exactly zero), and
-    cheaper here: this stage runs eager, where a ``lax.scan`` re-traces and
-    recompiles its body on every call while the unrolled ops hit the dispatch
-    cache (~8x at the production ``n_stack`` of 16, ~100x at the suite's 8).
-    Jitting the stage would invert that — an unrolled module grows with the
-    round count, where one scan body does not."""
+    unrolling suits both callers: under the cached whole-stage jit the static
+    rounds trace once per layout into the one executable, and on the eager
+    profiling path (``OPENVM_STACKING_PROFILE=1``) the unrolled ops hit the
+    dispatch cache where a ``lax.scan`` would re-trace its body every call."""
     u = list(u)
     widths = [q.shape[1] for q in q_evals]
 
@@ -514,46 +522,40 @@ def _sumcheck_rounds(
     return transcript, round_polys, u, openings
 
 
-def prove_stacked_opening_reduction(
+_NULL_PROF = _StackingProfiler()  # no-ops while OPENVM_STACKING_PROFILE is unset
+# Whole-stage jit cache, keyed on the layout structure (Step-4 runs the whole
+# device compute as one executable, reused across proves — the reuse the warm
+# pass depends on). Evicted implicitly: a new layout is a new key.
+_STACKING_STAGE_FNS: dict = {}
+
+
+def _stacking_stage_body(
     transcript: DuplexTranscript,
+    r: Sequence[Array],
+    mats: Sequence[Array],
+    *,
     l_skip: int,
     n_stack: int,
-    stacked_per_commit: Sequence[tuple[Array, StackedLayout]],
-    need_rot_per_commit: Sequence[Sequence[bool]],
-    r: Sequence[Array],
-) -> tuple[DuplexTranscript, StackingProof]:
-    """Drive Stage 4 from the transcript state at ``stage3_end``.
+    num_cosets: int,
+    omega: int,
+    views: Sequence[_TraceView],
+    groups: Sequence[tuple[int, int]],
+    prof: _StackingProfiler,
+) -> tuple[DuplexTranscript, Array, Array, list[Array], list[Array], list[Array]]:
+    """The Stage-4 device compute — the λ sample through the proof arrays.
 
-    ``stacked_per_commit`` holds the Stage-1 result per commitment (common
-    main first): the stacked matrix (base field, ``(2^(l_skip+n_stack), W)``)
-    and its layout. ``need_rot_per_commit[c][m]`` says whether matrix ``m``
-    of commit ``c`` carries a rotation claim; ``r`` is Stage 3's challenge
-    vector (``r[0]`` univariate).
-    """
-    prof = _StackingProfiler()
-    views: list[_TraceView] = []
-    lam_count = 0
-    for com_idx, (_, layout) in enumerate(stacked_per_commit):
-        need_rot = need_rot_per_commit[com_idx]
-        for mat_idx, _col_in_mat, s in layout.sorted_cols:
-            # Every column reserves the rotation power even when unused —
-            # mirrors Stage 3 observing (claim, 0) pairs for !need_rot.
-            lam_rot = lam_count + 1 if need_rot[mat_idx] else None
-            views.append(_TraceView(com_idx, s, lam_count, lam_rot))
-            lam_count += 2
+    Returns raw arrays ``(transcript, lam, s_0, round_polys, openings, u)``, not
+    the ``StackingProof``: the caller assembles the frozen dataclass outside, as
+    it is not a JAX pytree and cannot be a jit return value.
 
-    # Runs of equal log_height (views come sorted descending by height).
-    groups: list[tuple[int, int]] = []
-    start = 0
-    for i in range(1, len(views) + 1):
-        if (
-            i == len(views)
-            or views[i].slice.log_height != views[start].slice.log_height
-        ):
-            groups.append((start, i))
-            start = i
-
+    Shared by the eager profiling path and the cached whole-stage jit: the
+    host-int structure (``views`` / ``groups`` / ``omega``, built once from the
+    layout) is threaded in as statics; the per-prove device arrays (transcript,
+    ``r``, the stacked matrices ``mats``) are the operands. Under the jit the
+    per-group / per-op dispatch collapses to one executable; the profiler's
+    ``mark``/``acc`` no-op there (the jit path only runs with profiling off)."""
     transcript, lam = sample_ext(transcript)
+    lam_count = 2 * len(views)
     lam_pows = powers(lam, lam_count)
     # Views reserve two powers each, in order (see above), so view i takes
     # λ^{2i} / λ^{2i+1}: the weights are just the even and odd strides, and a
@@ -566,7 +568,6 @@ def prove_stacked_opening_reduction(
         fnp.zeros((), EF),
     )
 
-    omega = prism.omega_int(l_skip)
     r_0 = r[0]
     # eq_D(ω·r_0, 1): the boundary weight of the rotation kernel's cube part.
     eq_const = prism.eval_eq_uni_at_one(l_skip, r_0 * _ef_const(omega))
@@ -584,7 +585,6 @@ def prove_stacked_opening_reduction(
     # that XLA cannot fuse — with a handful of array ops over leading
     # (coset, z) batch axes (field arithmetic is exactly associative, so the
     # reduction order does not change s_0).
-    num_cosets = 2  # q · (eq or κ_rot) is degree 2 per variable
     size = 1 << l_skip
     # z[c, k] = g^{c+1}·ω^k, the z-index of coset c, in the field algebra: the
     # per-coset geometric shift g^{c+1} times the ω-power table `[1, ω, …]`, as
@@ -604,16 +604,11 @@ def prove_stacked_opening_reduction(
     # slices + stacks on the real block, ~68 ms of the stage (commit/stacking.py
     # recipe). Each group's index is a pure function of the layout, memoized;
     # the matrix shapes carry the per-commit source offsets into it.
-    mat_shapes = tuple((mat.shape[0], mat.shape[1]) for mat, _ in stacked_per_commit)
+    mat_shapes = tuple((mat.shape[0], mat.shape[1]) for mat in mats)
     q_src = fnp.concatenate(
-        [fnp.zeros((1,), stacked_per_commit[0][0].dtype)]
-        + [mat.reshape(-1) for mat, _ in stacked_per_commit]
+        [fnp.zeros((1,), mats[0].dtype)] + [mat.reshape(-1) for mat in mats]
     )
 
-    # ω extraction / host-int weight construction fault under a jit trace;
-    # warming the lru cache here lets `_round0_group_contrib` constant-fold
-    # the fused coset weights (``prewarm_coset_weights`` docstring, #45).
-    prism.prewarm_coset_weights(l_skip, num_cosets)
     prof.mark("setup", list(eq_tables.values()), lam_eq_all, lam_rot_all, z_grid, q_src)
     s_evals = fnp.zeros((num_cosets, size), EF)
     for g_start, g_end in groups:
@@ -669,7 +664,7 @@ def prove_stacked_opening_reduction(
     u = [u_0]
 
     # --- Fold the PLEs (q and both kernels) at u_0 ---
-    q_evals = [prism.fold_ple_evals(l_skip, mat, u_0) for mat, _ in stacked_per_commit]
+    q_evals = [prism.fold_ple_evals(l_skip, mat, u_0) for mat in mats]
     eq_uni_u01 = prism.eval_eq_uni_at_one(l_skip, u_0)
     k_rot_tables: dict[int, Array] = {}
     for lht, eq in eq_tables.items():
@@ -708,6 +703,101 @@ def prove_stacked_opening_reduction(
         prof,
     )
 
+    return transcript, lam, s_0, round_polys, openings, u
+
+
+def prove_stacked_opening_reduction(
+    transcript: DuplexTranscript,
+    l_skip: int,
+    n_stack: int,
+    stacked_per_commit: Sequence[tuple[Array, StackedLayout]],
+    need_rot_per_commit: Sequence[Sequence[bool]],
+    r: Sequence[Array],
+) -> tuple[DuplexTranscript, StackingProof]:
+    """Drive Stage 4 from the transcript state at ``stage3_end``.
+
+    ``stacked_per_commit`` holds the Stage-1 result per commitment (common
+    main first): the stacked matrix (base field, ``(2^(l_skip+n_stack), W)``)
+    and its layout. ``need_rot_per_commit[c][m]`` says whether matrix ``m``
+    of commit ``c`` carries a rotation claim; ``r`` is Stage 3's challenge
+    vector (``r[0]`` univariate).
+
+    Host-prep builds the layout structure (``views`` / ``groups`` / ``omega``)
+    and warms the host-int weight caches; the device compute then runs as one
+    cached whole-stage jit (``_stacking_stage_body``), reused across proves so
+    the host dispatches once per prove, not once per region.
+    ``OPENVM_STACKING_PROFILE=1`` routes through the eager body for the
+    per-region host/device split (the jit erases the boundaries)."""
+    views: list[_TraceView] = []
+    lam_count = 0
+    for com_idx, (_, layout) in enumerate(stacked_per_commit):
+        need_rot = need_rot_per_commit[com_idx]
+        for mat_idx, _col_in_mat, s in layout.sorted_cols:
+            # A column with no rotation still reserves its rotation power, to
+            # match the reference prover observing a (claim, 0) pair for it.
+            lam_rot = lam_count + 1 if need_rot[mat_idx] else None
+            views.append(_TraceView(com_idx, s, lam_count, lam_rot))
+            lam_count += 2
+
+    # Runs of equal log_height (views come sorted descending by height).
+    groups: list[tuple[int, int]] = []
+    start = 0
+    for i in range(1, len(views) + 1):
+        if (
+            i == len(views)
+            or views[i].slice.log_height != views[start].slice.log_height
+        ):
+            groups.append((start, i))
+            start = i
+
+    num_cosets = 2  # q · (eq or κ_rot) is degree 2 per variable
+    omega = prism.omega_int(l_skip)
+    # ω extraction and the coset / geom interpolation weights are host-int and
+    # fault under a jit trace; warming their lru caches here lets the body
+    # constant-fold them into the graph (the #45 prewarm recipe).
+    prism.prewarm_coset_weights(l_skip, num_cosets)
+    prism.prewarm_geom_weights(l_skip, num_cosets)
+    mats = [mat for mat, _ in stacked_per_commit]
+
+    body_kw: dict = dict(
+        l_skip=l_skip,
+        n_stack=n_stack,
+        num_cosets=num_cosets,
+        omega=omega,
+        views=views,
+        groups=groups,
+    )
+    if _STACKING_PROFILE:
+        transcript, lam, s_0, round_polys, openings, u = _stacking_stage_body(
+            transcript, tuple(r), mats, prof=_StackingProfiler(), **body_kw
+        )
+    else:
+        key = (
+            l_skip,
+            n_stack,
+            num_cosets,
+            omega,
+            tuple(m.shape for m in mats),
+            tuple(
+                (
+                    v.com_idx,
+                    v.slice.row_idx,
+                    v.slice.col_idx,
+                    v.slice.log_height,
+                    v.lam_eq,
+                    v.lam_rot,
+                )
+                for v in views
+            ),
+            tuple(groups),
+        )
+        run = _STACKING_STAGE_FNS.get(key)
+        if run is None:
+            run = frx.jit(
+                functools.partial(_stacking_stage_body, prof=_NULL_PROF, **body_kw)
+            )
+            _STACKING_STAGE_FNS[key] = run
+        transcript, lam, s_0, round_polys, openings, u = run(transcript, tuple(r), mats)
     return transcript, StackingProof(
         lambda_=lam,
         univariate_round_coeffs=s_0,
