@@ -400,6 +400,38 @@ def _q_cols_gather_index(key: tuple) -> Array:
     return fnp.asarray(np.stack(cols, axis=1).reshape(-1))
 
 
+def _make_stacking_round() -> _StackingRound:
+    """The Stage-4 round object: quadratic MLE summand folded on the ``{1, 2}``
+    domain (the natural ``{0, 1, 2}`` minus ``s(0)``, which the verifier
+    reconstructs from the running claim rather than reading off the wire)."""
+    summand = _StackingSummand()
+    natural = natural_domain(summand.degree, EF).nodes
+    # `EvalDomain.nodes` is optional (``None`` means the implicit naturals);
+    # ``natural_domain`` materialises them, so this is never None.
+    assert natural is not None
+    domain = EvalDomain(natural[1:])
+    return _StackingRound(summand, domain, challenges=ChallengePolicy(EF))
+
+
+@functools.lru_cache(maxsize=8)
+def _stacking_rounds_zone(n_stack: int):
+    """The ``1..=n_stack`` sumcheck rounds as ONE cached jit — the GKR
+    whole-layer-zone pattern applied to Stage 4. ``fold_rounds`` unrolls the
+    rounds and the Fiat-Shamir observe/sample trace into a single executable, so
+    the host dispatches once per prove instead of once per round (the
+    ``rounds.fold`` dispatch storm). Built once per ``n_stack`` (the round object
+    is pure); ``frx.jit``'s own cache keys the compiled executable on the state
+    shape. Byte-identical to a plain eager ``fold_rounds`` loop — same round,
+    only the trace boundary moved."""
+    round_obj = _make_stacking_round()
+
+    @frx.jit
+    def run(state, transcript):
+        return fold_rounds(round_obj, state, transcript, n_stack)
+
+    return run
+
+
 def _sumcheck_rounds(
     transcript: DuplexTranscript,
     q_evals: Sequence[Array],
@@ -432,13 +464,14 @@ def _sumcheck_rounds(
     ``fold_rounds`` unrolls one round per cube variable. The fold halves the
     state each round, so the rounds are not fixed-shape and do not fit a
     ``lax.scan`` without padding every round back to full width and masking the
-    dead lanes — which is what this stage did before it moved onto the shared
-    round. Byte-identical either way (the masked tail was exactly zero), and
-    cheaper here: this stage runs eager, where a ``lax.scan`` re-traces and
-    recompiles its body on every call while the unrolled ops hit the dispatch
-    cache (~8x at the production ``n_stack`` of 16, ~100x at the suite's 8).
-    Jitting the stage would invert that — an unrolled module grows with the
-    round count, where one scan body does not."""
+    dead lanes (byte-identical, the masked tail being exactly zero, but wasteful).
+    Instead the whole unrolled loop runs under one cached jit
+    (``_stacking_rounds_zone``, the whole-stage-zone pattern zorch's
+    ``GkrLayerRound`` uses): the Fiat-Shamir observe/sample traces into the graph
+    and the host dispatches once per prove rather than once per round. That
+    collapse is the stage's dominant warm win, for a one-time compile that grows
+    with the round count (paid once per ``(n_stack, shape)`` class, then cached) —
+    the per-prove win dominates the one-time cost."""
     u = list(u)
     widths = [q.shape[1] for q in q_evals]
 
@@ -482,21 +515,8 @@ def _sumcheck_rounds(
     eqw_cols = lax.bit_reverse(eqw_cols, dimensions=(1,))
     prof.mark("rounds.eqw_build", q_cols, eqw_cols)
 
-    summand = _StackingSummand()
-    # {1, 2} — the natural {0, 1, 2} domain minus s(0), which the verifier
-    # reconstructs from the running claim rather than reading off the wire.
-    natural = natural_domain(summand.degree, EF).nodes
-    # `EvalDomain.nodes` is optional because `None` means the implicit naturals;
-    # `natural_domain` is the constructor that materialises them, so this branch
-    # cannot be taken.
-    assert natural is not None
-    domain = EvalDomain(natural[1:])
-    folded, transcript, msgs = fold_rounds(
-        _StackingRound(summand, domain, challenges=ChallengePolicy(EF)),
-        fnp.stack([q_cols, eqw_cols]),
-        transcript,
-        n_stack,
-    )
+    state = fnp.stack([q_cols, eqw_cols])
+    folded, transcript, msgs = _stacking_rounds_zone(n_stack)(state, transcript)
     round_polys = [m.round_poly for m in msgs]
     u = u + [m.challenge for m in msgs]
     prof.mark("rounds.fold", folded, round_polys)
