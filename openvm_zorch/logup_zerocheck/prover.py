@@ -48,7 +48,7 @@ from typing import Any
 
 import frx
 import frx.numpy as fnp
-from frx import Array, lax
+from frx import Array
 from zorch.constraint_eval import constraint_eval
 from zorch.poly.eq import eval_eq, expand_eq_to_hypercube
 from zorch.poly.univariate import compute_inv_vandermonde, eval_coeffs
@@ -371,7 +371,7 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
     coset counts so the host-int ω / weight builders are already cached and
     constant-fold (a cold cache faults under trace — ``omega_int``'s
     ``lax.ntt`` + ``int(...)`` concretization). Same DAG walk the MLE
-    ``lax.scan`` jits, pure EF arithmetic, contracted (row) axis kept LAST per
+    round jit runs, pure EF arithmetic, contracted (row) axis kept LAST per
     docs/development.md ⇒ byte-exact. One compile per AIR (distinct DAGs);
     warm/GPU reaps
     the fusion.
@@ -538,26 +538,30 @@ _MLE_SCAN_FNS: dict[tuple, object] = {}
 
 
 def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
-    """The MLE rounds 1..=n_max as one jitted ``lax.scan``, built once per AIR set.
+    """The MLE rounds 1..=n_max, statically UNROLLED in one jit, built once per
+    AIR set.
 
-    Eager, the round loop folds the hypercube to half its size each round, so
-    every round is a fresh XLA shape → ~726 one-shot recompiles at 2^16 (#26).
-    Wrapping the unrolled loop in one jit instead *regressed* compile time (one
-    giant module; #33). The fix is a `lax.scan` whose body compiles once,
-    independent of n_max: each trace keeps a fixed-width buffer and stride-pair
-    folds in place, re-padding the dead tail with zeros — pairing LSB-stride as
-    the reference's MLE fold does, not high/low halves. Front-load exhaustion
-    (round > ñ_t, ñ_t static) becomes a per-trace `fnp.where` on the dynamic scan
-    index instead of a Python branch. The round math is unchanged from the eager
-    body — only the loop carrier moved into the scan carry.
+    History: eager, every round was a fresh XLA shape → ~726 one-shot recompiles
+    (#26); a naive unrolled jit regressed compile (#33 — its module carried every
+    AIR × every round, ~n_max× the body); a ``lax.scan`` bounded compile but its
+    runtime ``While`` is where the warm stage now goes: the loop body's command
+    buffers are re-initialized and re-recorded EVERY iteration (buffer-address
+    churn — nsys: CommandExecutor::Record + CommandBufferThunk::Initialize are
+    ~40% of warm host samples, ~1.8ms × n_max of GPU-idle stalls), the very tax
+    the GKR prover escaped by unrolling (openvm-zorch#153).
 
-    The scan compiles once, but *tracing* it is not free: the body walks every
-    AIR's constraint DAG (~4.9k nodes on the real block), and an eagerly-invoked
-    `lax.scan` re-traces its body on every call. That cost dominated the stage —
-    warm `mle_scan` split as dispatch 1.537s vs block 0.043s, i.e. 97% host — so
-    the scan is built here, behind a cache, and reused across proves.
+    The unroll is compile-bounded where #33's was not because the round index is
+    now STATIC: each round lowers only the AIRs still live in it (round ≤ ñ_t),
+    plus one exhaustion-boundary eval per AIR — Σ ñ_t + T walks (~103 on the
+    real block), a ~5× body, not the naive T·n_max (~361). The liveness /
+    front-load ``fnp.where`` gates on the dynamic scan index become Python
+    branches selecting the SAME gated values, and each trace keeps the scan's
+    fixed-width buffer + stride-pair fold + zero re-pad — so every emitted op
+    matches the scan body's and the values are byte-identical.
 
-    Reuse demands the body close over statics ONLY: the per-prove challenges
+    Tracing still walks every live AIR's constraint DAG per round, so the fn is
+    built here behind a cache and reused across proves. Reuse demands the body
+    close over statics ONLY: the per-prove challenges
     (``lambda_pows``/``beta_pows``/``eq_3bs``/``mu_pows``) are arguments, not
     captures, or a cached body would replay the first prove's challenges and
     silently break byte-match. It captures ``air_statics`` — a per-AIR
@@ -607,28 +611,22 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
         eq_xi_xs,
         xi_cur_xs,
     ):
-        def step(carry, xs):
-            (
-                bufs_sels,
-                bufs_mats,
-                tilde_zc,
-                tilde_p,
-                tilde_q,
-                eq_n,
-                eq_sharp_n,
-                r_prev,
-                transcript,
-                prev_s_eval,
-                round_idx,
-            ) = carry
-            eq_xi_row, xi_cur = xs
+        bufs_sels = list(sels)
+        bufs_mats = [list(ms) for ms in mats]
+        tilde_zc = [zero] * num_traces
+        tilde_p = [zero] * num_traces
+        tilde_q = [zero] * num_traces
+        eq_n, eq_sharp_n = eq_n_0, eq_sharp_n_0
+        r_prev = r_0
+        round_polys_l: list[Array] = []
+        r_rounds_l: list[Array] = []
+
+        for round_idx in range(1, n_max + 1):
+            xi_cur = xi_cur_xs[round_idx - 1]
 
             sp_head_zc = [zero] * (s_deg - 1)
             sp_head_logup = [zero] * (s_deg - 1)
             sp_tail = zero
-            new_tilde_zc = list(tilde_zc)
-            new_tilde_p = list(tilde_p)
-            new_tilde_q = list(tilde_q)
 
             for t, ((dag_ref, nxt, pubs), n_lift) in enumerate(
                 zip(air_statics, n_lifts)
@@ -637,14 +635,12 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                 norm = norms[t]
                 mu_zc = mu_pows[2 * num_traces + t]
                 mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
-                is_head = round_idx <= n_lift  # live this round ⇔ in the head
 
-                if n_lift >= 1:
-                    # Live evals on {1..s_deg-1}; the body runs every round but its
-                    # head contribution is gated to round ≤ ñ_t. The fully-folded
-                    # f̂(r⃗) lands at acc[0,0] once the buffer is frozen (below), so
-                    # the tilde base reuses it — no second eval_nodes.
-                    eq_xi = eq_xi_row[t]
+                if n_lift >= 1 and round_idx <= n_lift:
+                    # Live round: head contributions. `round_idx` is static, so
+                    # the scan's is_head gate is this branch itself — the where
+                    # picked exactly these values here.
+                    eq_xi = eq_xi_xs[t][round_idx - 1]
                     sels_dom = round_dom.sample(bufs_sels[t][0::2], bufs_sels[t][1::2])
                     mats_dom = [
                         round_dom.sample(m[0::2], m[1::2]) for m in bufs_mats[t]
@@ -668,7 +664,7 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                         # `zorch.sumcheck.round` marker; `_ceval_folds` above stays
                         # its own `zorch.constraint_eval` composite. Byte-identical
                         # to the inline fold when no emitter claims the marker.
-                        head_zc_t, head_logup_t, zc0, p0t, q0t = zerocheck_round_reduce(
+                        head_zc_t, head_logup_t, _, _, _ = zerocheck_round_reduce(
                             acc,
                             numer,
                             denom,
@@ -681,66 +677,76 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
                             norm,
                             s_deg=s_deg,
                         )
-                        # The is_head round-liveness gate is applied HERE, not in
-                        # the marker: the marker returns the un-gated head, and
-                        # this cheap scalar select zeroes it past the AIR's live
-                        # rounds (kept outside so the marker body is a pure
-                        # reduce the emitter can collapse).
                         for i in range(s_deg - 1):
-                            sp_head_zc[i] = sp_head_zc[i] + fnp.where(
-                                is_head, head_zc_t[i], zero
-                            )
-                            sp_head_logup[i] = sp_head_logup[i] + fnp.where(
-                                is_head, head_logup_t[i], zero
-                            )
+                            sp_head_zc[i] = sp_head_zc[i] + head_zc_t[i]
+                            sp_head_logup[i] = sp_head_logup[i] + head_logup_t[i]
                     else:
                         # No interactions: only the zc head folds (the logup head
                         # would add field zero, so it is skipped, not marked).
                         zc = (acc * eq_xi[None, :]).sum(axis=1)
-                        zc0 = eq_n * _row0(acc)
-                        p0t = zero
-                        q0t = zero
                         for i in range(s_deg - 1):
-                            sp_head_zc[i] = sp_head_zc[i] + fnp.where(
-                                is_head, mu_zc * zc[i + 1], zero
-                            )
-                else:
-                    # Pure-tilde trace (height 1): eval over its single row.
-                    node0 = eval_nodes(
-                        dag,
-                        bufs_sels[t][0],
-                        _dag_parts([m[0] for m in bufs_mats[t]], nxt),
-                        pubs,
-                    )
-                    zc0 = eq_n * acc_constraints(dag, node0, lambda_pows)
-                    if dag.interactions:
-                        numer0, denom0 = acc_interactions(
-                            dag, node0, beta_pows, eq_3bs[t]
-                        )
-                        p0t = eq_sharp_n * numer0 * norm
-                        q0t = eq_sharp_n * denom0
-                    else:
-                        p0t = zero
-                        q0t = zero
+                            sp_head_zc[i] = sp_head_zc[i] + mu_zc * zc[i + 1]
+                    continue  # live ⇒ no tilde update, no tail term (scan gates)
 
-                # tilde carry: init f̂-term at round ñ_t+1, then ×r each later round.
-                is_init = round_idx == n_lift + 1
-                is_accum = round_idx > n_lift + 1
-                new_tilde_zc[t] = fnp.where(
-                    is_init, zc0, fnp.where(is_accum, tilde_zc[t] * r_prev, tilde_zc[t])
+                # Exhausted (round > ñ_t): tilde carry + tail. The scan computed
+                # the tilde bases every round and where-picked them at the init
+                # round; statically they are needed exactly once, at ñ_t+1, from
+                # the SAME frozen fixed-width buffers — the ops below are the
+                # scan body's own (zerocheck_round_reduce's zc0/p0t/q0t lines and
+                # the pure-tilde branch), so the values are byte-identical.
+                if round_idx == n_lift + 1:
+                    if n_lift >= 1:
+                        sels_dom = round_dom.sample(
+                            bufs_sels[t][0::2], bufs_sels[t][1::2]
+                        )
+                        mats_dom = [
+                            round_dom.sample(m[0::2], m[1::2]) for m in bufs_mats[t]
+                        ]
+                        acc, numer, denom = _ceval_folds(
+                            dag,
+                            nxt,
+                            pubs,
+                            sels_dom,
+                            mats_dom,
+                            lambda_pows,
+                            beta_pows,
+                            eq_3bs[t],
+                        )
+                        zc0 = eq_n * _row0(acc)
+                        if dag.interactions:
+                            p0t = eq_sharp_n * _row0(numer) * norm
+                            q0t = eq_sharp_n * _row0(denom)
+                        else:
+                            p0t = zero
+                            q0t = zero
+                    else:
+                        # Pure-tilde trace (height 1): eval over its single row.
+                        node0 = eval_nodes(
+                            dag,
+                            bufs_sels[t][0],
+                            _dag_parts([m[0] for m in bufs_mats[t]], nxt),
+                            pubs,
+                        )
+                        zc0 = eq_n * acc_constraints(dag, node0, lambda_pows)
+                        if dag.interactions:
+                            numer0, denom0 = acc_interactions(
+                                dag, node0, beta_pows, eq_3bs[t]
+                            )
+                            p0t = eq_sharp_n * numer0 * norm
+                            q0t = eq_sharp_n * denom0
+                        else:
+                            p0t = zero
+                            q0t = zero
+                    tilde_zc[t] = zc0
+                    tilde_p[t] = p0t
+                    tilde_q[t] = q0t
+                else:  # round > ñ_t + 1: accumulate ×r_prev
+                    tilde_zc[t] = tilde_zc[t] * r_prev
+                    tilde_p[t] = tilde_p[t] * r_prev
+                    tilde_q[t] = tilde_q[t] * r_prev
+                sp_tail = sp_tail + (
+                    mu_zc * tilde_zc[t] + mu_p * tilde_p[t] + mu_q * tilde_q[t]
                 )
-                new_tilde_p[t] = fnp.where(
-                    is_init, p0t, fnp.where(is_accum, tilde_p[t] * r_prev, tilde_p[t])
-                )
-                new_tilde_q[t] = fnp.where(
-                    is_init, q0t, fnp.where(is_accum, tilde_q[t] * r_prev, tilde_q[t])
-                )
-                tail_term = (
-                    mu_zc * new_tilde_zc[t]
-                    + mu_p * new_tilde_p[t]
-                    + mu_q * new_tilde_q[t]
-                )
-                sp_tail = sp_tail + fnp.where(is_head, zero, tail_term)
 
             # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
             sp_head_evals = [zero] * s_deg
@@ -770,62 +776,36 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
             batch_s_evals = eval_coeffs(coeffs_arr, domain_pts)
             transcript = transcript.observe(batch_s_evals)
             transcript, r_round = sample_ext(transcript)
-            new_prev_s_eval = eval_coeffs(coeffs_arr, r_round)
+            prev_s_eval = eval_coeffs(coeffs_arr, r_round)
 
-            # Fold MLEs (LSB pairing, re-pad zeros), frozen once the trace exhausts
-            # so the fully-folded f̂(r⃗) at index 0 survives for the tilde reads and
+            # Fold MLEs (LSB pairing, re-pad zeros); a trace folds only in its
+            # live rounds and freezes after (the scan's `live` where), so the
+            # fully-folded f̂(r⃗) at index 0 survives for the tilde reads and
             # the column openings.
-            new_bufs_sels = []
-            new_bufs_mats = []
             for t, n_lift in enumerate(n_lifts):
-                if n_lift >= 1:
-                    live = round_idx <= n_lift
+                if n_lift >= 1 and round_idx <= n_lift:
                     fs = _fold_pair(bufs_sels[t][0::2], bufs_sels[t][1::2], r_round)
-                    fs = fnp.concatenate([fs, fnp.zeros_like(fs)], axis=0)
-                    new_bufs_sels.append(fnp.where(live, fs, bufs_sels[t]))
-                    folded_m = []
-                    for m in bufs_mats[t]:
+                    bufs_sels[t] = fnp.concatenate([fs, fnp.zeros_like(fs)], axis=0)
+                    for i, m in enumerate(bufs_mats[t]):
                         fm = _fold_pair(m[0::2], m[1::2], r_round)
-                        fm = fnp.concatenate([fm, fnp.zeros_like(fm)], axis=0)
-                        folded_m.append(fnp.where(live, fm, m))
-                    new_bufs_mats.append(folded_m)
-                else:
-                    new_bufs_sels.append(bufs_sels[t])
-                    new_bufs_mats.append(list(bufs_mats[t]))
+                        bufs_mats[t][i] = fnp.concatenate(
+                            [fm, fnp.zeros_like(fm)], axis=0
+                        )
 
             eq_r = xi_cur * r_round + (one_ef - xi_cur) * (one_ef - r_round)
-            new_carry = (
-                new_bufs_sels,
-                new_bufs_mats,
-                new_tilde_zc,
-                new_tilde_p,
-                new_tilde_q,
-                eq_n * eq_r,
-                eq_sharp_n * eq_r,
-                r_round,
-                transcript,
-                new_prev_s_eval,
-                round_idx + 1,
-            )
-            return new_carry, (batch_s_evals, r_round)
+            eq_n = eq_n * eq_r
+            eq_sharp_n = eq_sharp_n * eq_r
+            r_prev = r_round
+            round_polys_l.append(batch_s_evals)
+            r_rounds_l.append(r_round)
 
-        init_carry = (
-            sels,
-            mats,
-            [zero] * num_traces,
-            [zero] * num_traces,
-            [zero] * num_traces,
-            eq_n_0,
-            eq_sharp_n_0,
-            r_0,
-            transcript,
-            prev_s_eval,
-            fnp.int32(1),
+        round_polys = (
+            fnp.stack(round_polys_l)
+            if round_polys_l
+            else fnp.zeros((0, s_deg), EF)
         )
-        final_carry, (round_polys, r_rounds) = lax.scan(
-            step, init_carry, (eq_xi_xs, xi_cur_xs), length=n_max
-        )
-        return final_carry[1], final_carry[8], round_polys, r_rounds
+        r_rounds = fnp.stack(r_rounds_l) if r_rounds_l else fnp.zeros((0,), EF)
+        return bufs_mats, transcript, round_polys, r_rounds
 
     _MLE_SCAN_FNS[key] = run
     # The key embeds every AIR's id(dag); collecting any one invalidates it, so
