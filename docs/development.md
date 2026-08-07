@@ -164,7 +164,11 @@ check of the wiring.
 The living baseline. Regenerate on every perf change and update the numbers so
 the ratios below stay honest. Measured on an **idle RTX 5090** over the real
 openvm fibonacci block (19 AIRs, `tools/real-block-gen`), `frx` pin
-`0.10.0.dev20260722120418`, byte-match **ALL OK**, `--runs=5` converged min:
+`0.10.1.dev20260731104240`, byte-match **ALL OK**, `--runs=5` converged min.
+The fixture is openvm v2.0.1 (`max_constraint_degree` 3) while the committed
+native baseline is v2.0.0 (degree 4) — the baseline regen is tracked in #153;
+the drift does not change the stacking/WHIR structure (`n_stack`, `l_skip`
+identical):
 
 ```sh
 FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -175,22 +179,23 @@ FRX_PLATFORMS=cuda CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 
 | stage | zorch warm | native openvm | zorch / native |
 |---|---|---|---|
-| trace commit | 5.5 ms | 4.4 ms | 1.3× |
-| LogUp-GKR | 32.9 ms | 7.2 ms | 4.6× |
-| zerocheck | 46.5 ms | 10.6 ms | 4.4× |
-| stacking | 44.9 ms | 6.2 ms | 7.2× |
-| WHIR | 21.4 ms | 6.0 ms | 3.6× |
-| **full prove** | **151 ms** | **34.3 ms** | **4.5×** |
+| trace commit | 5.1 ms | 4.4 ms | 1.2× |
+| LogUp-GKR | 22.1 ms | 7.2 ms | 3.1× |
+| zerocheck | 32.3 ms | 10.6 ms | 3.1× |
+| stacking | 3.6 ms | 6.2 ms | 0.6× |
+| WHIR | 29.1 ms | 6.0 ms | 4.9× |
+| **full prove** | **92 ms** | **34.3 ms** | **2.7×** |
 
 Native GKR is the `fractional_sumcheck` span; native zerocheck is
 `prove_zerocheck_and_logup − fractional_sumcheck` (GKR nests inside it). The five
 native per-stage bars sum to the `stark_prove_excluding_trace` e2e span.
-`verify_prove`'s host/device split locates the gap: zerocheck is the one
-**device-bound** stage (~43 ms device — the monomial-form `constraint_eval`
-body (#143, xla#304) plus the poseidon2 transcript, #138); every other stage is
-host-dispatch-bound — stacking, still the widest ratio (7.2×), is ~45 ms host /
-~0.3 ms device, ~21 ms of it the unrolled sumcheck fold gated on #44's capture
-lever (`OPENVM_STACKING_PROFILE=1` prints the region split; see #134).
+`verify_prove`'s host/device split locates the gap: stacking runs as one cached
+whole-stage jit (~2 ms host + ~1.5 ms device) and beats the native bar
+(`OPENVM_STACKING_PROFILE=1` routes it through the eager per-region body when a
+split is needed; see #134); zerocheck is roughly half host / half device
+(~14 ms device — the monomial-form `constraint_eval` body (#143, xla#304) plus
+the poseidon2 transcript, #138); GKR (#44) and WHIR (#129, now the widest
+ratio) are host-dispatch-bound.
 
 > **Native per-stage capture.** The native CUDA backend names its phase spans
 > differently from the CPU set — `_gpu`-suffixed for zerocheck/GKR,
