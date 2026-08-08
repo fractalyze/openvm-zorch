@@ -27,6 +27,13 @@ concurrency:
 
 jobs:
   bump:
+    # PAUSED 2026-08-07: the current frx wheels break either the commit-stage NTT
+    # (pre-#430 wheels, fractalyze/xla#427) or GKR (the #430 wheel, an HLO-verifier
+    # reshape RET_CHECK, fractalyze/xla#434) — no wheel proves end-to-end, so
+    # auto-bumping just re-breaks main (this is what #162/#169 did). Re-enable by
+    # removing this guard once a wheel carries xla#430's NTT fix AND
+    # fractalyze/xla#434's fix. main is pinned to 0.10.1.dev20260730045722 meanwhile.
+    if: ${{ false }}
     runs-on: [self-hosted, cpu]
     steps:
       - uses: actions/checkout@v4
