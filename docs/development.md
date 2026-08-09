@@ -47,6 +47,17 @@ per-stage-timing runnable, openvm's sibling of sp1-zorch's `verify_prove_shard`.
   cannot even import on a driverless machine. Therefore tests stay
   **backend-agnostic** (no cuda deps) so `bazel test //...` runs on any
   machine; GPU lives only in `bazel run` tools like `verify_prove`.
+- **Testing a locally-built xla plugin: `XLA_PJRT_PLUGIN` does NOT work under
+  `bazel run`.** frx's loader (`frx_plugins/xla_cuda12/__init__.py::_get_library_path`)
+  returns the **pip-bundled** `xla_cuda_plugin.so` and never reads that env var —
+  so a `bazel run` silently uses the stock plugin and your emitter change is never
+  exercised (it still byte-matches and times like stock — no error, no hint).
+  `XLA_PJRT_PLUGIN` is a **venv-only** mechanism. To exercise a modified xla
+  plugin, either run `verify_prove` in a venv (pip-install frx per
+  `requirements.in`, where the env var is honored), or build the plugin from the
+  xla commit the pinned `frx` was built from (a drop-in; a version-skewed plugin
+  fails to register the cuda backend). Always confirm which `.so` is loaded:
+  `strings <plugin.so> | grep -c <your-new-symbol>`.
 - `Proof` (and its stage sub-proofs) are plain dataclasses, not registered
   pytrees, so `frx.block_until_ready(proof)` is a **no-op** — walk the tree
   and block on the array leaves to time the device honestly.
