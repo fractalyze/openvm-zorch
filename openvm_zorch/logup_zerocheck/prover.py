@@ -48,7 +48,7 @@ from typing import Any
 
 import frx
 import frx.numpy as fnp
-from frx import Array
+from frx import Array, lax
 from zorch.constraint_eval import constraint_eval
 from zorch.poly.eq import eval_eq, expand_eq_to_hypercube
 from zorch.poly.univariate import compute_inv_vandermonde, eval_coeffs
@@ -536,10 +536,41 @@ def _round0_constraint_fns(dag, needs_next, public_values, l_skip, constraint_de
 
 _MLE_SCAN_FNS: dict[tuple, object] = {}
 
+# Size-gate for the MLE sumcheck rounds (openvm-zorch#168). The static unroll
+# (the default ``run`` below) wins on small AIR sets — light, host-bound fixtures
+# where collapsing the per-round dispatch is the whole point — but its module
+# scales with the TOTAL unrolled round count Σ ñ_t, so on heavy AIR sets it
+# explodes cold compile (zerocheck ~546 s on the 20-wide revm_transfer block) and
+# peak memory (the fused GKR/ZC graph OOMs a 32 GB GPU with command buffers on).
+# The bounded ``lax.scan`` path compiles once and holds a single round's
+# fixed-width working set, at a warm-runtime cost (per-iteration command-buffer
+# churn) that heavy real-EVM fixtures — host-bound regardless — absorb. Gate on
+# Σ ñ_t, the unroll's actual driver: measured real_fib=84 (unroll) vs
+# revm_transfer=244 (scan) on 2026-08-09, so a 128 boundary separates them with
+# margin. ``OPENVM_ZC_MLE_MODE=scan|unroll`` forces a path (calibration and the
+# scan-vs-unroll byte-match A/B); ``auto`` (default) uses the gate.
+_MLE_UNROLL_MAX_TOTAL_ROUNDS = 128
+_MLE_MODE = os.environ.get("OPENVM_ZC_MLE_MODE", "auto")
+
+
+def _mle_use_scan(n_lifts: Sequence[int]) -> bool:
+    """Whether to build the bounded ``lax.scan`` MLE rounds instead of the static
+    unroll for this AIR set (openvm-zorch#168, see ``_MLE_UNROLL_MAX_TOTAL_ROUNDS``)."""
+    if _MLE_MODE == "scan":
+        return True
+    if _MLE_MODE == "unroll":
+        return False
+    return sum(n_lifts) > _MLE_UNROLL_MAX_TOTAL_ROUNDS
+
 
 def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
-    """The MLE rounds 1..=n_max, statically UNROLLED in one jit, built once per
-    AIR set.
+    """The MLE rounds 1..=n_max, built once per AIR set as EITHER a static unroll
+    (small AIR sets) or a bounded ``lax.scan`` (heavy AIR sets), selected by
+    ``_mle_use_scan`` — see openvm-zorch#168 and the module note on
+    ``_MLE_UNROLL_MAX_TOTAL_ROUNDS``. The two paths are byte-identical; they trade
+    the unroll's collapsed per-round dispatch (fast warm, but compile and peak
+    memory grow with Σ ñ_t) against the scan's bounded compile and memory (one
+    round's fixed-width working set, at a per-iteration command-buffer warm cost).
 
     History: eager, every round was a fresh XLA shape → ~726 one-shot recompiles
     (#26); a naive unrolled jit regressed compile (#33 — its module carried every
@@ -570,11 +601,13 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
     module-cached closure would pin for the process lifetime. Same weak-DAG
     +`weakref.finalize` eviction and `id`-keying as ``_ROUND0_FNS``.
     """
+    use_scan = _mle_use_scan([max(n, 0) for n in n_per_trace])
     key = (
         tuple((id(a.dag), a.needs_next, a.public_values) for a in airs),
         tuple(n_per_trace),
         s_deg,
         n_max,
+        use_scan,
     )
     cached = _MLE_SCAN_FNS.get(key)
     if cached is not None:
@@ -595,6 +628,263 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
     n_lifts = [max(n, 0) for n in n_per_trace]
     norms = [f_to_ef(f_inv_const(1 << max(-n, 0))) for n in n_per_trace]
 
+    if use_scan:
+
+        @frx.jit
+        def run(
+            sels,
+            mats,
+            eq_n_0,
+            eq_sharp_n_0,
+            r_0,
+            transcript,
+            prev_s_eval,
+            lambda_pows,
+            beta_pows,
+            eq_3bs,
+            mu_pows,
+            eq_xi_xs,
+            xi_cur_xs,
+        ):
+            def step(carry, xs):
+                (
+                    bufs_sels,
+                    bufs_mats,
+                    tilde_zc,
+                    tilde_p,
+                    tilde_q,
+                    eq_n,
+                    eq_sharp_n,
+                    r_prev,
+                    transcript,
+                    prev_s_eval,
+                    round_idx,
+                ) = carry
+                eq_xi_row, xi_cur = xs
+
+                sp_head_zc = [zero] * (s_deg - 1)
+                sp_head_logup = [zero] * (s_deg - 1)
+                sp_tail = zero
+                new_tilde_zc = list(tilde_zc)
+                new_tilde_p = list(tilde_p)
+                new_tilde_q = list(tilde_q)
+
+                for t, ((dag_ref, nxt, pubs), n_lift) in enumerate(
+                    zip(air_statics, n_lifts)
+                ):
+                    dag = dag_ref()
+                    norm = norms[t]
+                    mu_zc = mu_pows[2 * num_traces + t]
+                    mu_p, mu_q = mu_pows[2 * t], mu_pows[2 * t + 1]
+                    is_head = round_idx <= n_lift  # live this round ⇔ in the head
+
+                    if n_lift >= 1:
+                        # Live evals on {1..s_deg-1}; the body runs every round but its
+                        # head contribution is gated to round ≤ ñ_t. The fully-folded
+                        # f̂(r⃗) lands at acc[0,0] once the buffer is frozen (below), so
+                        # the tilde base reuses it — no second eval_nodes.
+                        eq_xi = eq_xi_row[t]
+                        sels_dom = round_dom.sample(
+                            bufs_sels[t][0::2], bufs_sels[t][1::2]
+                        )
+                        mats_dom = [
+                            round_dom.sample(m[0::2], m[1::2]) for m in bufs_mats[t]
+                        ]
+                        # Per-round zc + logup folds via the same constraint_eval
+                        # markers round 0 uses (shared packed trace — one node walk
+                        # feeds both). Byte-identical to acc_constraints /
+                        # acc_interactions.
+                        acc, numer, denom = _ceval_folds(
+                            dag,
+                            nxt,
+                            pubs,
+                            sels_dom,
+                            mats_dom,
+                            lambda_pows,
+                            beta_pows,
+                            eq_3bs[t],
+                        )
+                        if dag.interactions:
+                            # The eq-weighted reduce (the per-AIR launch storm) as one
+                            # `zorch.sumcheck.round` marker; `_ceval_folds` above stays
+                            # its own `zorch.constraint_eval` composite. Byte-identical
+                            # to the inline fold when no emitter claims the marker.
+                            head_zc_t, head_logup_t, zc0, p0t, q0t = (
+                                zerocheck_round_reduce(
+                                    acc,
+                                    numer,
+                                    denom,
+                                    eq_xi,
+                                    eq_n,
+                                    eq_sharp_n,
+                                    mu_zc,
+                                    mu_p,
+                                    mu_q,
+                                    norm,
+                                    s_deg=s_deg,
+                                )
+                            )
+                            # The is_head round-liveness gate is applied HERE, not in
+                            # the marker: the marker returns the un-gated head, and
+                            # this cheap scalar select zeroes it past the AIR's live
+                            # rounds (kept outside so the marker body is a pure
+                            # reduce the emitter can collapse).
+                            for i in range(s_deg - 1):
+                                sp_head_zc[i] = sp_head_zc[i] + fnp.where(
+                                    is_head, head_zc_t[i], zero
+                                )
+                                sp_head_logup[i] = sp_head_logup[i] + fnp.where(
+                                    is_head, head_logup_t[i], zero
+                                )
+                        else:
+                            # No interactions: only the zc head folds (the logup head
+                            # would add field zero, so it is skipped, not marked).
+                            zc = (acc * eq_xi[None, :]).sum(axis=1)
+                            zc0 = eq_n * _row0(acc)
+                            p0t = zero
+                            q0t = zero
+                            for i in range(s_deg - 1):
+                                sp_head_zc[i] = sp_head_zc[i] + fnp.where(
+                                    is_head, mu_zc * zc[i + 1], zero
+                                )
+                    else:
+                        # Pure-tilde trace (height 1): eval over its single row.
+                        node0 = eval_nodes(
+                            dag,
+                            bufs_sels[t][0],
+                            _dag_parts([m[0] for m in bufs_mats[t]], nxt),
+                            pubs,
+                        )
+                        zc0 = eq_n * acc_constraints(dag, node0, lambda_pows)
+                        if dag.interactions:
+                            numer0, denom0 = acc_interactions(
+                                dag, node0, beta_pows, eq_3bs[t]
+                            )
+                            p0t = eq_sharp_n * numer0 * norm
+                            q0t = eq_sharp_n * denom0
+                        else:
+                            p0t = zero
+                            q0t = zero
+
+                    # tilde carry: init f̂-term at round ñ_t+1, then ×r each later round.
+                    is_init = round_idx == n_lift + 1
+                    is_accum = round_idx > n_lift + 1
+                    new_tilde_zc[t] = fnp.where(
+                        is_init,
+                        zc0,
+                        fnp.where(is_accum, tilde_zc[t] * r_prev, tilde_zc[t]),
+                    )
+                    new_tilde_p[t] = fnp.where(
+                        is_init,
+                        p0t,
+                        fnp.where(is_accum, tilde_p[t] * r_prev, tilde_p[t]),
+                    )
+                    new_tilde_q[t] = fnp.where(
+                        is_init,
+                        q0t,
+                        fnp.where(is_accum, tilde_q[t] * r_prev, tilde_q[t]),
+                    )
+                    tail_term = (
+                        mu_zc * new_tilde_zc[t]
+                        + mu_p * new_tilde_p[t]
+                        + mu_q * new_tilde_q[t]
+                    )
+                    sp_tail = sp_tail + fnp.where(is_head, zero, tail_term)
+
+                # s'(0) from s_j(0) + s_j(1) = s_{j-1}(r_{j-1}).
+                sp_head_evals = [zero] * s_deg
+                for i in range(s_deg - 1):
+                    sp_head_evals[i + 1] = (
+                        eq_n * sp_head_zc[i] + eq_sharp_n * sp_head_logup[i]
+                    )
+                eq_xi_0 = one_ef - xi_cur
+                sp_head_evals[0] = (
+                    prev_s_eval - xi_cur * sp_head_evals[1] - sp_tail
+                ) / eq_xi_0
+
+                sp_head = [
+                    sum((row[j] * sp_head_evals[j] for j in range(s_deg)), start=zero)
+                    for row in inv_vdm
+                ]
+                # batch_s = eq(ξ_cur, X)·s'_head(X) + s'_tail·X, in coefficient form.
+                coeffs = sp_head + [zero]
+                b = one_ef - xi_cur
+                a = xi_cur - b
+                for i in reversed(range(s_deg)):
+                    coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1]
+                coeffs[0] = coeffs[0] * b
+                coeffs[1] = coeffs[1] + sp_tail
+
+                coeffs_arr = fnp.stack(coeffs)
+                batch_s_evals = eval_coeffs(coeffs_arr, domain_pts)
+                transcript = transcript.observe(batch_s_evals)
+                transcript, r_round = sample_ext(transcript)
+                new_prev_s_eval = eval_coeffs(coeffs_arr, r_round)
+
+                # Fold MLEs (LSB pairing, re-pad zeros), frozen once the trace exhausts
+                # so the fully-folded f̂(r⃗) at index 0 survives for the tilde reads and
+                # the column openings.
+                new_bufs_sels = []
+                new_bufs_mats = []
+                for t, n_lift in enumerate(n_lifts):
+                    if n_lift >= 1:
+                        live = round_idx <= n_lift
+                        fs = _fold_pair(bufs_sels[t][0::2], bufs_sels[t][1::2], r_round)
+                        fs = fnp.concatenate([fs, fnp.zeros_like(fs)], axis=0)
+                        new_bufs_sels.append(fnp.where(live, fs, bufs_sels[t]))
+                        folded_m = []
+                        for m in bufs_mats[t]:
+                            fm = _fold_pair(m[0::2], m[1::2], r_round)
+                            fm = fnp.concatenate([fm, fnp.zeros_like(fm)], axis=0)
+                            folded_m.append(fnp.where(live, fm, m))
+                        new_bufs_mats.append(folded_m)
+                    else:
+                        new_bufs_sels.append(bufs_sels[t])
+                        new_bufs_mats.append(list(bufs_mats[t]))
+
+                eq_r = xi_cur * r_round + (one_ef - xi_cur) * (one_ef - r_round)
+                new_carry = (
+                    new_bufs_sels,
+                    new_bufs_mats,
+                    new_tilde_zc,
+                    new_tilde_p,
+                    new_tilde_q,
+                    eq_n * eq_r,
+                    eq_sharp_n * eq_r,
+                    r_round,
+                    transcript,
+                    new_prev_s_eval,
+                    round_idx + 1,
+                )
+                return new_carry, (batch_s_evals, r_round)
+
+            init_carry = (
+                sels,
+                mats,
+                [zero] * num_traces,
+                [zero] * num_traces,
+                [zero] * num_traces,
+                eq_n_0,
+                eq_sharp_n_0,
+                r_0,
+                transcript,
+                prev_s_eval,
+                fnp.int32(1),
+            )
+            final_carry, (round_polys, r_rounds) = lax.scan(
+                step, init_carry, (eq_xi_xs, xi_cur_xs), length=n_max
+            )
+            return final_carry[1], final_carry[8], round_polys, r_rounds
+
+        _MLE_SCAN_FNS[key] = run
+        for a in airs:
+            weakref.finalize(a.dag, _MLE_SCAN_FNS.pop, key, None)
+        return run
+
+    # Static unroll — the default for small AIR sets (Σ ñ_t at or below the
+    # gate). The body below inlines each round with a static index; the
+    # ``lax.scan`` branch above is the byte-identical bounded form used on
+    # heavy AIR sets (openvm-zorch#168).
     @frx.jit
     def run(
         sels,
@@ -800,9 +1090,7 @@ def _mle_scan_fn(airs, n_per_trace, s_deg, n_max):
             r_rounds_l.append(r_round)
 
         round_polys = (
-            fnp.stack(round_polys_l)
-            if round_polys_l
-            else fnp.zeros((0, s_deg), EF)
+            fnp.stack(round_polys_l) if round_polys_l else fnp.zeros((0, s_deg), EF)
         )
         r_rounds = fnp.stack(r_rounds_l) if r_rounds_l else fnp.zeros((0,), EF)
         return bufs_mats, transcript, round_polys, r_rounds
