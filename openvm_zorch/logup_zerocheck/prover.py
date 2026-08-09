@@ -1457,6 +1457,36 @@ def _stage_body(
 _STAGE_FNS: dict[tuple, Callable[..., tuple[Any, Any]]] = {}
 
 
+# Size-gate for the whole-stage jit (openvm-zorch#174). Folding the whole stage
+# into one cached jit collapses the inter-region host dispatch — a large win on
+# light, host-bound AIR sets (real_fib), where the stage is host-dispatch-bound.
+# But the single fused module's cold-compile time and peak memory grow with the
+# stage's total work: on
+# heavy AIR sets (revm_transfer) its cold compile explodes (~466s — the dominant
+# zerocheck cost left after #168's MLE-round gate) and its peak memory OOMs at the
+# default GPU budget. The eager ``_stage_body`` path compiles as many small cached
+# kernels instead (round-0 per AIR, the #168 size-gated MLE scan) with bounded
+# compile and memory, trading back the inter-kernel dispatch the jit collapses —
+# negligible on heavy AIR sets, which are compile/memory-bound, not dispatch-bound.
+#
+# Gated on the same Σ ñ_t signal as the MLE rounds (``_MLE_UNROLL_MAX_TOTAL_ROUNDS``):
+# measured real_fib=84 (jit) vs revm_transfer=244 (eager), so the shared 128
+# boundary separates them with margin. ``OPENVM_ZC_STAGE_MODE=jit|eager`` forces a
+# path (calibration and the jit-vs-eager byte-match A/B); ``auto`` (default) gates.
+_STAGE_MODE = os.environ.get("OPENVM_ZC_STAGE_MODE", "auto")
+
+
+def _stage_use_eager(n_per_trace: Sequence[int]) -> bool:
+    """Whether to run the stage as the eager ``_stage_body`` (many small cached
+    kernels, bounded compile+memory) instead of the whole-stage jit for this AIR
+    set (openvm-zorch#174, see ``_STAGE_MODE`` and the module note above)."""
+    if _STAGE_MODE == "eager":
+        return True
+    if _STAGE_MODE == "jit":
+        return False
+    return sum(max(n, 0) for n in n_per_trace) > _MLE_UNROLL_MAX_TOTAL_ROUNDS
+
+
 def _stage_cache_key(
     l_skip: int, n_logup: int, max_constraint_degree: int, airs: list[AirData]
 ) -> tuple:
@@ -1550,6 +1580,34 @@ def _assemble_proof(arrays: tuple) -> BatchConstraintProof:
     )
 
 
+def _run_stage_eager(
+    transcript: DuplexTranscript,
+    l_skip: int,
+    n_logup: int,
+    airs: list[AirData],
+    xi: list[Array],
+    beta: Array,
+    max_constraint_degree: int,
+    profiler: _ZcProfiler | _NullProfiler,
+) -> tuple[DuplexTranscript, BatchConstraintProof]:
+    """Run the stage as the eager ``_stage_body`` — host-int caches prewarmed, its
+    round-0 / MLE-scan sub-kernels built eagerly (no outer trace to leak tracers
+    into, unlike ``_build_stage_jit``). Shared by the ``OPENVM_ZC_PROFILE`` region
+    split and the heavy-AIR-set size-gate (openvm-zorch#174)."""
+    _prewarm_prism(l_skip, airs)
+    transcript, arrays = _stage_body(
+        transcript,
+        l_skip,
+        n_logup,
+        airs,
+        xi,
+        beta,
+        max_constraint_degree,
+        profiler,
+    )
+    return transcript, _assemble_proof(arrays)
+
+
 def prove_batch_constraints(
     transcript: DuplexTranscript,
     l_skip: int,
@@ -1566,11 +1624,13 @@ def prove_batch_constraints(
     across proves via the module-global ``_STAGE_FNS`` (keyed on ``id(dag)``, so a
     freshly assembled chain over the same verifying key reuses it — the reuse that
     ``verify_prove``'s warm pass and repeated proves both depend on).
-    ``OPENVM_ZC_PROFILE=1`` routes through the eager body instead, for the
-    per-region host/device split (the jit erases the region boundaries)."""
+    ``OPENVM_ZC_PROFILE=1`` routes through the eager body for the per-region
+    host/device split (the jit erases the region boundaries); heavy AIR sets also
+    take the eager body via the ``_stage_use_eager`` size-gate (openvm-zorch#174),
+    where the fused module's cold compile + peak memory blow up for no dispatch
+    win."""
     if _ZC_PROFILE:
-        _prewarm_prism(l_skip, airs)
-        transcript, arrays = _stage_body(
+        return _run_stage_eager(
             transcript,
             l_skip,
             n_logup,
@@ -1580,7 +1640,19 @@ def prove_batch_constraints(
             max_constraint_degree,
             _ZcProfiler(),
         )
-        return transcript, _assemble_proof(arrays)
+
+    n_per_trace = [log2_strict_usize(a.trace.shape[0]) - l_skip for a in airs]
+    if _stage_use_eager(n_per_trace):
+        return _run_stage_eager(
+            transcript,
+            l_skip,
+            n_logup,
+            airs,
+            xi,
+            beta,
+            max_constraint_degree,
+            _NULL_PROFILER,
+        )
 
     key = _stage_cache_key(l_skip, n_logup, max_constraint_degree, airs)
     run = _STAGE_FNS.get(key)
