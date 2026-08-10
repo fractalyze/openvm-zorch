@@ -167,8 +167,9 @@ the ratios below stay honest. Measured on an **idle RTX 5090** over the real
 openvm fibonacci block (19 AIRs, `tools/real-block-gen`), `frx` pin
 `0.10.1.dev20260731104240`, byte-match **ALL OK**, `--runs=5` converged min.
 The fixture is openvm v2.0.1 (`max_constraint_degree` 3) while the committed
-native baseline is v2.0.0 (degree 4) — the baseline regen is tracked in #153;
-the drift does not change the stacking/WHIR structure (`n_stack`, `l_skip`
+native baseline is v2.0.0 (degree 4) — the baseline regen is tracked in #178
+(the native-parity effort regenerates it against the current fixture); the
+drift does not change the stacking/WHIR structure (`n_stack`, `l_skip`
 identical):
 
 ```sh
@@ -197,6 +198,19 @@ split is needed; see #134); zerocheck is roughly half host / half device
 (~14 ms device — the monomial-form `constraint_eval` body (#143, xla#304) plus
 the poseidon2 transcript, #138); GKR (#44) and WHIR (#129, now the widest
 ratio) are host-dispatch-bound.
+
+GKR's per-round arithmetic now lowers through the fused `zorch.sumcheck.round`
+value_skip0 kernel (#171, xla#438/#452/#456); an idle-box same-wheel A/B measured
+it **perf-neutral** against the unfused reduce (fused 16.1 ms ≈ unfused 15.5 ms
+warm) — round fusion does not close the gap, because the residual is the host
+Fiat-Shamir / Poseidon2 sponge (~120 sequential observe/sample, ~55% of the
+stage), not round arithmetic. Closing to native needs an off-frx fused round
+kernel that carries the sponge as one device unit (#178). Rejected levers, not to
+re-attempt: CUDA-graph / command-buffer capture (net wash + WHIR OOM, measured
+twice in #44), `lax.scan` over rounds (XLA lowers it to a runtime While that still
+launches per iteration — regresses), and host-FS (eager-only; `observe`/`sample`
+need a concrete host sponge state, `ConcretizationTypeError` under the jitted
+layer zone).
 
 > **Native per-stage capture.** The native CUDA backend names its phase spans
 > differently from the CPU set — `_gpu`-suffixed for zerocheck/GKR,
