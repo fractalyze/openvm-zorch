@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import frx.numpy as fnp
 from frx import Array, lax
+from hash_frx.poseidon2.poseidon2 import Poseidon2
 from zk_dtypes import babybear_mont as F
 from zk_dtypes import babybearx4_mont as EF
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
 from zorch.transcript import DuplexTranscript, sample_challenge
 
 from openvm_zorch.poseidon2.babybear16 import babybear16_params

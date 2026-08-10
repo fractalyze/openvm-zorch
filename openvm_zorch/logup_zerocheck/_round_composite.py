@@ -31,7 +31,7 @@ recognizes ``variant="openvm-zerocheck"``.
 from __future__ import annotations
 
 from frx import Array
-from zorch._composite import composite
+from hash_frx._composite import composite
 from zorch.sumcheck.prover import (
     SUMCHECK_ROUND_MARKER,
     SUMCHECK_ROUND_MARKER_VERSION,

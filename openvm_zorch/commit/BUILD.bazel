@@ -39,9 +39,8 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "@zorch//zorch/commit:strided_merkle",
-        "@zorch//zorch/hash:compression",
-        "@zorch//zorch/hash:sponge",
         requirement("frx"),
+        requirement("hash_frx"),
     ],
 )
 
@@ -54,9 +53,8 @@ py_library(
         ":rs_message",
         ":stacked_merkle",
         ":stacking",
-        "@zorch//zorch/hash:compression",
-        "@zorch//zorch/hash:sponge",
         requirement("frx"),
+        requirement("hash_frx"),
     ],
 )
 

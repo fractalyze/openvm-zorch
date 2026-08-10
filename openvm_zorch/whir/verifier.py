@@ -15,11 +15,11 @@ from typing import Sequence
 
 import frx.numpy as fnp
 from frx import Array, lax
+from hash_frx.compression import Compression
+from hash_frx.sponge import Sponge
 from zorch.coding.reed_solomon import ReedSolomon
 from zorch.commit.merkle import Opening
 from zorch.commit.strided_merkle import StridedMerkleTree
-from zorch.hash.compression import Compression
-from zorch.hash.sponge import Sponge
 from zorch.pcs.stage import OpeningClaim, OpeningProof
 from zorch.pcs.whir.config import WhirParams
 from zorch.pcs.whir.config import WhirProof as GenericWhirProof

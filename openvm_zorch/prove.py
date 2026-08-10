@@ -31,9 +31,9 @@ from typing import Sequence
 
 import frx.numpy as fnp
 from frx import Array
+from hash_frx.compression import Compression
+from hash_frx.sponge import Sponge
 from zk_dtypes import babybear_mont as F
-from zorch.hash.compression import Compression
-from zorch.hash.sponge import Sponge
 from zorch.stage import ProveResult, ProverStage, TrivialClaim
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
