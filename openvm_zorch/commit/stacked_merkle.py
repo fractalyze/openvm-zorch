@@ -26,9 +26,9 @@ from dataclasses import dataclass
 import frx
 import frx.numpy as fnp
 from frx import Array
+from hash_frx.compression import Compression
+from hash_frx.sponge import Sponge
 from zorch.commit.strided_merkle import StridedMerkleTree
-from zorch.hash.compression import Compression
-from zorch.hash.sponge import Sponge
 
 
 @dataclass(frozen=True)

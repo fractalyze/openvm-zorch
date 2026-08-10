@@ -24,8 +24,9 @@ common --override_module=zorch=/abs/path/to/your/zorch/checkout
 
 Bump the pin when you need newer `zorch` blocks; keep it on `main` commits so
 CI is reproducible. A pin bump's commit range often also moves `zorch`'s own
-frx wheel pins (`frx`/`frxlib`/`frx-cuda12-pjrt`) — that does **not** force a
-matching bump here. This repo pins those wheels independently in
+wheel pins for the distributions this repo shares with it (`frx`/`frxlib`/
+`frx-cuda12-pjrt`, and `hash-frx` for the symmetric layer) — that does **not**
+force a matching bump here. This repo pins those wheels independently in
 `requirements.in`, on a separate pip hub from `zorch`'s, and their **versions**
 are allowed to skew — the distribution *name* must match, or the two hubs put
 `jax` and `frx` on one interpreter as two separate modules. Only touch

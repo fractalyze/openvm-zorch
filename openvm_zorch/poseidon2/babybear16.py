@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import frx.numpy as fnp
 import numpy as np
+from hash_frx.compression import Compression, CompressionParams
+from hash_frx.poseidon2.params import Poseidon2Params
+from hash_frx.poseidon2.poseidon2 import Poseidon2
+from hash_frx.sponge import Sponge, SpongeParams
 from zk_dtypes import babybear_mont as F
-from zorch.hash.compression import Compression, CompressionParams
-from zorch.hash.poseidon2.params import Poseidon2Params
-from zorch.hash.poseidon2.poseidon2 import Poseidon2
-from zorch.hash.sponge import Sponge, SpongeParams
 
 _WIDTH, _ER, _IR, _ALPHA = 16, 4, 13, 7
 

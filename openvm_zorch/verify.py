@@ -43,8 +43,8 @@ from __future__ import annotations
 from typing import Sequence
 
 from frx import Array
-from zorch.hash.compression import Compression
-from zorch.hash.sponge import Sponge
+from hash_frx.compression import Compression
+from hash_frx.sponge import Sponge
 from zorch.stage import TrivialClaim, VerifierStage, VerifyResult
 from zorch.transcript import DuplexTranscript
 

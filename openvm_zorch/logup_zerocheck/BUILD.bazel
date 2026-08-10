@@ -55,7 +55,7 @@ py_library(
         "//openvm_zorch:transcript",
         "//openvm_zorch:types",
         "//openvm_zorch/logup_gkr:input_layer",
-        "@zorch//zorch:_composite",
+        requirement("hash_frx"),
         "@zorch//zorch:constraint_eval",
         "@zorch//zorch:transcript",
         "@zorch//zorch/poly",
