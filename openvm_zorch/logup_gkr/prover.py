@@ -35,6 +35,7 @@ from zorch.sumcheck.domain import fold
 from zorch.transcript import DuplexTranscript
 from zorch.utils.bits import log2_strict_usize
 
+from openvm_zorch.logup_gkr._round_composite import frac_round, round_poly
 from openvm_zorch.logup_gkr.input_layer import gkr_input_evals
 from openvm_zorch.transcript import grind, sample_ext
 from openvm_zorch.types import (
@@ -58,27 +59,14 @@ from openvm_zorch.types import (
 # the host dispatches once per layer, not ~3× per round: the stage is
 # host-launch-bound on GPU, and the O(rounds²) island launches dominated it.
 # The price is Poseidon2 re-lowering once per layer width at compile time —
-# amortized by FRX_COMPILATION_CACHE_DIR (#120).
+# amortized by FRX_COMPILATION_CACHE_DIR (#120). Within that zone each round's
+# fold+round_poly is a `zorch.sumcheck.round` marker (`frac_round`) so the
+# recognizing emitter fuses the round's hundreds of tiny lift/product/fold
+# launches into one kernel (#153) — the residual host-launch floor #154 left.
 #
-# Round poly degree: eq (deg 1) * projective fraction addition (deg 2) = 3, so
-# four evals {0,1,2,3} determine it — but the prover sends only {1,2,3} (the
-# verifier infers s(0) from the running claim s(0)+s(1) = prev). Lifting to the
-# SENT domain skips the discarded u=0 across all five MLEs.
-_SENT_US = (1, 2, 3)
-
-
-def _lift_sent(state: Array) -> Array:
-    """Lift the paired state to the SENT eval domain ``{1,2,3}`` (skips u=0).
-
-    ``state`` is the stacked ``(5, W)`` round state; the LSB pairing splits it
-    to ``lo``/``hi`` ``(5, W/2)`` and ``f[u] = lo + u*(hi - lo)`` lifts all
-    five MLEs in ONE broadcast FMA, shape ``(3, 5, W/2)`` — a kernel-count
-    lever: the per-MLE lift was 5 slices + 5 FMAs per round. ``us`` uses
-    ``fnp.stack`` (not ``fnp.arange``, whose iota is unsupported for extension
-    dtypes)."""
-    lo, hi = state[:, 0::2], state[:, 1::2]
-    us = fnp.stack([fnp.array(u, dtype=lo.dtype) for u in _SENT_US])
-    return lo + us.reshape((-1, 1, 1)) * (hi - lo)
+# The sent round poly's degree-3 eval domain {1,2,3} and the LSB-pairing lift
+# (`round_poly`/`_lift_sent`) live in `_round_composite` -- shared by the eager
+# first round here and the per-round `frac_round` marker decomposition.
 
 
 @frx.jit
@@ -105,16 +93,6 @@ def _observe_sample(
     return sample_ext(transcript.observe(values))
 
 
-def _round_poly(state: Array, lam: Array) -> Array:
-    """The sent round poly s(1,2,3). λ weights the denominator term — opposite of
-    logup_combine. Binds the LSB: pairs adjacent entries (the reference's MLE
-    fold). Field ops are exact, so the batched lift/products are byte-identical
-    to the former per-MLE form."""
-    f = _lift_sent(state)  # (3, 5, W/2)
-    eq, p0, q0, p1, q1 = (f[:, i] for i in range(5))
-    return fnp.sum(eq * ((p0 * q1 + p1 * q0) + lam * (q0 * q1)), axis=-1)
-
-
 @frx.jit
 def _prove_layer(
     transcript: DuplexTranscript,
@@ -129,22 +107,36 @@ def _prove_layer(
     ``len(xi)`` — the layer's round count — is pytree STRUCTURE, so the round
     loop unrolls statically at trace time and frx retraces once per layer
     (widths and xi length differ layer to layer). No ``lax.scan``: a runtime
-    While is a fusion barrier that leaves one launch per round; unrolled, XLA
-    fuses the inter-round Fiat-Shamir glue and the host dispatches once per
-    layer. Same field algebra in the same transcript order as the former
-    per-round islands — byte-identical (field ops are exact)."""
+    While is a fusion barrier that leaves one launch per round.
+
+    Each round r>=1 wraps its ``fold(ρ_{r-1}) + round_poly`` in a
+    ``zorch.sumcheck.round`` marker (``frac_round``) so a recognizing emitter
+    fuses the round's hundreds of tiny lift/product/fold kernels into one; the
+    first round (no prior fold to defer) and the trailing claim-fold stay eager —
+    a handful of launches off the O(rounds) marker path. Byte-identical to the
+    former per-round islands: the marker decomposes to the same ``fold`` then
+    ``round_poly`` field algebra, in the same transcript order (field ops are
+    exact, so the deferred fold reassociates to the identical bytes)."""
     transcript, lam = sample_ext(transcript)
     # One (5, W) stack so each round's lift and fold are ONE broadcast op over
     # all five MLEs, not five — `fold` is ndim-agnostic over the last axis.
     state = fnp.stack([_eq_table(xi), n0, d0, n1, d1])
     rho: list[Array] = []
     round_polys = []
-    for _ in range(len(xi)):
-        s_evals = _round_poly(state, lam)
+    # Round 0: reduce the un-folded state (no prior challenge to fold by).
+    s_evals = round_poly(state, lam)
+    transcript, r_round = sample_ext(transcript.observe(s_evals))
+    rho.append(r_round)
+    round_polys.append(s_evals)
+    # Rounds 1..R-1: the fused fold(prev ρ) + round_poly marker. Each folds the
+    # state by the previous round's challenge, then reduces the folded state.
+    for _ in range(1, len(xi)):
+        s_evals, state = frac_round(state, lam, rho[-1])
         transcript, r_round = sample_ext(transcript.observe(s_evals))
-        state = fold(state, r_round, msb=False)
         rho.append(r_round)
         round_polys.append(s_evals)
+    # Trailing fold by the last challenge → the length-1 claims.
+    state = fold(state, rho[-1], msb=False)
     # Wire order (p_xi_0, q_xi_0, p_xi_1, q_xi_1); each folded MLE is length 1.
     claims = state[1:, 0]
     transcript, mu = sample_ext(transcript.observe(claims))
