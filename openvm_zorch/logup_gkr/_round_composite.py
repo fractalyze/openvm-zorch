@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import frx.numpy as fnp
 from frx import Array
-from zorch._composite import composite
+from hash_frx._composite import composite
 from zorch.sumcheck.domain import fold
 from zorch.sumcheck.prover import (
     SUMCHECK_ROUND_MARKER,
