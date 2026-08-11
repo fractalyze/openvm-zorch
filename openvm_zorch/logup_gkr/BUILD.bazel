@@ -39,13 +39,13 @@ py_library(
     deps = [
         "//openvm_zorch:transcript",
         "//openvm_zorch:types",
-        "@zorch//zorch:_composite",
         "@zorch//zorch:transcript",
         "@zorch//zorch/logup_gkr",
         "@zorch//zorch/poly",
         "@zorch//zorch/sumcheck",
         "@zorch//zorch/utils:bits",
         requirement("frx"),
+        requirement("hash_frx"),
     ],
 )
 
