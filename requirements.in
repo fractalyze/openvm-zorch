@@ -11,17 +11,17 @@
 # zorch".
 absl-py
 numpy
-frx==0.10.1.dev20260810060834
-frxlib==0.10.1.dev20260810060834
-frx-cuda12-pjrt==0.10.1.dev20260810060834
-frx-cuda12-plugin==0.10.1.dev20260810060834
+frx==0.10.2.dev20260818233737
+frxlib==0.10.2.dev20260818233737
+frx-cuda12-pjrt==0.10.2.dev20260818233737
+frx-cuda12-plugin==0.10.2.dev20260818233737
 zk-dtypes==0.0.10
 
 # The symmetric layer (permutations, sponges, compressions). It sits BELOW
 # `zorch`, which imports it rather than owning a copy, so this repo takes it
 # directly rather than through `zorch` — the same distribution-name rule as frx
 # above applies: the name must track what the `zorch` pin depends on.
-hash-frx==0.1.0.dev20260810004122
+hash-frx==0.2.0.dev20260819071642
 
 # Benchmark harness (shared across fractalyze repos); used only by the
 # //openvm_zorch/logup_gkr:bench_logup_gkr_phases py_binary, not by any test.
